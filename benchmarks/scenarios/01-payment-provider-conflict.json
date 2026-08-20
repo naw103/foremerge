@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "id": "payment-provider-replace-versus-extend",
+  "title": "Payment service replacement collides with provider extension",
+  "category": "intent-conflict",
+  "description": "Two agents have individually reasonable plans that imply incompatible ownership of PaymentService.",
+  "agents": [
+    {
+      "label": "agent-a",
+      "task": "Modernize payment processing",
+      "intent": "Replace PaymentService with StripePaymentService",
+      "scopes": [
+        {
+          "kind": "symbol",
+          "key": "PaymentService"
+        },
+        {
+          "kind": "contract",
+          "key": "payments.provider"
+        }
+      ]
+    },
+    {
+      "label": "agent-b",
+      "task": "Add another payment option",
+      "intent": "Add PayPal support to PaymentService",
+      "scopes": [
+        {
+          "kind": "symbol",
+          "key": "PaymentService"
+        },
+        {
+          "kind": "contract",
+          "key": "payments.provider"
+        }
+      ]
+    }
+  ],
+  "ground_truth": {
+    "should_warn": true,
+    "conflict_class": "replace-versus-extend",
+    "severity": "high",
+    "must_be_detectable_before_code": true,
+    "required_suggestion_terms": [
+      "PaymentProvider"
+    ],
+    "rationale": "Replacing the service removes or narrows the extension point that the PayPal task expects to modify."
+  },
+  "success_criteria": [
+    "A conflict is returned while both worktrees still have clean diffs.",
+    "The evidence identifies PaymentService or the payments.provider contract.",
+    "The suggested coordination includes a PaymentProvider-style abstraction.",
+    "Both semantic claims remain advisory and are recorded."
+  ]
+}

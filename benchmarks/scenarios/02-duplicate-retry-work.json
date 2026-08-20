@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "id": "duplicate-api-retry-policy",
+  "title": "Two agents independently implement the same retry policy",
+  "category": "duplicate-work",
+  "description": "Semantically equivalent tasks use different wording but target the same component and behavior.",
+  "agents": [
+    {
+      "label": "agent-a",
+      "task": "Make transient API failures resilient",
+      "intent": "Implement exponential backoff with jitter in ApiClient",
+      "scopes": [
+        {
+          "kind": "component",
+          "key": "ApiClient"
+        },
+        {
+          "kind": "config",
+          "key": "api.retry_policy"
+        }
+      ]
+    },
+    {
+      "label": "agent-b",
+      "task": "Reduce errors from rate limits",
+      "intent": "Add jittered retry and exponential delay to outbound API requests",
+      "scopes": [
+        {
+          "kind": "component",
+          "key": "ApiClient"
+        },
+        {
+          "kind": "config",
+          "key": "api.retry_policy"
+        }
+      ]
+    }
+  ],
+  "ground_truth": {
+    "should_warn": true,
+    "conflict_class": "duplicate-work",
+    "severity": "medium",
+    "must_be_detectable_before_code": true,
+    "required_suggestion_terms": [
+      "coordinate"
+    ],
+    "rationale": "Both tasks implement the same retry behavior in the same component."
+  },
+  "success_criteria": [
+    "A duplicate-work warning appears before both agents publish ChangeSets.",
+    "The agents can record which task will own the shared retry policy.",
+    "The non-owning task can be re-scoped or discarded without losing provenance."
+  ]
+}

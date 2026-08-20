@@ -1,0 +1,45 @@
+[package]
+name = "foremerge"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "The open-source coordination protocol for autonomous software engineering"
+license = "Apache-2.0"
+keywords = ["agents", "git", "mcp", "coordination", "developer-tools"]
+categories = ["command-line-utilities", "development-tools"]
+
+[lib]
+name = "foremerge"
+path = "src/lib.rs"
+
+[[bin]]
+name = "foremerge"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+axum = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+libc = "0.2"
+regex = "1.11"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "net", "process", "signal", "time", "io-util", "io-std"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.18", features = ["v4", "serde"] }
+
+[dev-dependencies]
+assert_cmd = "2.0"
+http-body-util = "0.1"
+predicates = "3.1"
+tempfile = "3.21"
+tower = { version = "0.5", features = ["util"] }
+
+[profile.release]
+lto = "thin"
+strip = true

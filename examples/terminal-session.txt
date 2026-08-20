@@ -1,0 +1,48 @@
+ACTUAL RELEASE-BINARY DEMO CAPTURE — Foremerge 0.1.0 — 2026-08-15
+This is an abridged excerpt from `FOREMERGE_BIN=target/release/foremerge
+./scripts/demo.sh`. IDs came from the disposable Git repository created by the
+script. No expected-output placeholders are used below.
+
+$ FOREMERGE_BIN=target/release/foremerge ./scripts/demo.sh
+
+1. Two agents, two isolated Git worktrees, one shared coordination store
+stripe-agent: agt_77cd75bdaff24b42b07232e2132f8662
+paypal-agent: agt_63e76b432f0a45b786e5cdcdfea2c6b9
+
+2. Agent A publishes a replacement intent before editing
+summary: Replace PaymentService with StripePaymentService
+conflicts: []
+
+3. Agent B publishes an extension intent; Foremerge catches the collision
+{
+  "evidence": {
+    "detected_before_code": true,
+    "overlap": "exact semantic scope",
+    "rule": "FM-C001",
+    "source_operation": "extend",
+    "target_operation": "replace"
+  },
+  "explanation": "One intent will replace `PaymentService` while the other will extend it; both rely on exact semantic scope.",
+  "id": "cfl_4b6ac55faab040ff9b9d40b501d21104",
+  "kind": "replace_vs_extend",
+  "scope": {"key": "PaymentService", "kind": "symbol"},
+  "score": 0.989,
+  "severity": "HIGH",
+  "status": "OPEN",
+  "suggestion": "Coordinate on a stable `PaymentProvider` contract first, then implement StripePaymentProvider and PayPalPaymentProvider behind it and migrate callers deliberately. This is a heuristic suggestion, not an automatic design decision."
+}
+
+4. The conflict exists before either worktree has a code diff
+stripe worktree dirty: no
+paypal worktree dirty: no
+ChangeSets published: 0
+
+5. Agents coordinate around the suggested PaymentProvider abstraction
+message: Propose PaymentProvider first; Stripe and PayPal become implementations.
+status: UNREAD
+
+6. Shared work query answers who owns the semantic area
+paypal-agent: Add PayPal support to PaymentService (open_conflicts: 1)
+stripe-agent: Replace PaymentService with StripePaymentService (open_conflicts: 1)
+
+Conflict cfl_4b6ac55faab040ff9b9d40b501d21104 was detected before either agent changed code.

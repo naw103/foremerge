@@ -1,0 +1,654 @@
+openapi: 3.1.0
+info:
+  title: Foremerge local JSON API
+  version: 0.1.0
+  description: >-
+    Local-first semantic coordination API above Git. Successful responses use
+    an ok/data envelope. All versioned routes require bearer authentication when
+    the daemon is started with its default authenticated configuration.
+servers:
+  - url: http://127.0.0.1:47811
+    description: Default loopback daemon
+security:
+  - bearerAuth: []
+paths:
+  /healthz:
+    get:
+      operationId: health
+      summary: Check process, database counts, and event-chain health
+      security: []
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/events:
+    get:
+      operationId: listEvents
+      summary: Read append-only semantic events
+      parameters:
+        - name: after_seq
+          in: query
+          schema:
+            type: integer
+            format: int64
+            default: 0
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/graph:
+    get:
+      operationId: getGraph
+      summary: Read the materialized semantic graph
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/work:
+    get:
+      operationId: queryWork
+      summary: Query intents, owners, claims, ChangeSets, and conflicts
+      parameters:
+        - name: agent_id
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: scope
+          in: query
+          description: A KIND:KEY semantic scope
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 50
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/work/{id}/start:
+    post:
+      operationId: startWork
+      summary: Transition a claimed intent to IN_PROGRESS
+      parameters:
+        - $ref: "#/components/parameters/IntentId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentAction"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/work/{id}/discard:
+    post:
+      operationId: discardWork
+      summary: Discard speculative work while preserving history
+      parameters:
+        - $ref: "#/components/parameters/IntentId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DiscardAction"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/agents/register:
+    post:
+      operationId: registerAgent
+      summary: Register an agent/model/worktree session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterAgentRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/agents/{id}/inbox:
+    get:
+      operationId: getAgentInbox
+      summary: Read durable coordination messages for an agent
+      parameters:
+        - $ref: "#/components/parameters/AgentId"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/intents:
+    post:
+      operationId: publishIntent
+      summary: Publish intent and return pre-code conflicts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublishIntentRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/claims:
+    post:
+      operationId: claimWork
+      summary: Create leased advisory semantic claims
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClaimWorkRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/conflicts:
+    get:
+      operationId: listConflicts
+      summary: List persisted conflicts
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/conflicts/check:
+    post:
+      operationId: checkConflicts
+      summary: Compare a persisted or provisional intent with active work
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConflictCheckRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/conflicts/{id}/resolve:
+    post:
+      operationId: resolveConflict
+      summary: Resolve a conflict and record its decision rationale
+      parameters:
+        - $ref: "#/components/parameters/ConflictId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResolveConflictRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/changesets:
+    post:
+      operationId: publishChangeSet
+      summary: Publish a provisional ChangeSet or revision
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublishChangeSetRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/changesets/{id}/validate:
+    post:
+      operationId: validateChangeSet
+      summary: Execute validation against the recorded fingerprint
+      parameters:
+        - $ref: "#/components/parameters/ChangeSetId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ValidationRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/changesets/{id}/accept:
+    post:
+      operationId: acceptChangeSet
+      summary: Apply validation, freshness, dependency, conflict, and Git gates
+      parameters:
+        - $ref: "#/components/parameters/ChangeSetId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AcceptRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/changesets/{id}/commit:
+    post:
+      operationId: recordCommit
+      summary: Record an integration commit containing the accepted candidate
+      parameters:
+        - $ref: "#/components/parameters/ChangeSetId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecordCommitRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/coordinate:
+    post:
+      operationId: coordinateWithAgent
+      summary: Store a durable directed coordination message
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CoordinateRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Token stored under the repository's Foremerge runtime directory.
+  parameters:
+    AgentId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    IntentId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    ConflictId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    ChangeSetId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+  responses:
+    Success:
+      description: Successful operation
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SuccessEnvelope"
+    Unauthorized:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Error:
+      description: Invalid request, missing entity, state violation, or internal failure
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+  schemas:
+    SuccessEnvelope:
+      type: object
+      required: [ok, data]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        data: {}
+    ErrorEnvelope:
+      type: object
+      required: [ok, error]
+      properties:
+        ok:
+          type: boolean
+          const: false
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+    Scope:
+      type: object
+      required: [kind, key]
+      properties:
+        kind:
+          type: string
+          enum: [symbol, api, schema, config, infra, test, migration, env, file, component, contract, domain]
+        key:
+          type: string
+          minLength: 1
+    RegisterAgentRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        model:
+          type: [string, "null"]
+        capabilities:
+          type: array
+          items:
+            type: string
+          default: []
+        worktree:
+          type: [string, "null"]
+    PublishIntentRequest:
+      type: object
+      required: [agent_id, task, summary]
+      properties:
+        agent_id:
+          type: string
+        task:
+          type: string
+          minLength: 1
+        summary:
+          type: string
+          minLength: 1
+        rationale:
+          type: [string, "null"]
+        scopes:
+          type: array
+          items:
+            $ref: "#/components/schemas/Scope"
+          default: []
+        depends_on:
+          type: array
+          items:
+            type: string
+          default: []
+        metadata:
+          type: object
+          default: {}
+    ClaimWorkRequest:
+      type: object
+      required: [agent_id, intent_id, scopes]
+      properties:
+        agent_id:
+          type: string
+        intent_id:
+          type: string
+        scopes:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/Scope"
+        reason:
+          type: [string, "null"]
+        lease_seconds:
+          type: integer
+          minimum: 60
+          maximum: 86400
+          default: 3600
+    ConflictCheckRequest:
+      type: object
+      properties:
+        agent_id:
+          type: [string, "null"]
+        intent_id:
+          type: [string, "null"]
+        intent:
+          type: [string, "null"]
+        scopes:
+          type: array
+          items:
+            $ref: "#/components/schemas/Scope"
+          default: []
+      anyOf:
+        - required: [intent_id]
+          properties:
+            intent_id:
+              type: string
+              minLength: 1
+        - required: [intent]
+          properties:
+            intent:
+              type: string
+              minLength: 1
+    ResolveConflictRequest:
+      type: object
+      required: [agent_id, resolution, rationale]
+      properties:
+        agent_id:
+          type: string
+        resolution:
+          type: string
+          minLength: 1
+        rationale:
+          type: string
+          minLength: 1
+    TestEvidence:
+      type: object
+      required: [command, status]
+      properties:
+        command:
+          type: string
+        status:
+          type: string
+        summary:
+          type: [string, "null"]
+    DecisionInput:
+      type: object
+      required: [title, rationale]
+      properties:
+        title:
+          type: string
+        rationale:
+          type: string
+        alternatives:
+          type: array
+          items:
+            type: string
+          default: []
+    PublishChangeSetRequest:
+      type: object
+      required: [agent_id, intent_id, summary]
+      properties:
+        agent_id:
+          type: string
+        intent_id:
+          type: string
+        summary:
+          type: string
+          minLength: 1
+        files:
+          type: array
+          items:
+            type: string
+          default: []
+        symbols:
+          type: array
+          items:
+            type: string
+          default: []
+        contracts:
+          type: array
+          items:
+            type: string
+          default: []
+        dependencies:
+          type: array
+          items:
+            type: string
+          default: []
+        tests:
+          type: array
+          items:
+            $ref: "#/components/schemas/TestEvidence"
+          default: []
+        decisions:
+          type: array
+          items:
+            $ref: "#/components/schemas/DecisionInput"
+          default: []
+        provenance:
+          type: object
+          default: {}
+        git_ref:
+          type: [string, "null"]
+        worktree:
+          type: [string, "null"]
+    ValidationRequest:
+      type: object
+      required: [command]
+      properties:
+        command:
+          type: array
+          minItems: 1
+          items:
+            type: string
+        worktree:
+          type: [string, "null"]
+        timeout_seconds:
+          type: integer
+          minimum: 1
+          maximum: 3600
+          default: 300
+    AcceptRequest:
+      type: object
+      properties:
+        git_ref:
+          type: [string, "null"]
+        allow_high_conflicts:
+          type: boolean
+          default: false
+        override_reason:
+          type: [string, "null"]
+          description: Required when unresolved HIGH conflicts are explicitly overridden.
+    RecordCommitRequest:
+      type: object
+      required: [git_ref]
+      properties:
+        git_ref:
+          type: string
+    CoordinateRequest:
+      type: object
+      required: [from_agent_id, to_agent_id, message]
+      properties:
+        from_agent_id:
+          type: string
+        to_agent_id:
+          type: string
+        message:
+          type: string
+          minLength: 1
+        conflict_id:
+          type: [string, "null"]
+        changeset_id:
+          type: [string, "null"]
+    AgentAction:
+      type: object
+      required: [agent_id]
+      properties:
+        agent_id:
+          type: string
+    DiscardAction:
+      type: object
+      required: [agent_id, reason]
+      properties:
+        agent_id:
+          type: string
+        reason:
+          type: string

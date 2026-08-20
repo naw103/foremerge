@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "id": "failed-payment-validation-gate",
+  "title": "A failing candidate must not change the target ref",
+  "category": "verification-gate",
+  "description": "An agent publishes a candidate commit whose required payment test fails.",
+  "agents": [
+    {
+      "label": "agent-a",
+      "task": "Add payment provider selection",
+      "intent": "Introduce PaymentProvider routing and preserve the existing default",
+      "scopes": [
+        {
+          "kind": "symbol",
+          "key": "PaymentProvider"
+        },
+        {
+          "kind": "test",
+          "key": "payment_provider_default"
+        }
+      ],
+      "candidate": {
+        "validation_command": [
+          "cargo",
+          "test",
+          "payment_provider_default"
+        ],
+        "expected_exit_status": "non-zero"
+      }
+    }
+  ],
+  "ground_truth": {
+    "should_warn": false,
+    "conflict_class": "none",
+    "severity": "none",
+    "must_be_detectable_before_code": false,
+    "required_suggestion_terms": [],
+    "rationale": "This scenario evaluates lifecycle and Git gating rather than intent conflict."
+  },
+  "success_criteria": [
+    "The validation result is persisted with its command, exit status, and candidate fingerprint.",
+    "The ChangeSet cannot transition to accepted or committed while validation fails.",
+    "The target Git ref is identical before and after the rejected attempt.",
+    "The failed result remains queryable as provenance."
+  ]
+}

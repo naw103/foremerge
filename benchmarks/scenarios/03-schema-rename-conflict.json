@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "id": "schema-rename-versus-index",
+  "title": "Column rename collides with an index on the old schema",
+  "category": "schema-conflict",
+  "description": "The tasks can touch different migration files while remaining semantically incompatible.",
+  "agents": [
+    {
+      "label": "agent-a",
+      "task": "Clarify the user email schema",
+      "intent": "Rename users.email to users.primary_email and update the public user contract",
+      "scopes": [
+        {
+          "kind": "schema",
+          "key": "users.email"
+        },
+        {
+          "kind": "contract",
+          "key": "api.User.email"
+        }
+      ]
+    },
+    {
+      "label": "agent-b",
+      "task": "Prevent duplicate user emails",
+      "intent": "Add a unique index and normalization migration for users.email",
+      "scopes": [
+        {
+          "kind": "schema",
+          "key": "users.email"
+        },
+        {
+          "kind": "migration",
+          "key": "users-email-unique"
+        }
+      ]
+    }
+  ],
+  "ground_truth": {
+    "should_warn": true,
+    "conflict_class": "schema-dependency",
+    "severity": "high",
+    "must_be_detectable_before_code": true,
+    "required_suggestion_terms": [
+      "migration order"
+    ],
+    "rationale": "The unique-index migration depends on a column that the other task intends to rename."
+  },
+  "success_criteria": [
+    "The shared schema scope is evidence even when planned migration file names differ.",
+    "The response recommends coordinating contract updates or migration order.",
+    "No hard lock prevents either agent from publishing its claim."
+  ]
+}

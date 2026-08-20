@@ -1,0 +1,302 @@
+# MCP setup
+
+Foremerge includes a Model Context Protocol server so coding agents can publish
+and query semantic coordination state without scripting the HTTP API.
+
+The server uses standard input/output. One JSON-RPC message is read per line;
+protocol responses are written to stdout. Human-readable logs must go to stderr
+so they do not corrupt the MCP stream.
+
+## Prerequisites
+
+1. Install or build the `foremerge` binary.
+2. Make sure `git` is available on `PATH`.
+3. Initialize or otherwise open the target repository once with Foremerge.
+4. Use an absolute database path or launch the MCP process with the repository
+   as its working directory.
+
+Build from a clone:
+
+```bash
+cargo build --release
+./target/release/foremerge init
+./target/release/foremerge doctor
+```
+
+## Recommended configuration
+
+The most predictable setup gives each MCP process the same explicit database:
+
+```json
+{
+  "mcpServers": {
+    "foremerge": {
+      "command": "/absolute/path/to/foremerge",
+      "args": [
+        "--database",
+        "/absolute/path/to/repository/.git/foremerge/state.sqlite3",
+        "mcp"
+      ]
+    }
+  }
+}
+```
+
+For linked worktrees, do not guess `.git` from the worktree: it may be a file.
+Ask Git for the common directory from any worktree:
+
+```bash
+git rev-parse --path-format=absolute --git-common-dir
+```
+
+The database is `foremerge/state.sqlite3` below that directory.
+
+If the MCP client supports a working-directory setting, repository discovery is
+also sufficient:
+
+```json
+{
+  "mcpServers": {
+    "foremerge": {
+      "command": "foremerge",
+      "args": ["mcp"],
+      "cwd": "/absolute/path/to/repository"
+    }
+  }
+}
+```
+
+The equivalent configuration without relying on a client-specific `cwd` field
+uses Foremerge's global option before the subcommand:
+
+```json
+{
+  "mcpServers": {
+    "foremerge": {
+      "command": "foremerge",
+      "args": ["--cwd", "/absolute/path/to/repository", "mcp"]
+    }
+  }
+}
+```
+
+The MCP command does not start or discover an HTTP daemon. MCP and daemon modes
+are separate frontends over the same local storage. Running the daemon is not a
+prerequisite for MCP when both are configured for the same database.
+
+## Tool inventory
+
+The complete MVP MCP tool surface is:
+
+| Tool | Purpose |
+| --- | --- |
+| `register_agent` | Register agent/model/worktree provenance |
+| `publish_intent` | Announce planned work and receive immediate conflicts |
+| `claim_work` | Make leased advisory semantic claims |
+| `query_work` | Find agents, intents, claims, ChangeSets, and open conflicts |
+| `check_conflicts` | Preflight or re-evaluate semantic conflicts |
+| `publish_changeset` | Record implementation, tests, decisions, and Git provenance |
+| `coordinate_with_agent` | Store a durable message for another agent |
+
+Tool names are stable protocol identifiers; CLI command spelling is allowed to
+differ. Starting, discarding, validating, accepting, and committing work are
+currently CLI/JSON API operations rather than MCP tools.
+
+## Suggested agent workflow
+
+At the start of a coding session:
+
+1. Call `register_agent` with a unique session name, actual model identifier,
+   and isolated worktree.
+2. Call `query_work` for the task or scopes you expect to touch.
+3. Call `publish_intent` before editing files.
+4. Inspect the returned conflicts or call `check_conflicts` for a provisional
+   preflight.
+5. Call `claim_work` with semantic scopes. Use the CLI or JSON API to explicitly
+   mark work in progress if needed; publishing a ChangeSet from `CLAIMED`
+   performs that transition automatically.
+
+At a useful implementation boundary:
+
+1. Call `publish_changeset` with affected files, symbols, contracts,
+   dependencies, reported tests, decisions, and provenance.
+2. Run validation through the CLI or JSON API with an argv command and timeout.
+3. Re-coordinate any high conflicts with `coordinate_with_agent`.
+4. Accept through the CLI or JSON API only for the validated clean Git state.
+5. Integrate through ordinary Git, then record the commit through the CLI or
+   JSON API.
+
+Do not call tools for every keystroke. Foremerge events are semantic boundaries.
+
+## Example tool inputs
+
+### `register_agent`
+
+```json
+{
+  "name": "paypal-agent",
+  "model": "actual-model-id",
+  "capabilities": ["payments"],
+  "worktree": "/repo/worktrees/paypal"
+}
+```
+
+### `publish_intent`
+
+```json
+{
+  "agent_id": "agt_...",
+  "task": "add-paypal",
+  "summary": "Add PayPal support to PaymentService",
+  "rationale": "Support an additional provider",
+  "scopes": [
+    {"kind": "symbol", "key": "PaymentService"},
+    {"kind": "contract", "key": "PaymentService"}
+  ],
+  "depends_on": [],
+  "metadata": {}
+}
+```
+
+### `claim_work`
+
+```json
+{
+  "agent_id": "agt_...",
+  "intent_id": "int_...",
+  "scopes": [{"kind": "symbol", "key": "PaymentService"}],
+  "reason": "Extend provider behavior",
+  "lease_seconds": 3600
+}
+```
+
+### `query_work`
+
+```json
+{
+  "scope": {"kind": "symbol", "key": "PaymentService"},
+  "limit": 50
+}
+```
+
+### `check_conflicts`
+
+Persisted intent:
+
+```json
+{"intent_id":"int_..."}
+```
+
+Unpublished preflight:
+
+```json
+{
+  "agent_id": "agt_...",
+  "intent": "Replace PaymentService with StripePaymentService",
+  "scopes": [{"kind": "symbol", "key": "PaymentService"}]
+}
+```
+
+### `publish_changeset`
+
+```json
+{
+  "agent_id": "agt_...",
+  "intent_id": "int_...",
+  "summary": "Add PayPalPaymentProvider",
+  "files": ["src/payments/paypal.rs"],
+  "symbols": ["PayPalPaymentProvider"],
+  "contracts": ["payment-provider"],
+  "dependencies": ["int_provider_abstraction"],
+  "tests": [
+    {"command":"cargo test payments","status":"passed","summary":"reported"}
+  ],
+  "decisions": [],
+  "provenance": {"source":"agent"},
+  "git_ref": "HEAD",
+  "worktree": "/repo/worktrees/paypal"
+}
+```
+
+### `coordinate_with_agent`
+
+```json
+{
+  "from_agent_id": "agt_paypal",
+  "to_agent_id": "agt_stripe",
+  "conflict_id": "cfl_...",
+  "message": "Let's depend on a shared PaymentProvider contract."
+}
+```
+
+## Transport smoke test
+
+For protocol debugging, run `foremerge mcp` directly and send one compact JSON
+object per line. A real MCP client should begin with `initialize`, followed by
+the initialized notification and `tools/list`.
+
+The server currently negotiates MCP protocol version `2026-07-28` when the
+client requests it and otherwise falls back to `2025-11-25`. It also responds to
+`ping` and `server/discover`. Notifications have no response.
+
+Successful tool calls return both text content and `structuredContent`. Domain
+failures are returned as a tool result with `isError: true`; malformed JSON-RPC,
+unknown methods, and invalid tool names use JSON-RPC errors.
+
+Do not use pretty-printed multi-line JSON on stdin because newline framing is
+significant. Do not write banners or shell prompts into the process.
+
+## Multiple worktrees and agents
+
+Each agent may run its own MCP process. Configure every process to the same
+database under the Git common directory, while registering the agent's distinct
+worktree path. SQLite serializes semantic writes; Git worktrees preserve file
+isolation.
+
+Agent IDs are session identities. Do not copy one registered ID into all MCP
+clients, because that erases ownership and model provenance.
+
+## Troubleshooting
+
+### The client shows no tools
+
+- Run `foremerge mcp --help` in a terminal.
+- Confirm the configured binary path is absolute or on the client's `PATH`.
+- Ensure global flags such as `--database` appear before the `mcp` subcommand.
+- Check the MCP client's stderr log for database or Git discovery errors.
+
+### Agents cannot see each other's work
+
+- Confirm both clients use the same absolute database path.
+- In linked worktrees, compare
+  `git rev-parse --path-format=absolute --git-common-dir`.
+- Check that neither client accidentally fell back to a worktree-local
+  `.foremerge/state.sqlite3`.
+
+### JSON-RPC parsing fails
+
+- Ensure no logs are being written to stdout.
+- Send one compact request per line.
+- Verify request IDs are valid JSON-RPC IDs.
+
+### Validation fails to start through the CLI or API
+
+- Pass a non-empty argv array rather than a shell command string.
+- Use an absolute worktree path visible to the MCP process.
+- Remember that validation commands run with the MCP process's permissions and
+  environment.
+
+### The HTTP daemon is not running
+
+That does not prevent the stdio MCP mode from using its configured SQLite
+database. The MVP has no daemon autostart or automatic endpoint discovery.
+
+## Security notes
+
+- The MVP MCP tools do not execute validation commands; validation remains a
+  CLI/API operation.
+- `publish_changeset` inspects the supplied local worktree through Git. Only
+  connect clients you trust with local path access.
+- Test output and caller-provided provenance are stored locally in SQLite.
+- The event hash chain detects history modification but does not authenticate
+  the model or user behind an agent ID.

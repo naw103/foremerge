@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1080" viewBox="0 0 1600 1080" role="img" aria-labelledby="title desc">
+  <title id="title">Foremerge detects a PaymentService intent conflict before code changes</title>
+  <desc id="desc">A terminal-style rendering of actual Foremerge 0.1.0 release output. One agent replaces PaymentService, another extends it for PayPal, and Foremerge reports a high replace-versus-extend conflict with a PaymentProvider suggestion while both worktrees remain clean.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1020"/>
+      <stop offset="1" stop-color="#111827"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="22" stdDeviation="24" flood-color="#020617" flood-opacity="0.55"/>
+    </filter>
+  </defs>
+  <rect width="1600" height="1080" fill="#070b14"/>
+  <rect x="58" y="48" width="1484" height="984" rx="22" fill="url(#background)" stroke="#273449" stroke-width="2" filter="url(#shadow)"/>
+  <path d="M80 48h1440a22 22 0 0 1 22 22v62H58V70a22 22 0 0 1 22-22z" fill="#141c2c"/>
+  <circle cx="100" cy="90" r="10" fill="#fb7185"/>
+  <circle cx="134" cy="90" r="10" fill="#fbbf24"/>
+  <circle cx="168" cy="90" r="10" fill="#34d399"/>
+  <text x="800" y="98" text-anchor="middle" fill="#a8b3c7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="22">foremerge · actual release demo · output abridged</text>
+
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="25">
+    <text x="96" y="184" fill="#6ee7b7">$</text>
+    <text x="128" y="184" fill="#e5e7eb">foremerge --version</text>
+    <text x="96" y="224" fill="#94a3b8">foremerge 0.1.0</text>
+
+    <text x="96" y="286" fill="#60a5fa">Agent A</text>
+    <text x="218" y="286" fill="#e5e7eb">Replace PaymentService with StripePaymentService</text>
+    <text x="96" y="326" fill="#60a5fa">Agent B</text>
+    <text x="218" y="326" fill="#e5e7eb">Add PayPal support to PaymentService</text>
+
+    <text x="96" y="388" fill="#6ee7b7">$</text>
+    <text x="128" y="388" fill="#e5e7eb">foremerge --json conflicts check --intent-id "$PAYPAL_INTENT" |</text>
+    <text x="128" y="426" fill="#e5e7eb" font-size="23">jq '.data.conflicts[0] | {kind, severity,</text>
+    <text x="128" y="464" fill="#e5e7eb" font-size="23">    scope: (.scope.kind + ":" + .scope.key),</text>
+    <text x="128" y="502" fill="#e5e7eb" font-size="23">    rule: .evidence.rule, explanation, suggestion}'</text>
+
+    <text x="96" y="554" fill="#94a3b8">{</text>
+    <text x="128" y="594" fill="#c4b5fd">"kind"</text><text x="246" y="594" fill="#94a3b8">:</text><text x="276" y="594" fill="#f9a8d4">"replace_vs_extend"</text><text x="552" y="594" fill="#94a3b8">,</text>
+    <text x="128" y="634" fill="#c4b5fd">"severity"</text><text x="286" y="634" fill="#94a3b8">:</text><text x="316" y="634" fill="#fb7185">"HIGH"</text><text x="420" y="634" fill="#94a3b8">,</text>
+    <text x="128" y="674" fill="#c4b5fd">"scope"</text><text x="246" y="674" fill="#94a3b8">:</text><text x="276" y="674" fill="#f9a8d4">"symbol:PaymentService"</text><text x="600" y="674" fill="#94a3b8">,</text>
+    <text x="128" y="714" fill="#c4b5fd">"rule"</text><text x="226" y="714" fill="#94a3b8">:</text><text x="256" y="714" fill="#f9a8d4">"FM-C001"</text><text x="402" y="714" fill="#94a3b8">,</text>
+    <text x="128" y="754" fill="#c4b5fd">"explanation"</text><text x="334" y="754" fill="#94a3b8">:</text>
+    <text x="160" y="794" fill="#e5e7eb">"One intent will replace `PaymentService` while the other will extend it."</text>
+    <text x="128" y="834" fill="#c4b5fd">"suggestion"</text><text x="306" y="834" fill="#94a3b8">:</text>
+    <text x="160" y="874" fill="#6ee7b7">"Coordinate on a stable `PaymentProvider` contract first…"</text>
+    <text x="96" y="914" fill="#94a3b8">}</text>
+
+    <text x="96" y="982" fill="#fbbf24" font-size="22">✓ stripe worktree dirty: no</text>
+    <text x="530" y="982" fill="#fbbf24" font-size="22">✓ paypal worktree dirty: no</text>
+    <text x="965" y="982" fill="#fbbf24" font-size="22">✓ ChangeSets published: 0</text>
+  </g>
+</svg>

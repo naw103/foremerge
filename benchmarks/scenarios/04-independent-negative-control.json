@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "id": "independent-docs-and-thumbnail-cache",
+  "title": "Independent work should proceed without a conflict warning",
+  "category": "negative-control",
+  "description": "Two simultaneous tasks have different intent, behavior, and semantic scopes.",
+  "agents": [
+    {
+      "label": "agent-a",
+      "task": "Improve contributor onboarding",
+      "intent": "Add a troubleshooting section to the contributor guide",
+      "scopes": [
+        {
+          "kind": "file",
+          "key": "CONTRIBUTING.md"
+        },
+        {
+          "kind": "domain",
+          "key": "developer-documentation"
+        }
+      ]
+    },
+    {
+      "label": "agent-b",
+      "task": "Reduce repeated thumbnail computation",
+      "intent": "Cache generated image thumbnails by content hash",
+      "scopes": [
+        {
+          "kind": "component",
+          "key": "ThumbnailCache"
+        },
+        {
+          "kind": "config",
+          "key": "media.thumbnail_cache"
+        }
+      ]
+    }
+  ],
+  "ground_truth": {
+    "should_warn": false,
+    "conflict_class": "none",
+    "severity": "none",
+    "must_be_detectable_before_code": false,
+    "required_suggestion_terms": [],
+    "rationale": "The tasks do not share a semantic scope or incompatible intent."
+  },
+  "success_criteria": [
+    "No high- or medium-severity conflict is produced.",
+    "Both agents can claim their scopes and proceed independently.",
+    "Normal coordination overhead is recorded even when no warning is needed."
+  ]
+}
