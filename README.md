@@ -46,15 +46,18 @@ command uses the shown `jq` filter; output is abridged for readability._
 
 ## Quickstart: first conflict in under five minutes
 
-You need Rust 1.85 or newer, a recent Git, and `jq`. Install straight from
-GitHub:
+You need a recent Git and `jq`. Install a prebuilt, checksum-verified release
+binary (macOS and Linux; the script installs to `~/.local/bin`):
 
 ```sh
-cargo install --locked --git https://github.com/naw103/foremerge foremerge
+curl -fsSL https://naw103.github.io/foremerge/install.sh | sh
 ```
 
-or from a source checkout with `cargo install --locked --path .`. Then, inside
-the repository you want to coordinate:
+Or build from source with Rust 1.85+: `cargo install --locked --git
+https://github.com/naw103/foremerge foremerge`, or `cargo install --locked
+--path .` from a checkout. Windows binaries are on the
+[releases page](https://github.com/naw103/foremerge/releases). To update,
+re-run the installer. Then, inside the repository you want to coordinate:
 
 ```sh
 foremerge init

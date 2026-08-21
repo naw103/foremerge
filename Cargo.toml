@@ -11,6 +11,13 @@ readme = "README.md"
 keywords = ["agents", "git", "mcp", "coordination", "developer-tools"]
 categories = ["command-line-utilities", "development-tools"]
 
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }{ archive-suffix }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
 [lib]
 name = "foremerge"
 path = "src/lib.rs"
