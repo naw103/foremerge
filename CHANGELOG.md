@@ -9,7 +9,16 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
-No unreleased changes.
+### Added
+
+- `foremerge status`: one human-first screen answering "what are my agents
+  doing right now" with active agents, intents grouped by lifecycle status,
+  unexpired claims with their scopes, OPEN or COORDINATING conflicts naming
+  both parties and both sides' scopes, and ChangeSets grouped by status with
+  ids for the non-terminal ones. The default output is readable aligned plain
+  text; `--json` returns the typed report in the standard envelope. The whole
+  report is read in one transaction, so its sections describe one consistent
+  moment.
 
 ## [0.2.0] - 2026-08-21
 

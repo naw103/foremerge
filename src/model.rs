@@ -421,6 +421,86 @@ pub struct DoctorReport {
     pub clients: Option<Vec<crate::integrations::ClientDiagnostic>>,
 }
 
+/// One consistent snapshot answering "what are my agents doing right now".
+/// Produced by `foremerge status`; every section comes from the same read
+/// transaction so the sections cannot disagree with each other.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusReport {
+    /// Registered agents whose status is ACTIVE, oldest first.
+    pub agents: Vec<StatusAgent>,
+    /// All intents grouped by lifecycle status in lifecycle order; empty
+    /// groups are omitted.
+    pub intents: Vec<StatusIntentGroup>,
+    /// ACTIVE claims whose lease has not expired, oldest first.
+    pub claims: Vec<StatusClaim>,
+    /// OPEN or COORDINATING conflicts, most recently detected first.
+    pub conflicts: Vec<StatusConflict>,
+    /// All ChangeSets grouped by status in lifecycle order; empty groups are
+    /// omitted.
+    pub changesets: Vec<StatusChangeSetGroup>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusAgent {
+    pub id: String,
+    pub name: String,
+    pub model: Option<String>,
+    pub worktree: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusIntentGroup {
+    pub status: String,
+    pub count: usize,
+    pub intents: Vec<StatusIntent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusIntent {
+    pub id: String,
+    pub agent_id: String,
+    pub agent_name: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusClaim {
+    pub id: String,
+    pub agent_id: String,
+    pub agent_name: String,
+    pub intent_id: String,
+    pub scope: Scope,
+    pub lease_expires_at: String,
+}
+
+/// A durable conflict that still needs coordination, with both parties named
+/// so a human can act without further lookups.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusConflict {
+    pub id: String,
+    pub kind: String,
+    pub severity: String,
+    pub status: String,
+    /// The overlapping scope recorded on the conflict, when one exists.
+    pub scope: Option<Scope>,
+    /// Absent when the conflict has no recorded source intent.
+    pub source_intent_id: Option<String>,
+    pub source_agent_name: Option<String>,
+    pub source_scopes: Vec<String>,
+    pub target_intent_id: String,
+    pub target_agent_name: String,
+    pub target_scopes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusChangeSetGroup {
+    pub status: String,
+    pub count: usize,
+    /// Populated for non-terminal statuses (PROVISIONAL, VALIDATED, and
+    /// ACCEPTED); terminal groups carry the count only.
+    pub ids: Vec<String>,
+}
+
 pub fn empty_object() -> Value {
     json!({})
 }

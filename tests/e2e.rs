@@ -821,6 +821,119 @@ fn publishing_from_claimed_implicitly_enters_provisional_without_panicking() {
 }
 
 #[test]
+fn status_renders_one_screen_in_text_and_a_typed_json_envelope() {
+    let repo = create_repo();
+    let stripe_id = register_test_agent(&repo.root, "stripe-status-agent");
+    let paypal_id = register_test_agent(&repo.root, "paypal-status-agent");
+    let stripe_intent = publish_test_intent(
+        &repo.root,
+        &stripe_id,
+        "status-replace",
+        "Replace PaymentService with StripePaymentService",
+        "symbol:PaymentService",
+    );
+    let paypal_intent = publish_test_intent(
+        &repo.root,
+        &paypal_id,
+        "status-extend",
+        "Add PayPal support to PaymentService",
+        "symbol:PaymentService",
+    );
+    claim_test_scope(
+        &repo.root,
+        &stripe_id,
+        &stripe_intent,
+        "symbol:PaymentService",
+    );
+    start_test_work(&repo.root, &stripe_id, &stripe_intent);
+    let changeset_id = publish_test_revision(
+        &repo.root,
+        &stripe_id,
+        &stripe_intent,
+        "Provider routing candidate",
+    );
+
+    let output = Command::new(foremerge_bin())
+        .arg("--cwd")
+        .arg(&repo.root)
+        .arg("status")
+        .output()
+        .expect("run foremerge status");
+    assert!(
+        output.status.success(),
+        "status failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).expect("status text is UTF-8");
+    assert!(
+        !text.contains('\u{1b}'),
+        "status text must not contain color escape codes:\n{text}"
+    );
+    for needle in [
+        "Agents (2 active)".to_string(),
+        "stripe-status-agent".to_string(),
+        "paypal-status-agent".to_string(),
+        "Intents (2)".to_string(),
+        "INTENT (1)".to_string(),
+        "PROVISIONAL (1)".to_string(),
+        "Active claims (1)".to_string(),
+        "symbol:PaymentService".to_string(),
+        "Conflicts (1 open or coordinating)".to_string(),
+        "replace_vs_extend".to_string(),
+        "HIGH".to_string(),
+        format!("stripe-status-agent ({stripe_intent})"),
+        format!("paypal-status-agent ({paypal_intent})"),
+        format!("PROVISIONAL (1): {changeset_id}"),
+    ] {
+        assert!(
+            text.contains(&needle),
+            "status text is missing {needle:?}:\n{text}"
+        );
+    }
+
+    let status = cli_success(&repo.root, None, ["status"]);
+    let data = &status["data"];
+    assert_eq!(data["agents"].as_array().expect("agents array").len(), 2);
+    assert_eq!(data["agents"][0]["name"], "stripe-status-agent");
+    assert_eq!(data["agents"][0]["model"], "e2e-test");
+    let groups = data["intents"].as_array().expect("intent groups");
+    assert!(
+        groups.iter().any(|group| group["status"] == "INTENT"
+            && group["count"] == 1
+            && group["intents"][0]["id"] == paypal_intent),
+        "missing the INTENT group: {data}"
+    );
+    assert!(
+        groups.iter().any(|group| group["status"] == "PROVISIONAL"
+            && group["intents"][0]["agent_name"] == "stripe-status-agent"),
+        "missing the PROVISIONAL group: {data}"
+    );
+    assert_eq!(data["claims"].as_array().expect("claims array").len(), 1);
+    assert_eq!(data["claims"][0]["agent_name"], "stripe-status-agent");
+    assert_eq!(data["claims"][0]["scope"]["key"], "PaymentService");
+    let conflict = &data["conflicts"][0];
+    assert_eq!(conflict["kind"], "replace_vs_extend");
+    assert_eq!(conflict["severity"], "HIGH");
+    assert_eq!(conflict["status"], "OPEN");
+    let mut parties = vec![
+        conflict["source_agent_name"]
+            .as_str()
+            .expect("source agent"),
+        conflict["target_agent_name"]
+            .as_str()
+            .expect("target agent"),
+    ];
+    parties.sort_unstable();
+    assert_eq!(parties, ["paypal-status-agent", "stripe-status-agent"]);
+    assert_eq!(conflict["source_scopes"][0], "symbol:PaymentService");
+    assert_eq!(conflict["target_scopes"][0], "symbol:PaymentService");
+    assert_eq!(data["changesets"][0]["status"], "PROVISIONAL");
+    assert_eq!(data["changesets"][0]["count"], 1);
+    assert_eq!(data["changesets"][0]["ids"][0], changeset_id);
+}
+
+#[test]
 fn real_mcp_stdio_initializes_lists_tools_and_calls_one() {
     let temp = tempfile::tempdir().expect("create MCP fixture");
     let database = temp.path().join("mcp.sqlite3");

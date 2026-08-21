@@ -92,6 +92,8 @@ enum Commands {
     Events(EventCommand),
     /// Export the current semantic dependency graph.
     Graph,
+    /// Show what every agent is doing right now on one screen.
+    Status,
     /// Configure trusted named verification commands available to MCP agents.
     #[command(subcommand)]
     Checks(CheckCommand),
@@ -921,6 +923,14 @@ async fn execute_service(
             serde_json::to_value(service.events(after_seq, limit)?)?
         }
         Commands::Graph => service.graph()?,
+        Commands::Status => {
+            let report = service.status()?;
+            if !json_mode {
+                write_stdout_line(render_status(&report).trim_end())?;
+                return Ok(());
+            }
+            serde_json::to_value(report)?
+        }
         _ => bail!("unsupported command dispatch"),
     };
     emit(json_mode, value)
@@ -928,6 +938,154 @@ async fn execute_service(
 
 fn parse_scopes(values: &[String]) -> Result<Vec<Scope>> {
     values.iter().map(|value| Scope::parse(value)).collect()
+}
+
+fn scope_text(scope: &Scope) -> String {
+    format!("{}:{}", scope.kind, scope.key)
+}
+
+fn pad(value: &str, width: usize) -> String {
+    format!("{value:<width$}")
+}
+
+/// Render the status report as one readable plain-text screen with aligned
+/// columns and no color codes.
+fn render_status(report: &StatusReport) -> String {
+    let mut out = String::new();
+
+    out.push_str(&format!("Agents ({} active)\n", report.agents.len()));
+    if report.agents.is_empty() {
+        out.push_str("  none\n");
+    } else {
+        let name_width = column_width(report.agents.iter().map(|agent| agent.name.as_str()));
+        let model_width = column_width(
+            report
+                .agents
+                .iter()
+                .map(|agent| agent.model.as_deref().unwrap_or("-")),
+        );
+        for agent in &report.agents {
+            out.push_str(&format!(
+                "  {}  {}  {}\n",
+                pad(&agent.name, name_width),
+                pad(agent.model.as_deref().unwrap_or("-"), model_width),
+                agent.worktree.as_deref().unwrap_or("-"),
+            ));
+        }
+    }
+
+    let intent_total: usize = report.intents.iter().map(|group| group.count).sum();
+    out.push_str(&format!("\nIntents ({intent_total})\n"));
+    if report.intents.is_empty() {
+        out.push_str("  none\n");
+    }
+    for group in &report.intents {
+        out.push_str(&format!("  {} ({})\n", group.status, group.count));
+        let name_width = column_width(
+            group
+                .intents
+                .iter()
+                .map(|intent| intent.agent_name.as_str()),
+        );
+        for intent in &group.intents {
+            out.push_str(&format!(
+                "    {}  {}  {}\n",
+                intent.id,
+                pad(&intent.agent_name, name_width),
+                intent.summary,
+            ));
+        }
+    }
+
+    out.push_str(&format!("\nActive claims ({})\n", report.claims.len()));
+    if report.claims.is_empty() {
+        out.push_str("  none\n");
+    } else {
+        let name_width = column_width(report.claims.iter().map(|claim| claim.agent_name.as_str()));
+        let scopes: Vec<String> = report
+            .claims
+            .iter()
+            .map(|claim| scope_text(&claim.scope))
+            .collect();
+        let scope_width = column_width(scopes.iter().map(String::as_str));
+        for (claim, scope) in report.claims.iter().zip(&scopes) {
+            out.push_str(&format!(
+                "  {}  {}  {}  lease expires {}\n",
+                pad(&claim.agent_name, name_width),
+                pad(scope, scope_width),
+                claim.intent_id,
+                claim.lease_expires_at,
+            ));
+        }
+    }
+
+    out.push_str(&format!(
+        "\nConflicts ({} open or coordinating)\n",
+        report.conflicts.len()
+    ));
+    if report.conflicts.is_empty() {
+        out.push_str("  none\n");
+    }
+    for conflict in &report.conflicts {
+        let scope = conflict
+            .scope
+            .as_ref()
+            .map(|value| format!("  scope {}", scope_text(value)))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "  {}  {}  {}  {}{}\n",
+            conflict.id, conflict.kind, conflict.severity, conflict.status, scope,
+        ));
+        if let (Some(agent_name), Some(intent_id)) = (
+            conflict.source_agent_name.as_deref(),
+            conflict.source_intent_id.as_deref(),
+        ) {
+            out.push_str(&format!(
+                "    {} ({}): {}\n",
+                agent_name,
+                intent_id,
+                join_or_dash(&conflict.source_scopes),
+            ));
+        }
+        out.push_str(&format!(
+            "    {} ({}): {}\n",
+            conflict.target_agent_name,
+            conflict.target_intent_id,
+            join_or_dash(&conflict.target_scopes),
+        ));
+    }
+
+    let changeset_total: usize = report.changesets.iter().map(|group| group.count).sum();
+    out.push_str(&format!("\nChangeSets ({changeset_total})\n"));
+    if report.changesets.is_empty() {
+        out.push_str("  none\n");
+    }
+    for group in &report.changesets {
+        if group.ids.is_empty() {
+            out.push_str(&format!("  {} ({})\n", group.status, group.count));
+        } else {
+            out.push_str(&format!(
+                "  {} ({}): {}\n",
+                group.status,
+                group.count,
+                group.ids.join(", ")
+            ));
+        }
+    }
+
+    out
+}
+
+fn column_width<'a>(values: impl Iterator<Item = &'a str>) -> usize {
+    values.map(str::len).max().unwrap_or(0)
+}
+
+fn join_or_dash(values: &[String]) -> String {
+    if values.is_empty() {
+        "-".to_string()
+    } else {
+        values.join(", ")
+    }
 }
 
 fn emit(json_mode: bool, value: Value) -> Result<()> {

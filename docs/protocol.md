@@ -84,6 +84,7 @@ foremerge changeset publish|show|validate|accept|commit
 foremerge coordinate send|inbox
 foremerge events list
 foremerge graph
+foremerge status
 foremerge worktree create
 foremerge request get|post <path>
 ```
@@ -99,6 +100,13 @@ local HTTP escape hatch, not another implementation of the service.
 let an agent map a conflict's intent ids to registered agents without scraping
 `events list` or `graph` output. They are not exposed by the daemon or MCP
 surfaces.
+
+`status` is the CLI-only human overview: one screen listing active agents,
+intents grouped by lifecycle status, unexpired claims, OPEN or COORDINATING
+conflicts with both parties named, and ChangeSets grouped by status with ids
+for the non-terminal ones. All sections come from a single read transaction,
+so they describe one consistent moment. The default output is aligned plain
+text; `--json` returns the same typed report in the standard envelope.
 
 ## Agent registration
 

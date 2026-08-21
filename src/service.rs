@@ -17,6 +17,28 @@ use uuid::Uuid;
 
 const TERMINAL_INTENT_STATES: &[&str] = &["ACCEPTED", "COMMITTED", "DISCARDED"];
 const MAX_OUTPUT_BYTES: usize = 16 * 1024;
+/// Lifecycle-ordered intent statuses used to group the status screen.
+const INTENT_STATUS_ORDER: &[&str] = &[
+    "INTENT",
+    "CLAIMED",
+    "IN_PROGRESS",
+    "PROVISIONAL",
+    "VALIDATED",
+    "ACCEPTED",
+    "COMMITTED",
+    "DISCARDED",
+];
+/// Lifecycle-ordered ChangeSet statuses used to group the status screen.
+const CHANGESET_STATUS_ORDER: &[&str] = &[
+    "PROVISIONAL",
+    "VALIDATED",
+    "ACCEPTED",
+    "COMMITTED",
+    "SUPERSEDED",
+];
+/// ChangeSet statuses that still expect further action; the status screen
+/// lists individual ids for these.
+const NONTERMINAL_CHANGESET_STATES: &[&str] = &["PROVISIONAL", "VALIDATED", "ACCEPTED"];
 
 #[derive(Clone)]
 pub struct Foremerge {
@@ -1909,6 +1931,191 @@ impl Foremerge {
         ids.iter()
             .map(|value| conflict_by_id(&conn, value))
             .collect()
+    }
+
+    /// One consistent snapshot answering "what are my agents doing right now":
+    /// active agents, intents grouped by lifecycle status, unexpired claims,
+    /// OPEN or COORDINATING conflicts with both parties named, and ChangeSets
+    /// grouped by status. Every section is read inside a single transaction so
+    /// the sections cannot disagree with each other.
+    pub fn status(&self) -> Result<StatusReport> {
+        let mut conn = self.store.lock()?;
+        let tx = conn.transaction()?;
+        let now = Utc::now().to_rfc3339();
+
+        let mut statement = tx.prepare("SELECT id FROM agents ORDER BY registered_at, id")?;
+        let agent_ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        let mut agent_names = std::collections::HashMap::new();
+        let mut agents = Vec::new();
+        for agent_id in &agent_ids {
+            let agent = agent_by_id(&tx, agent_id)?;
+            agent_names.insert(agent.id.clone(), agent.name.clone());
+            if agent.status == "ACTIVE" {
+                agents.push(StatusAgent {
+                    id: agent.id,
+                    name: agent.name,
+                    model: agent.model,
+                    worktree: agent.worktree,
+                });
+            }
+        }
+        let agent_name = |agent_id: &str| {
+            agent_names
+                .get(agent_id)
+                .cloned()
+                .unwrap_or_else(|| agent_id.to_string())
+        };
+
+        let mut statement = tx.prepare("SELECT id FROM intents ORDER BY created_at, id")?;
+        let intent_ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        let mut all_intents = Vec::new();
+        for intent_id in &intent_ids {
+            all_intents.push(intent_by_id(&tx, intent_id)?);
+        }
+        let mut intent_statuses: Vec<String> = INTENT_STATUS_ORDER
+            .iter()
+            .map(|value| value.to_string())
+            .collect();
+        for intent in &all_intents {
+            if !intent_statuses.contains(&intent.status) {
+                intent_statuses.push(intent.status.clone());
+            }
+        }
+        let mut intents = Vec::new();
+        for status in &intent_statuses {
+            let members: Vec<StatusIntent> = all_intents
+                .iter()
+                .filter(|intent| intent.status == *status)
+                .map(|intent| StatusIntent {
+                    id: intent.id.clone(),
+                    agent_id: intent.agent_id.clone(),
+                    agent_name: agent_name(&intent.agent_id),
+                    summary: intent.summary.clone(),
+                })
+                .collect();
+            if !members.is_empty() {
+                intents.push(StatusIntentGroup {
+                    status: status.clone(),
+                    count: members.len(),
+                    intents: members,
+                });
+            }
+        }
+
+        let mut statement = tx.prepare(
+            "SELECT id, agent_id, intent_id, scope_kind, scope_key, lease_expires_at
+             FROM claims WHERE status = 'ACTIVE' AND lease_expires_at > ?1
+             ORDER BY created_at, id",
+        )?;
+        let mut claims = statement
+            .query_map([&now], |row| {
+                Ok(StatusClaim {
+                    id: row.get(0)?,
+                    agent_id: row.get(1)?,
+                    agent_name: String::new(),
+                    intent_id: row.get(2)?,
+                    scope: Scope::new(row.get::<_, String>(3)?, row.get::<_, String>(4)?),
+                    lease_expires_at: row.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        for claim in &mut claims {
+            claim.agent_name = agent_name(&claim.agent_id);
+        }
+
+        let mut statement = tx.prepare(
+            "SELECT id FROM conflicts WHERE status IN ('OPEN', 'COORDINATING')
+             ORDER BY detected_at DESC, id",
+        )?;
+        let conflict_ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        let scope_strings = |intent: &Intent| {
+            intent
+                .scopes
+                .iter()
+                .map(|scope| format!("{}:{}", scope.kind, scope.key))
+                .collect::<Vec<_>>()
+        };
+        let mut conflicts = Vec::new();
+        for conflict_id in &conflict_ids {
+            let conflict = conflict_by_id(&tx, conflict_id)?;
+            let source = conflict
+                .source_intent_id
+                .as_deref()
+                .map(|intent_id| intent_by_id(&tx, intent_id))
+                .transpose()?;
+            let target = intent_by_id(&tx, &conflict.target_intent_id)?;
+            conflicts.push(StatusConflict {
+                id: conflict.id,
+                kind: conflict.kind,
+                severity: conflict.severity,
+                status: conflict.status,
+                scope: conflict.scope,
+                source_intent_id: conflict.source_intent_id,
+                source_agent_name: source.as_ref().map(|intent| agent_name(&intent.agent_id)),
+                source_scopes: source.as_ref().map(&scope_strings).unwrap_or_default(),
+                target_intent_id: conflict.target_intent_id,
+                target_agent_name: agent_name(&target.agent_id),
+                target_scopes: scope_strings(&target),
+            });
+        }
+
+        let mut statement =
+            tx.prepare("SELECT id, status FROM changesets ORDER BY created_at, id")?;
+        let changeset_rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        let mut changeset_statuses: Vec<String> = CHANGESET_STATUS_ORDER
+            .iter()
+            .map(|value| value.to_string())
+            .collect();
+        for (_, status) in &changeset_rows {
+            if !changeset_statuses.contains(status) {
+                changeset_statuses.push(status.clone());
+            }
+        }
+        let mut changesets = Vec::new();
+        for status in &changeset_statuses {
+            let ids: Vec<String> = changeset_rows
+                .iter()
+                .filter(|(_, value)| value == status)
+                .map(|(id, _)| id.clone())
+                .collect();
+            if ids.is_empty() {
+                continue;
+            }
+            let count = ids.len();
+            changesets.push(StatusChangeSetGroup {
+                status: status.clone(),
+                count,
+                ids: if NONTERMINAL_CHANGESET_STATES.contains(&status.as_str()) {
+                    ids
+                } else {
+                    Vec::new()
+                },
+            });
+        }
+        tx.commit()?;
+
+        Ok(StatusReport {
+            agents,
+            intents,
+            claims,
+            conflicts,
+            changesets,
+        })
     }
 }
 

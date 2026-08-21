@@ -239,6 +239,7 @@ Common commands:
 | Claim scope | `foremerge work claim --agent ID --intent ID --scope KIND:KEY` |
 | Start implementation | `foremerge work start INTENT_ID --agent AGENT_ID` |
 | Ask who is changing it | `foremerge work query --scope KIND:KEY` |
+| See what every agent is doing | `foremerge status` |
 | Preflight a plan | `foremerge conflicts check --intent TEXT --scope KIND:KEY` |
 | Send coordination | `foremerge coordinate send --from ID --to ID --message TEXT` |
 | Watch semantic events | `foremerge work watch --after-seq 0` |
