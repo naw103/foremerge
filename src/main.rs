@@ -3,7 +3,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use foremerge::api::{self, ApiState};
 use foremerge::git;
 use foremerge::model::*;
-use foremerge::{Foremerge, Store, mcp};
+use foremerge::{Foremerge, Store, checks, integrations, mcp};
 use serde_json::{Value, json};
 use std::io::{self, Write};
 use std::net::SocketAddr;
@@ -43,8 +43,22 @@ struct Cli {
 enum Commands {
     /// Initialize the shared SQLite store under Git's common directory.
     Init,
-    /// Verify Git, SQLite, shared-worktree storage, API defaults, and MCP transport.
-    Doctor,
+    /// Install native skills and MCP configuration for coding-agent clients.
+    Setup {
+        #[arg(value_enum, default_value_t = ClientArg::All)]
+        client: ClientArg,
+        /// Replace a differing Foremerge-managed skill or MCP entry.
+        #[arg(long)]
+        force: bool,
+        /// Install skills only; do not register or write MCP configuration.
+        #[arg(long)]
+        skip_mcp: bool,
+    },
+    /// Verify Git, SQLite, shared storage, MCP, and optional client integration.
+    Doctor {
+        #[arg(long, value_enum)]
+        client: Option<ClientArg>,
+    },
     /// Run the loopback JSON API daemon.
     Daemon {
         #[arg(long, default_value = DEFAULT_BIND)]
@@ -78,11 +92,62 @@ enum Commands {
     Events(EventCommand),
     /// Export the current semantic dependency graph.
     Graph,
+    /// Configure trusted named verification commands available to MCP agents.
+    #[command(subcommand)]
+    Checks(CheckCommand),
     /// Create an isolated Git worktree.
     #[command(subcommand)]
     Worktree(WorktreeCommand),
     /// Raw JSON API escape hatch using configured local auth.
     Request(RequestArgs),
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ClientArg {
+    Codex,
+    Claude,
+    Cursor,
+    All,
+}
+
+impl ClientArg {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::Cursor => "cursor",
+            Self::All => "all",
+        }
+    }
+
+    fn clients(self) -> Vec<integrations::Client> {
+        match self {
+            Self::Codex => vec![integrations::Client::Codex],
+            Self::Claude => vec![integrations::Client::Claude],
+            Self::Cursor => vec![integrations::Client::Cursor],
+            Self::All => vec![
+                integrations::Client::Codex,
+                integrations::Client::Claude,
+                integrations::Client::Cursor,
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum CheckCommand {
+    /// Add or replace a trusted argv validation command in private shared state.
+    Set {
+        name: String,
+        #[arg(long, default_value_t = 300)]
+        timeout_seconds: u64,
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    /// List trusted verification checks available to MCP agents.
+    List,
+    /// Remove a trusted verification check.
+    Remove { name: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -388,10 +453,49 @@ async fn execute(cli: Cli) -> Result<()> {
                 }),
             )?;
         }
-        Commands::Doctor => {
+        Commands::Setup {
+            client,
+            force,
+            skip_mcp,
+        } => {
+            let repo = git::discover(&cwd).context(
+                "INVALID_INPUT: client setup must run inside the Git repository to coordinate",
+            )?;
+            let service = open_service(&database, &cwd)?;
+            let token_path = ensure_token(&cwd)?;
+            let executable = std::env::current_exe().context("resolve Foremerge executable")?;
+            let doctor_client = client.name();
+            let clients = client.clients();
+            let reports =
+                integrations::install(&repo.root, &clients, &executable, force, !skip_mcp)?;
+            emit(
+                cli.json,
+                json!({
+                    "repository": repo.root,
+                    "database": service.store().path(),
+                    "token_file": token_path,
+                    "clients": reports,
+                    "next_step": format!("foremerge --json doctor --client {doctor_client}")
+                }),
+            )?;
+        }
+        Commands::Doctor { client } => {
             let store = Store::open(&database);
             let repo = git::discover(&cwd).ok();
             let token_path = git::runtime_dir(&cwd).join("token");
+            let client_diagnostics = client
+                .map(|value| {
+                    integrations::diagnose(
+                        repo.as_ref()
+                            .map_or(cwd.as_path(), |value| value.root.as_path()),
+                        &value.clients(),
+                    )
+                })
+                .unwrap_or_default();
+            let clients_ready = client_diagnostics.iter().all(|value| value.ready);
+            let next_client_step = client_diagnostics
+                .iter()
+                .find_map(|value| value.next_step.clone());
             let report = DoctorReport {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 database: database.to_string_lossy().into_owned(),
@@ -408,15 +512,19 @@ async fn execute(cli: Cli) -> Result<()> {
                 api_bind: DEFAULT_BIND.to_string(),
                 token_configured: token_path.is_file(),
                 mcp_transport: "stdio (newline-delimited JSON-RPC; MCP 2026-07-28 with 2025-11-25 initialize compatibility)".to_string(),
-                ready: store.is_ok() && git::available(),
-                next_step: if repo.is_some() {
+                ready: store.is_ok() && git::available() && clients_ready,
+                next_step: if let Some(next_step) = next_client_step {
+                    next_step
+                } else if repo.is_some() {
                     "foremerge --json agent register --name agent-1 --model your-model".to_string()
                 } else {
                     "Run inside a Git worktree (recommended), or continue with --database PATH."
                         .to_string()
                 },
             };
-            emit(cli.json, serde_json::to_value(report)?)?;
+            let mut value = serde_json::to_value(report)?;
+            value["clients"] = serde_json::to_value(client_diagnostics)?;
+            emit(cli.json, value)?;
         }
         Commands::Daemon { bind, no_auth } => {
             if !bind.ip().is_loopback() {
@@ -437,7 +545,30 @@ async fn execute(cli: Cli) -> Result<()> {
         }
         Commands::Mcp => {
             let service = open_service(&database, &cwd)?;
-            mcp::run_stdio(service).await?;
+            mcp::run_stdio(service, cwd.clone()).await?;
+        }
+        Commands::Checks(command) => {
+            let _service = open_service(&database, &cwd)?;
+            let registry = match command {
+                CheckCommand::Set {
+                    name,
+                    timeout_seconds,
+                    command,
+                } => checks::set(
+                    &cwd,
+                    &name,
+                    checks::NamedCheck {
+                        command,
+                        timeout_seconds,
+                    },
+                )?,
+                CheckCommand::List => checks::load(&cwd)?,
+                CheckCommand::Remove { name } => checks::remove(&cwd, &name)?,
+            };
+            emit(
+                cli.json,
+                json!({ "path": checks::path(&cwd), "registry": registry }),
+            )?;
         }
         Commands::Request(request) => run_raw_request(&cwd, request, cli.json).await?,
         Commands::Worktree(WorktreeCommand::Create { branch, path, base }) => {

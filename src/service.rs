@@ -1514,6 +1514,9 @@ impl Foremerge {
     }
 
     pub fn discard_work(&self, agent_id: &str, intent_id: &str, reason: &str) -> Result<Intent> {
+        if reason.trim().is_empty() {
+            bail!("INVALID_INPUT: discard reason is required");
+        }
         let mut conn = self.store.lock()?;
         let tx = Store::immediate_tx(&mut conn)?;
         let intent = intent_by_id(&tx, intent_id)?;

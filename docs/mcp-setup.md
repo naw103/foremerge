@@ -25,6 +25,18 @@ cargo build --release
 
 ## Recommended configuration
 
+For Codex, Claude Code, or Cursor, prefer the safe repository installer and
+then inspect the result:
+
+```bash
+foremerge setup claude   # or codex, cursor, all
+foremerge doctor --client claude
+```
+
+See [agent client setup](agent-clients.md) for client-specific discovery paths
+and overwrite behavior. The manual forms below remain useful for other MCP
+hosts.
+
 The most predictable setup gives each MCP process the same explicit database:
 
 ```json
@@ -97,10 +109,16 @@ The complete MVP MCP tool surface is:
 | `check_conflicts` | Preflight or re-evaluate semantic conflicts |
 | `publish_changeset` | Record implementation, tests, decisions, and Git provenance |
 | `coordinate_with_agent` | Store a durable message for another agent |
+| `start_work` | Advance a claimed intent to `IN_PROGRESS` |
+| `resolve_conflict` | Record an audited decision for a durable `cfl_*` finding |
+| `run_verification` | Execute a trusted repository check by name |
+| `accept_changeset` | Apply the final conflict, dependency, validation, and Git gates |
+| `record_commit` | Record the actual post-integration Git commit |
+| `discard_work` | Preserve abandoned work while releasing claims and linked blockers |
 
 Tool names are stable protocol identifiers; CLI command spelling is allowed to
-differ. Starting, discarding, validating, accepting, and committing work are
-currently CLI/JSON API operations rather than MCP tools.
+differ. Direct arbitrary validation argv remains a CLI/JSON API operation;
+MCP verification is deliberately limited to configured check names.
 
 ## Suggested agent workflow
 
@@ -112,19 +130,22 @@ At the start of a coding session:
 3. Call `publish_intent` before editing files.
 4. Inspect the returned conflicts or call `check_conflicts` for a provisional
    preflight.
-5. Call `claim_work` with semantic scopes. Use the CLI or JSON API to explicitly
-   mark work in progress if needed; publishing a ChangeSet from `CLAIMED`
-   performs that transition automatically.
+5. Call `claim_work` with semantic scopes.
+6. Call `start_work` before implementation.
 
 At a useful implementation boundary:
 
 1. Call `publish_changeset` with affected files, symbols, contracts,
    dependencies, reported tests, decisions, and provenance.
-2. Run validation through the CLI or JSON API with an argv command and timeout.
-3. Re-coordinate any high conflicts with `coordinate_with_agent`.
-4. Accept through the CLI or JSON API only for the validated clean Git state.
-5. Integrate through ordinary Git, then record the commit through the CLI or
-   JSON API.
+2. Call `run_verification` with a trusted check name configured by a maintainer.
+3. Re-coordinate high conflicts with `coordinate_with_agent`, then call
+   `resolve_conflict` for the durable decision.
+4. Call `accept_changeset` only for the validated clean Git state.
+5. Integrate through ordinary Git, then call `record_commit` with the commit
+   that actually landed.
+
+If the work should not land, call `discard_work` instead of deleting its
+coordination record.
 
 Do not call tools for every keystroke. Foremerge events are semantic boundaries.
 
@@ -229,6 +250,65 @@ Unpublished preflight:
 }
 ```
 
+### `start_work`
+
+```json
+{"agent_id":"agt_...","intent_id":"int_..."}
+```
+
+### `resolve_conflict`
+
+```json
+{
+  "conflict_id": "cfl_...",
+  "agent_id": "agt_...",
+  "resolution": "Introduce PaymentProvider first",
+  "rationale": "Both provider changes can depend on the stable contract"
+}
+```
+
+### `run_verification`
+
+Configure trusted argv outside the MCP request:
+
+```bash
+foremerge checks set test -- cargo test --all-targets
+foremerge checks list
+```
+
+The agent then sends only:
+
+```json
+{"changeset_id":"chg_...","check":"test"}
+```
+
+### `accept_changeset`
+
+```json
+{"changeset_id":"chg_...","git_ref":"HEAD"}
+```
+
+A HIGH-conflict override additionally requires both
+`"allow_high_conflicts":true` and a nonempty `"override_reason"`.
+
+### `record_commit`
+
+```json
+{"changeset_id":"chg_...","git_ref":"main"}
+```
+
+Call this only after ordinary Git or pull-request integration.
+
+### `discard_work`
+
+```json
+{
+  "agent_id": "agt_...",
+  "intent_id": "int_...",
+  "reason": "The experiment will not land"
+}
+```
+
 ## Transport smoke test
 
 For protocol debugging, run `foremerge mcp` directly and send one compact JSON
@@ -279,6 +359,13 @@ clients, because that erases ownership and model provenance.
 - Send one compact request per line.
 - Verify request IDs are valid JSON-RPC IDs.
 
+### Verification reports that a check is not configured
+
+- Run `foremerge checks list` from the same Git repository.
+- Ask a trusted maintainer to add the intended argv with `foremerge checks set`.
+- Do not work around the named-check boundary by accepting agent-reported tests;
+  they are provenance only.
+
 ### Validation fails to start through the CLI or API
 
 - Pass a non-empty argv array rather than a shell command string.
@@ -293,8 +380,8 @@ database. The MVP has no daemon autostart or automatic endpoint discovery.
 
 ## Security notes
 
-- The MVP MCP tools do not execute validation commands; validation remains a
-  CLI/API operation.
+- MCP can execute only named checks from the repository-private registry. The
+  check argv is trusted local code and is not sandboxed.
 - `publish_changeset` inspects the supplied local worktree through Git. Only
   connect clients you trust with local path access.
 - Test output and caller-provided provenance are stored locally in SQLite.

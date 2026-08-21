@@ -1,12 +1,14 @@
-use crate::Foremerge;
 use crate::model::*;
+use crate::{Foremerge, checks};
+use serde::Deserialize;
 use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const CURRENT_PROTOCOL: &str = "2026-07-28";
 const LEGACY_PROTOCOL: &str = "2025-11-25";
 
-pub async fn run_stdio(service: Foremerge) -> anyhow::Result<()> {
+pub async fn run_stdio(service: Foremerge, cwd: PathBuf) -> anyhow::Result<()> {
     let stdin = tokio::io::stdin();
     let mut lines = BufReader::new(stdin).lines();
     let mut stdout = tokio::io::stdout();
@@ -15,7 +17,7 @@ pub async fn run_stdio(service: Foremerge) -> anyhow::Result<()> {
             continue;
         }
         let response = match serde_json::from_str::<Value>(&line) {
-            Ok(message) => handle_message(&service, message).await,
+            Ok(message) => handle_message_at(&service, &cwd, message).await,
             Err(error) => Some(jsonrpc_error(
                 Value::Null,
                 -32700,
@@ -33,6 +35,11 @@ pub async fn run_stdio(service: Foremerge) -> anyhow::Result<()> {
 }
 
 pub async fn handle_message(service: &Foremerge, message: Value) -> Option<Value> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    handle_message_at(service, &cwd, message).await
+}
+
+pub async fn handle_message_at(service: &Foremerge, cwd: &Path, message: Value) -> Option<Value> {
     let id = message.get("id").cloned()?;
     let method = message.get("method").and_then(Value::as_str).unwrap_or("");
     let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
@@ -46,7 +53,7 @@ pub async fn handle_message(service: &Foremerge, message: Value) -> Option<Value
                 "protocolVersion": if requested == CURRENT_PROTOCOL { CURRENT_PROTOCOL } else { LEGACY_PROTOCOL },
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": server_info(),
-                "instructions": "Publish intent and semantic scopes before editing. Claims are advisory; unresolved HIGH conflicts gate acceptance."
+                "instructions": "Publish intent and semantic scopes before editing, then claim and start work. Claims are advisory. Resolve durable HIGH conflicts, publish a clean ChangeSet, run a trusted named verification check, and accept before ordinary Git integration. Record the landing commit afterward."
             }))
         }
         "server/discover" => Ok(json!({
@@ -55,7 +62,7 @@ pub async fn handle_message(service: &Foremerge, message: Value) -> Option<Value
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tool_catalog() })),
-        "tools/call" => call_tool(service, params).await,
+        "tools/call" => call_tool(service, cwd, params).await,
         _ => {
             return Some(jsonrpc_error(
                 id,
@@ -78,7 +85,51 @@ pub async fn handle_message(service: &Foremerge, message: Value) -> Option<Value
     }
 }
 
-async fn call_tool(service: &Foremerge, params: Value) -> Result<Value, (i64, String)> {
+#[derive(Debug, Deserialize)]
+struct StartWorkToolRequest {
+    agent_id: String,
+    intent_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RunVerificationToolRequest {
+    changeset_id: String,
+    check: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolveConflictToolRequest {
+    conflict_id: String,
+    agent_id: String,
+    resolution: String,
+    rationale: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AcceptChangeSetToolRequest {
+    changeset_id: String,
+    #[serde(default)]
+    git_ref: Option<String>,
+    #[serde(default)]
+    allow_high_conflicts: bool,
+    #[serde(default)]
+    override_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscardWorkToolRequest {
+    agent_id: String,
+    intent_id: String,
+    reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RecordCommitToolRequest {
+    changeset_id: String,
+    git_ref: String,
+}
+
+async fn call_tool(service: &Foremerge, cwd: &Path, params: Value) -> Result<Value, (i64, String)> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
@@ -108,6 +159,58 @@ async fn call_tool(service: &Foremerge, params: Value) -> Result<Value, (i64, St
             .and_then(to_value),
         "coordinate_with_agent" => parse::<CoordinateRequest>(arguments)
             .and_then(|request| service.coordinate_with_agent(request))
+            .and_then(to_value),
+        "start_work" => parse::<StartWorkToolRequest>(arguments)
+            .and_then(|request| service.start_work(&request.agent_id, &request.intent_id))
+            .and_then(to_value),
+        "run_verification" => match parse::<RunVerificationToolRequest>(arguments) {
+            Ok(request) => match checks::get(cwd, &request.check) {
+                Ok(check) => service
+                    .validate_changeset(
+                        &request.changeset_id,
+                        ValidationRequest {
+                            command: check.command,
+                            worktree: None,
+                            timeout_seconds: check.timeout_seconds,
+                        },
+                    )
+                    .await
+                    .and_then(to_value),
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error),
+        },
+        "resolve_conflict" => parse::<ResolveConflictToolRequest>(arguments)
+            .and_then(|request| {
+                service.resolve_conflict(
+                    &request.conflict_id,
+                    ResolveConflictRequest {
+                        agent_id: request.agent_id,
+                        resolution: request.resolution,
+                        rationale: request.rationale,
+                    },
+                )
+            })
+            .and_then(to_value),
+        "accept_changeset" => parse::<AcceptChangeSetToolRequest>(arguments)
+            .and_then(|request| {
+                service.accept_changeset(
+                    &request.changeset_id,
+                    AcceptRequest {
+                        git_ref: request.git_ref,
+                        allow_high_conflicts: request.allow_high_conflicts,
+                        override_reason: request.override_reason,
+                    },
+                )
+            })
+            .and_then(to_value),
+        "discard_work" => parse::<DiscardWorkToolRequest>(arguments)
+            .and_then(|request| {
+                service.discard_work(&request.agent_id, &request.intent_id, &request.reason)
+            })
+            .and_then(to_value),
+        "record_commit" => parse::<RecordCommitToolRequest>(arguments)
+            .and_then(|request| service.record_commit(&request.changeset_id, &request.git_ref))
             .and_then(to_value),
         _ => return Err((-32602, format!("unknown tool: {name}"))),
     };
@@ -197,9 +300,28 @@ fn with_input_any_of(mut definition: Value, any_of: Value) -> Value {
     definition
 }
 
+fn with_destructive_hint(mut definition: Value) -> Value {
+    definition["annotations"]["destructiveHint"] = Value::Bool(true);
+    definition
+}
+
 pub fn tool_catalog() -> Vec<Value> {
     let scope = scope_schema();
     vec![
+        tool(
+            "accept_changeset",
+            "Accept a validated ChangeSet",
+            "Apply Foremerge's final conflict, dependency, fingerprint, validation, and Git gates, then pin the accepted commit.",
+            json!({
+                "changeset_id": { "type": "string", "minLength": 1 },
+                "git_ref": { "type": "string", "minLength": 1 },
+                "allow_high_conflicts": { "type": "boolean", "default": false },
+                "override_reason": { "type": "string", "minLength": 1 }
+            }),
+            &["changeset_id"],
+            false,
+            false,
+        ),
         with_input_any_of(
             tool(
                 "check_conflicts",
@@ -250,6 +372,19 @@ pub fn tool_catalog() -> Vec<Value> {
             false,
             false,
         ),
+        with_destructive_hint(tool(
+            "discard_work",
+            "Discard work",
+            "Discard a nonterminal intent, release its claims, and dismiss conflicts linked to the discarded work.",
+            json!({
+                "agent_id": { "type": "string", "minLength": 1 },
+                "intent_id": { "type": "string", "minLength": 1 },
+                "reason": { "type": "string", "minLength": 1 }
+            }),
+            &["agent_id", "intent_id", "reason"],
+            false,
+            false,
+        )),
         tool(
             "publish_changeset",
             "Publish a provisional ChangeSet",
@@ -334,6 +469,18 @@ pub fn tool_catalog() -> Vec<Value> {
             true,
         ),
         tool(
+            "record_commit",
+            "Record integration commit",
+            "After ordinary Git or PR integration, record the durable target commit while preserving the immutable accepted commit.",
+            json!({
+                "changeset_id": { "type": "string", "minLength": 1 },
+                "git_ref": { "type": "string", "minLength": 1 }
+            }),
+            &["changeset_id", "git_ref"],
+            false,
+            false,
+        ),
+        tool(
             "register_agent",
             "Register coding agent",
             "Register an agent/model and its isolated Git worktree in the shared coordination graph.",
@@ -347,6 +494,49 @@ pub fn tool_catalog() -> Vec<Value> {
             false,
             false,
         ),
+        tool(
+            "resolve_conflict",
+            "Resolve a persisted conflict",
+            "Record an audited resolution decision for a durable cfl_* conflict so blocked work can proceed.",
+            json!({
+                "conflict_id": { "type": "string", "pattern": "^cfl_" },
+                "agent_id": { "type": "string", "minLength": 1 },
+                "resolution": { "type": "string", "minLength": 1 },
+                "rationale": { "type": "string", "minLength": 1 }
+            }),
+            &["conflict_id", "agent_id", "resolution", "rationale"],
+            false,
+            false,
+        ),
+        tool(
+            "run_verification",
+            "Run a trusted verification check",
+            "Run one named check from the repository-private Foremerge registry. Raw commands are intentionally not accepted over MCP.",
+            json!({
+                "changeset_id": { "type": "string", "minLength": 1 },
+                "check": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+                }
+            }),
+            &["changeset_id", "check"],
+            false,
+            false,
+        ),
+        tool(
+            "start_work",
+            "Start claimed work",
+            "Advance an agent's claimed intent into IN_PROGRESS before implementation.",
+            json!({
+                "agent_id": { "type": "string", "minLength": 1 },
+                "intent_id": { "type": "string", "minLength": 1 }
+            }),
+            &["agent_id", "intent_id"],
+            false,
+            false,
+        ),
     ]
 }
 
@@ -356,7 +546,7 @@ mod tests {
     use crate::Store;
 
     #[tokio::test]
-    async fn lists_the_seven_required_tools_in_deterministic_order() {
+    async fn lists_the_complete_lifecycle_tools_in_deterministic_order() {
         let service = Foremerge::new(Store::in_memory().unwrap());
         let response = handle_message(
             &service,
@@ -372,32 +562,52 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "accept_changeset",
                 "check_conflicts",
                 "claim_work",
                 "coordinate_with_agent",
+                "discard_work",
                 "publish_changeset",
                 "publish_intent",
                 "query_work",
+                "record_commit",
                 "register_agent",
+                "resolve_conflict",
+                "run_verification",
+                "start_work",
             ]
         );
         assert!(tools.iter().all(|tool| tool.get("outputSchema").is_none()));
-        assert_eq!(tools[0]["annotations"]["readOnlyHint"], true);
-        assert_eq!(tools[0]["annotations"]["idempotentHint"], false);
+        assert_eq!(tools[1]["annotations"]["readOnlyHint"], true);
+        assert_eq!(tools[1]["annotations"]["idempotentHint"], false);
         assert_eq!(
-            tools[0]["inputSchema"]["anyOf"].as_array().unwrap().len(),
+            tools[1]["inputSchema"]["anyOf"].as_array().unwrap().len(),
             2
         );
         assert_eq!(
-            tools[3]["inputSchema"]["properties"]["tests"]["items"]["required"],
+            tools[5]["inputSchema"]["properties"]["tests"]["items"]["required"],
             json!(["command", "status"])
         );
         assert_eq!(
-            tools[3]["inputSchema"]["properties"]["decisions"]["items"]["required"],
+            tools[5]["inputSchema"]["properties"]["decisions"]["items"]["required"],
             json!(["title", "rationale"])
         );
-        assert_eq!(tools[5]["annotations"]["readOnlyHint"], true);
-        assert_eq!(tools[5]["annotations"]["idempotentHint"], true);
+        assert_eq!(tools[4]["annotations"]["destructiveHint"], true);
+        assert_eq!(tools[7]["annotations"]["readOnlyHint"], true);
+        assert_eq!(tools[7]["annotations"]["idempotentHint"], true);
+        assert!(
+            tools[11]["inputSchema"]["properties"]
+                .get("command")
+                .is_none()
+        );
+        assert_eq!(
+            tools[11]["inputSchema"]["properties"]["check"]["type"],
+            "string"
+        );
+        assert_eq!(
+            tools[11]["inputSchema"]["properties"]["check"]["pattern"],
+            "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        );
     }
 
     #[tokio::test]

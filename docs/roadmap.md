@@ -27,7 +27,7 @@ validation must leave the target Git ref unchanged.
 
 ## Next: protocol fidelity and integrations
 
-- Publish versioned JSON Schemas for events, entities, and all seven initial MCP
+- Publish versioned JSON Schemas for events, entities, and all 13 MCP
   tools.
 - Add export/import and migration tooling for local provenance.
 - Add language adapters for symbols and references while retaining manual scopes
@@ -37,8 +37,9 @@ validation must leave the target Git ref unchanged.
   and negative-control coverage.
 - Add claim renewal, explicit release, stale-agent handling, and better recovery
   diagnostics.
-- Test client configuration for major MCP hosts and document compatibility by
-  version.
+- Continue compatibility testing across releases of Codex, Claude Code, and
+  Cursor; native skills, project templates, setup, and diagnostics shipped in
+  0.2.0.
 - Build the paired benchmark runner described in `benchmark-plan.md` and publish
   raw pilot results before making quantitative claims.
 

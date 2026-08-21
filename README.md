@@ -11,7 +11,7 @@ above Git. Agents keep isolated worktrees while sharing intent, semantic
 claims, dependencies, provisional ChangeSets, decisions, validation, and
 provenance.
 
-> **Status:** Foremerge `0.1.0` is a pre-1.0, local-first MVP. The CLI, JSON API,
+> **Status:** Foremerge `0.2.0` is a pre-1.0, local-first MVP. The CLI, JSON API,
 > MCP server, SQLite store, deterministic conflict detector, and
 > verification-gated lifecycle are implemented. Public schemas may still
 > change. Shared multi-machine mode and published benchmark results do not yet
@@ -60,6 +60,19 @@ the repository you want to coordinate:
 foremerge init
 foremerge doctor
 ```
+
+Install the native skill and MCP entry for any clients used in this repository,
+then define the trusted checks agents may request by name:
+
+```sh
+foremerge setup all
+foremerge checks set test -- cargo test --all-targets
+foremerge doctor --client all
+```
+
+Use `setup codex`, `setup claude`, or `setup cursor` for one client. Setup
+preserves unrelated configuration and refuses to replace a differing skill or
+Foremerge MCP entry unless you explicitly pass `--force`.
 
 `init` creates local coordination state under the repository's Git common
 directory. It does not change tracked files. The following no-worktree sessions
@@ -292,7 +305,7 @@ with an explicit rationale. Acceptance creates
 Validation commands run as trusted local code with your operating-system
 permissions. Foremerge does not sandbox them.
 
-## MCP: seven focused tools
+## Agent clients and MCP: complete lifecycle tools
 
 Run `foremerge mcp` over stdio. MCP does not require the HTTP daemon; both are
 adapters over the same database.
@@ -306,6 +319,12 @@ adapters over the same database.
 | `check_conflicts` | Check a published or provisional intent before code changes |
 | `publish_changeset` | Record implementation, tests, decisions, and Git provenance |
 | `coordinate_with_agent` | Send a durable message linked to a conflict or ChangeSet |
+| `start_work` | Advance claimed work into implementation |
+| `resolve_conflict` | Record an audited resolution for a durable conflict |
+| `run_verification` | Run a trusted repository check by name, never raw MCP argv |
+| `accept_changeset` | Apply final conflict, dependency, validation, and Git gates |
+| `record_commit` | Record the actual Git integration commit |
+| `discard_work` | Preserve abandoned work while releasing claims and blockers |
 
 Start from the valid minimal config in
 [`examples/mcp-config.json`](examples/mcp-config.json). It assumes the client
@@ -314,22 +333,15 @@ without a repository working-directory setting should pass an absolute
 `--database` before `mcp`; derive the Git common directory instead of assuming
 that a linked worktree's `.git` is a directory.
 
-See [MCP setup](docs/mcp-setup.md) for transport behavior, schemas, example
-inputs, and multi-worktree configuration. Lifecycle validation and acceptance
-are currently CLI/JSON API operations, not additional MCP tools.
+See [agent client setup](docs/agent-clients.md) for the installer, native skill
+locations, client-specific MCP files, diagnostics, and safe replacement rules.
+See [MCP setup](docs/mcp-setup.md) for transport behavior, schemas, named checks,
+example inputs, and multi-worktree configuration.
 
-## Codex companion skill
-
-Source clones include a ready-to-use Codex skill at
-`.codex/skills/foremerge/SKILL.md`. It
-teaches coding agents to coordinate before editing, distinguish durable
-`cfl_*` conflicts from ephemeral `eph_*` preflights, validate exact Git
-fingerprints, and record integration only after ordinary Git landing. Invoke it
-as `$foremerge` when the repository-local skill directory is discovered by your
-client.
-
-The companion skill is source-clone tooling and is not installed by
-`cargo install`; the Rust package remains client-agnostic.
+Source clones include equivalent skills in `.codex/skills`, `.claude/skills`,
+and `.cursor/skills`, plus portable Claude and Cursor MCP templates. A Cargo
+installation embeds the canonical skill so `foremerge setup` can install it
+into another repository without copying this source tree.
 
 ## Local JSON API
 
@@ -398,7 +410,8 @@ using Foremerge as an integration gate.
 | [State model](docs/state-model.md) | Which transitions and invariants gate work? |
 | [Conflict detection](docs/conflict-detection.md) | Which deterministic rules produce findings and suggestions? |
 | [Git integration](docs/git-integration.md) | How do fingerprints, worktrees, and accepted refs behave? |
-| [MCP setup](docs/mcp-setup.md) | How do clients configure and call the seven tools? |
+| [Agent clients](docs/agent-clients.md) | How do Codex, Claude Code, and Cursor discover the skill and MCP server? |
+| [MCP setup](docs/mcp-setup.md) | How do clients configure and call the 13 lifecycle tools? |
 | [JSON API](docs/json-api.md) | Which routes, request bodies, auth, and errors are shipped? |
 | [OpenAPI schema](docs/openapi.yaml) | What is the machine-readable HTTP contract? |
 | [Benchmark plan](docs/benchmark-plan.md) | How will coordinated and uncoordinated runs be compared? |

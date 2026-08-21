@@ -42,19 +42,26 @@ integrate with ordinary Git or a pull request
 record the integration commit
 ```
 
-The seven named coordination tools are available through MCP:
+The complete lifecycle is available through 13 MCP tools:
 
-- `register_agent`
-- `claim_work`
-- `query_work`
-- `publish_intent`
-- `publish_changeset`
+- `accept_changeset`
 - `check_conflicts`
+- `claim_work`
 - `coordinate_with_agent`
+- `discard_work`
+- `publish_changeset`
+- `publish_intent`
+- `query_work`
+- `record_commit`
+- `register_agent`
+- `resolve_conflict`
+- `run_verification`
+- `start_work`
 
-Validation and acceptance are also exposed by the HTTP/CLI surface. Consult
-[MCP setup](mcp-setup.md) and [JSON API](json-api.md) for the exact shipped
-surface.
+`run_verification` accepts only a trusted check name from repository-private
+Foremerge configuration. The CLI and HTTP API retain their direct argv
+validation operation. Consult [MCP setup](mcp-setup.md), [agent client setup](agent-clients.md),
+and [JSON API](json-api.md) for the exact shipped surfaces.
 
 ## CLI surface
 
@@ -64,9 +71,11 @@ the command. The MVP command tree is:
 
 ```text
 foremerge init
-foremerge doctor
+foremerge setup codex|claude|cursor|all
+foremerge doctor [--client codex|claude|cursor|all]
 foremerge daemon [--bind <address>] [--no-auth]
 foremerge mcp
+foremerge checks set|list|remove
 foremerge agent register
 foremerge intent publish
 foremerge work claim|query|start|watch|discard

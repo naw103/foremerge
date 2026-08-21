@@ -1,4 +1,4 @@
 interface:
   display_name: "Foremerge"
   short_description: "Coordinate coding agents safely above Git"
-  default_prompt: "Use $foremerge to publish intent, check semantic conflicts, and coordinate this coding task before editing."
+  default_prompt: "Use $foremerge to publish intent, coordinate semantic conflicts, verify the ChangeSet, and record the integrated work."

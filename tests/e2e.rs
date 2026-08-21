@@ -1,4 +1,4 @@
-use foremerge::Store;
+use foremerge::{Foremerge, Store, checks, mcp};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -904,13 +904,19 @@ fn real_mcp_stdio_initializes_lists_tools_and_calls_one() {
     assert_eq!(
         names,
         vec![
+            "accept_changeset",
             "check_conflicts",
             "claim_work",
             "coordinate_with_agent",
+            "discard_work",
             "publish_changeset",
             "publish_intent",
             "query_work",
+            "record_commit",
             "register_agent",
+            "resolve_conflict",
+            "run_verification",
+            "start_work",
         ]
     );
     assert_eq!(responses[2]["id"], 3);
@@ -927,6 +933,329 @@ fn real_mcp_stdio_initializes_lists_tools_and_calls_one() {
             .verify_event_chain()
             .unwrap()
     );
+}
+
+#[test]
+fn setup_installs_native_claude_and_cursor_integrations_and_named_checks() {
+    let repo = create_repo();
+    let claude = cli_success(&repo.root, None, ["setup", "claude"]);
+    assert_eq!(claude["data"]["clients"][0]["client"], "claude");
+    assert_eq!(claude["data"]["clients"][0]["skill"]["status"], "written");
+    let cursor = cli_success(&repo.root, None, ["setup", "cursor"]);
+    assert_eq!(cursor["data"]["clients"][0]["client"], "cursor");
+
+    let canonical_skill = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(".codex/skills/foremerge/SKILL.md"),
+    )
+    .expect("read canonical skill");
+    assert_eq!(
+        fs::read_to_string(repo.root.join(".claude/skills/foremerge/SKILL.md")).unwrap(),
+        canonical_skill
+    );
+    assert_eq!(
+        fs::read_to_string(repo.root.join(".cursor/skills/foremerge/SKILL.md")).unwrap(),
+        canonical_skill
+    );
+    for config in [
+        repo.root.join(".mcp.json"),
+        repo.root.join(".cursor/mcp.json"),
+    ] {
+        let value: Value = serde_json::from_slice(&fs::read(config).unwrap()).unwrap();
+        assert_eq!(
+            Path::new(
+                value["mcpServers"]["foremerge"]["command"]
+                    .as_str()
+                    .unwrap()
+            )
+            .file_name(),
+            Some(OsStr::new("foremerge"))
+        );
+        assert_eq!(
+            value["mcpServers"]["foremerge"]["args"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap(),
+            "mcp"
+        );
+    }
+
+    let configured = cli_success(
+        &repo.root,
+        None,
+        ["checks", "set", "test", "--", "git", "diff", "--check"],
+    );
+    assert_eq!(
+        configured["data"]["registry"]["checks"]["test"]["command"],
+        json!(["git", "diff", "--check"])
+    );
+    let listed = cli_success(&repo.root, None, ["checks", "list"]);
+    assert_eq!(
+        listed["data"]["registry"]["checks"]["test"]["timeout_seconds"],
+        300
+    );
+    let doctor = cli_success(&repo.root, None, ["doctor", "--client", "claude"]);
+    assert_eq!(doctor["data"]["clients"][0]["skill_current"], true);
+    assert_eq!(doctor["data"]["clients"][0]["mcp_configured"], true);
+    cli_success(&repo.root, None, ["checks", "remove", "test"]);
+}
+
+async fn mcp_tool_call(
+    service: &Foremerge,
+    cwd: &Path,
+    id: u64,
+    name: &str,
+    arguments: Value,
+) -> Value {
+    let response = mcp::handle_message_at(
+        service,
+        cwd,
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": arguments }
+        }),
+    )
+    .await
+    .expect("MCP tool response");
+    assert_eq!(
+        response["result"]["isError"], false,
+        "MCP tool {name} failed: {response}"
+    );
+    response["result"]["structuredContent"].clone()
+}
+
+#[tokio::test]
+async fn mcp_exposes_the_complete_work_lifecycle_with_named_verification() {
+    let repo = create_repo();
+    let database = database_from_doctor(&repo.root);
+    let service = Foremerge::new(Store::open(database).unwrap());
+
+    let agent = mcp_tool_call(
+        &service,
+        &repo.root,
+        1,
+        "register_agent",
+        json!({ "name": "mcp-lifecycle", "model": "e2e", "worktree": repo.root }),
+    )
+    .await;
+    let agent_id = agent["id"].as_str().unwrap();
+    let published = mcp_tool_call(
+        &service,
+        &repo.root,
+        2,
+        "publish_intent",
+        json!({
+            "agent_id": agent_id,
+            "task": "mcp-lifecycle",
+            "summary": "Extend CheckoutRouter with a stable retry policy",
+            "scopes": [{ "kind": "symbol", "key": "CheckoutRouter" }],
+            "metadata": { "source": "e2e" }
+        }),
+    )
+    .await;
+    let intent_id = published["intent"]["id"].as_str().unwrap();
+    mcp_tool_call(
+        &service,
+        &repo.root,
+        3,
+        "check_conflicts",
+        json!({ "intent_id": intent_id }),
+    )
+    .await;
+    mcp_tool_call(
+        &service,
+        &repo.root,
+        4,
+        "claim_work",
+        json!({
+            "agent_id": agent_id,
+            "intent_id": intent_id,
+            "scopes": [{ "kind": "symbol", "key": "CheckoutRouter" }]
+        }),
+    )
+    .await;
+    let started = mcp_tool_call(
+        &service,
+        &repo.root,
+        5,
+        "start_work",
+        json!({ "agent_id": agent_id, "intent_id": intent_id }),
+    )
+    .await;
+    assert_eq!(started["status"], "IN_PROGRESS");
+    mcp_tool_call(
+        &service,
+        &repo.root,
+        6,
+        "query_work",
+        json!({ "agent_id": agent_id }),
+    )
+    .await;
+    let changeset = mcp_tool_call(
+        &service,
+        &repo.root,
+        7,
+        "publish_changeset",
+        json!({
+            "agent_id": agent_id,
+            "intent_id": intent_id,
+            "summary": "Record the clean retry-policy candidate",
+            "symbols": ["CheckoutRouter"],
+            "provenance": { "source": "mcp-e2e" }
+        }),
+    )
+    .await;
+    let changeset_id = changeset["id"].as_str().unwrap();
+    checks::set(
+        &repo.root,
+        "test",
+        checks::NamedCheck {
+            command: vec!["git".into(), "diff".into(), "--check".into()],
+            timeout_seconds: 30,
+        },
+    )
+    .unwrap();
+    let validation = mcp_tool_call(
+        &service,
+        &repo.root,
+        8,
+        "run_verification",
+        json!({ "changeset_id": changeset_id, "check": "test" }),
+    )
+    .await;
+    assert_eq!(validation["passed"], true);
+    let accepted = mcp_tool_call(
+        &service,
+        &repo.root,
+        9,
+        "accept_changeset",
+        json!({ "changeset_id": changeset_id }),
+    )
+    .await;
+    assert_eq!(accepted["status"], "ACCEPTED");
+    fs::write(repo.root.join("landed.txt"), "integrated\n").unwrap();
+    git(&repo.root, ["add", "landed.txt"]);
+    git(
+        &repo.root,
+        ["commit", "--quiet", "-m", "integrate MCP candidate"],
+    );
+    let committed = mcp_tool_call(
+        &service,
+        &repo.root,
+        10,
+        "record_commit",
+        json!({ "changeset_id": changeset_id, "git_ref": "HEAD" }),
+    )
+    .await;
+    assert_eq!(committed["status"], "COMMITTED");
+
+    let peer = mcp_tool_call(
+        &service,
+        &repo.root,
+        11,
+        "register_agent",
+        json!({ "name": "mcp-peer", "model": "e2e", "worktree": repo.root }),
+    )
+    .await;
+    let peer_id = peer["id"].as_str().unwrap();
+    let replacement = mcp_tool_call(
+        &service,
+        &repo.root,
+        12,
+        "publish_intent",
+        json!({
+            "agent_id": agent_id,
+            "task": "replace-payments",
+            "summary": "Replace PaymentService with StripePaymentService",
+            "scopes": [{ "kind": "symbol", "key": "PaymentService" }]
+        }),
+    )
+    .await;
+    let replacement_id = replacement["intent"]["id"].as_str().unwrap();
+    let extension = mcp_tool_call(
+        &service,
+        &repo.root,
+        13,
+        "publish_intent",
+        json!({
+            "agent_id": peer_id,
+            "task": "extend-payments",
+            "summary": "Add PayPal support to PaymentService",
+            "scopes": [{ "kind": "symbol", "key": "PaymentService" }]
+        }),
+    )
+    .await;
+    let extension_id = extension["intent"]["id"].as_str().unwrap();
+    let conflict_id = extension["conflicts"][0]["id"].as_str().unwrap();
+    mcp_tool_call(
+        &service,
+        &repo.root,
+        14,
+        "coordinate_with_agent",
+        json!({
+            "from_agent_id": peer_id,
+            "to_agent_id": agent_id,
+            "message": "Use a PaymentProvider boundary first",
+            "conflict_id": conflict_id
+        }),
+    )
+    .await;
+    let resolved = mcp_tool_call(
+        &service,
+        &repo.root,
+        15,
+        "resolve_conflict",
+        json!({
+            "conflict_id": conflict_id,
+            "agent_id": peer_id,
+            "resolution": "Introduce PaymentProvider before provider-specific work",
+            "rationale": "Both intents can depend on the stable abstraction"
+        }),
+    )
+    .await;
+    assert_eq!(resolved["status"], "RESOLVED");
+    let rejected_discard = mcp::handle_message_at(
+        &service,
+        &repo.root,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 16,
+            "method": "tools/call",
+            "params": {
+                "name": "discard_work",
+                "arguments": {
+                    "agent_id": agent_id,
+                    "intent_id": replacement_id,
+                    "reason": ""
+                }
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rejected_discard["result"]["isError"], true);
+    assert!(
+        rejected_discard["result"]["structuredContent"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("discard reason is required")
+    );
+    let discarded = mcp_tool_call(
+        &service,
+        &repo.root,
+        17,
+        "discard_work",
+        json!({
+            "agent_id": agent_id,
+            "intent_id": replacement_id,
+            "reason": "Superseded by the provider abstraction plan"
+        }),
+    )
+    .await;
+    assert_eq!(discarded["status"], "DISCARDED");
+    assert_ne!(replacement_id, extension_id);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

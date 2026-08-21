@@ -43,6 +43,8 @@ src/
   service.rs   coordination use cases and lifecycle gates
   conflict.rs  deterministic intent analysis and conflict rules
   git.rs       repository discovery, snapshots, and command execution
+  checks.rs    private named-verification registry
+  integrations.rs safe Codex, Claude Code, and Cursor installation/diagnostics
   api.rs       Axum JSON API
   mcp.rs       MCP stdio JSON-RPC adapter
 ```
@@ -151,6 +153,9 @@ authoritative for code and commit identity. See
 The JSON API is useful for local scripts and language-independent integrations.
 The MCP adapter exposes the same operations to coding agents over standard I/O.
 Neither transport contains an independent coordination implementation.
+MCP verification resolves a trusted check name through repository-private
+configuration before calling the same validation service used by other
+frontends; raw validation argv is not accepted from MCP.
 
 ## Trust and safety boundaries
 
