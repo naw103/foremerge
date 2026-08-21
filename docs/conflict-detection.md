@@ -48,9 +48,13 @@ The regular expressions also recognize close variants such as “swap out X for
 Y” and “implement Y support for X”.
 
 Otherwise, a small verb lexicon assigns an operation with confidence `0.72`.
-The classifier scans the summary word by word and uses the **first** operation
-keyword by position, so “Add promotional credits, then migrate callers” reads
-as additive even though a destructive word appears later:
+Classification is **destructive-priority**: the buckets below are checked in
+table order, and a destructive keyword anywhere in the summary outranks
+additive phrasing around it. “Add promotional credits, then migrate callers”
+and “Add a migration to drop the legacy users.email column” therefore both
+classify as destructive. The classifier deliberately errs toward higher
+severity, because under-flagging destructive work (which can gate acceptance)
+is strictly worse than a cosmetic operation label.
 
 | Operation | Representative words |
 | --- | --- |
@@ -58,30 +62,37 @@ as additive even though a destructive word appears later:
 | remove | remove, delete, drop, retire |
 | rename | rename, move |
 | migrate | migrate, convert |
-| extend | extend, augment, support(s/ed/ing) |
+| extend | extend, augment, any word containing “support” |
 | add | add, introduce, implement, create |
 | modify | modify, change, update, refactor, fix |
 
 If no operation is found, confidence is `0.35`.
 
-The last confident identifier in the summary is used as a possible subject. To
-count as confident, a candidate must look like a code identifier:
+Subject extraction runs in two passes. Backticked spans are extracted first
+and are the strongest candidates: any backticked token, including lowercase
+and `::`-qualified names (`` `invoice_totals` ``, `` `billing::Ledger` ``), is
+accepted unless it is a stoplisted English word. A bare token must look like a
+code identifier:
 
 - CamelCase with at least two humps (`PaymentService`, `CreditLedger`); or
-- containing `_` or `::`; or
-- wrapped in backticks in the summary;
+- containing `_`; or
+- `::`-qualified (`billing::Ledger`);
 
-and it must not be a stoplisted English sentence-starter (“No”, “The”, “This”,
-“Then”, and similar), which the pattern would otherwise match at the start of a
-sentence. When no confident subject exists, explanations and suggestions fall
-back to the overlapping scope’s key instead of a mis-extracted word. This is
-intentionally modest natural-language processing, not general semantic
+and it must contain at least one lowercase letter (rejecting ticket and
+version noise such as `JIRA_1234` or `Q3_2026`) and must not be a stoplisted
+English sentence-starter (“No”, “The”, “This”, “Then”, and similar), which the
+pattern would otherwise match at the start of a sentence. Among the surviving
+candidates, Foremerge prefers one whose tokens overlap a semantic scope key
+the intent declared; only otherwise does the last candidate win. When no
+confident subject exists, explanations and suggestions fall back to the
+destructive side’s overlapping scope key instead of a mis-extracted word. This
+is intentionally modest natural-language processing, not general semantic
 understanding.
 
 ## Scope matching
 
-Foremerge visits explicit scope pairs in request order and uses the first pair
-that satisfies one of these checks:
+Foremerge scores every explicit scope pair and keeps the best tier, so an
+exact match is never shadowed by an earlier-listed weak token overlap:
 
 1. Exact canonical scope, such as `symbol:PaymentService` against the same
    canonical scope: overlap score `1.0`.
@@ -115,13 +126,16 @@ severity: HIGH
 This rule returns immediately for the pair because it is the strongest and most
 actionable explanation.
 
-The suggestion is scope-kind-aware. For `schema`, `migration`, and `config`
-scopes, Foremerge suggests agreeing the migration order explicitly: sequencing
-both changes as one migration plan or rebasing one intent onto the other’s
-outcome. A provider abstraction is the wrong advice for a schema
-change. For other kinds (such as `symbol`, `contract`, `component`, and `api`)
-it keeps the provider-abstraction suggestion described below. Both are
-heuristic advice, not automatic design decisions.
+The suggestion is scope-kind-aware. When **either** side’s overlapping scope
+kind is `schema`, `migration`, or `config`, regardless of which intent was
+published first or ran the check, Foremerge suggests agreeing the migration
+order explicitly: sequencing both changes as one migration plan or rebasing
+one intent onto the other’s outcome. A provider abstraction is the wrong
+advice for a schema change. When neither side has such a kind (for example
+`symbol`, `contract`, `component`, and `api`) it keeps the
+provider-abstraction suggestion described below, named after the destructive
+side’s subject or overlapping scope key. Both are heuristic advice, not
+automatic design decisions.
 
 ### FM-C002: divergent replacement
 
@@ -134,8 +148,9 @@ severity: HIGH
 ```
 
 The suggestion asks agents to choose and record one target design before
-continuing. For `schema`, `migration`, and `config` scopes it instead suggests
-agreeing the migration order explicitly, as in FM-C001.
+continuing. When either side’s overlapping scope kind is `schema`,
+`migration`, or `config`, it instead suggests agreeing the migration order
+explicitly, as in FM-C001.
 
 ### FM-C003: shared semantic scope
 
