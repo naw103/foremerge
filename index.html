@@ -203,7 +203,7 @@
 
   <header class="hero">
     <h1>Catch <span class="conflict">intent conflicts</span> before <span class="code">code conflicts</span>.</h1>
-    <p class="sub">Foremerge is the open-source coordination protocol for coding agents, built <strong>above Git</strong>. Agents keep isolated worktrees while sharing intent, semantic claims, dependencies, provisional ChangeSets, decisions, and verification — so plans collide in a queryable store, not in your merge.</p>
+    <p class="sub">Foremerge is the open-source coordination protocol for coding agents, built <strong>above Git</strong>. Claude Code in one worktree, Codex in another — agents from any provider share intent, semantic claims, dependencies, provisional ChangeSets, decisions, and verification through one store, so plans collide in a queryable database, not in your merge.</p>
     <div class="cta">
       <a class="btn primary" href="https://github.com/naw103/foremerge">View on GitHub</a>
       <a class="btn" href="https://github.com/naw103/foremerge/blob/main/docs/mcp-setup.md">MCP setup</a>
@@ -289,6 +289,24 @@
       <span class="stage">COMMITTED</span>
     </div>
     <p style="margin-top:1.2rem">Agent-reported test results are provenance, never proof. Acceptance requires Foremerge-executed validation against the exact Git fingerprint of the candidate — and any change after validation makes that evidence stale.</p>
+  </div>
+</section>
+
+<section id="fleets">
+  <div class="wrap prose">
+    <p class="eyebrow">Mixed fleets</p>
+    <h2>One store, many models.</h2>
+    <p>The protocol carries nothing provider-specific, so heterogeneous fleets are the design center, not an edge case. Any MCP-capable client drives the same seven tools; anything else uses the CLI or JSON API. Every ChangeSet records which agent and <strong>which model</strong> did what, validated how, against which exact Git fingerprint — so a mixed Claude&nbsp;+&nbsp;Codex run doesn't just work, it produces the cross-model coordination data nobody else is collecting.</p>
+    <div class="agents" aria-label="Mixed-fleet example">
+      <div class="agent">
+        <div class="who">Worktree A</div>
+        <div class="intent">Claude Code · <span class="scope-chip">claude-fable-5</span></div>
+      </div>
+      <div class="agent">
+        <div class="who">Worktree B</div>
+        <div class="intent">Codex · <span class="scope-chip">gpt-5.2-codex</span></div>
+      </div>
+    </div>
   </div>
 </section>
 
