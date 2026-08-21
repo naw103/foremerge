@@ -166,6 +166,8 @@ enum AgentCommand {
         #[arg(long)]
         no_worktree: bool,
     },
+    /// List registered agents with id, name, model, worktree, and status.
+    List,
 }
 
 #[derive(Debug, Subcommand)]
@@ -187,6 +189,9 @@ enum IntentCommand {
         #[arg(long = "metadata-json", default_value = "{}")]
         metadata: String,
     },
+    /// Show one intent: summary, task, owning agent, scopes, status, and open
+    /// conflict ids.
+    Show { intent_id: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -247,8 +252,11 @@ enum ConflictCommand {
     Check {
         #[arg(long = "agent")]
         agent_id: Option<String>,
+        /// Check a persisted intent by id (int_*).
         #[arg(long = "intent-id", conflicts_with = "intent")]
         intent_id: Option<String>,
+        /// Free-form intent text for a provisional preflight. Intent ids are
+        /// rejected here; pass them with --intent-id instead.
         #[arg(long, conflicts_with = "intent_id")]
         intent: Option<String>,
         #[arg(long = "scope")]
@@ -260,12 +268,23 @@ enum ConflictCommand {
         status: Option<String>,
     },
     /// Record a decision and resolve a persisted conflict.
+    #[command(long_about = "Record a decision and resolve a persisted conflict.\n\n\
+            On this trusted CLI surface any registered agent (or a human operator acting as one) \
+            may resolve a conflict; over MCP resolution is accepted only from an agent whose \
+            intent is a party to the conflict, after real agreement with the other party.\n\n\
+            Resolve only after the parties actually agreed (for example via `coordinate send`), \
+            and reference that coordination in --rationale.")]
     Resolve {
         conflict_id: String,
+        /// The resolving agent; the decision is recorded under this id.
         #[arg(long = "agent")]
         agent_id: String,
+        /// Free-form decision title describing the agreed outcome, for example
+        /// 'sequenced: provider abstraction lands first' or 'split scopes'.
         #[arg(long)]
         resolution: String,
+        /// Why this resolution is correct; reference the coordination message
+        /// ids (msg_*) that produced the agreement.
         #[arg(long)]
         rationale: String,
     },
@@ -300,6 +319,10 @@ enum ChangeSetCommand {
         provenance: String,
         #[arg(long)]
         git_ref: Option<String>,
+        /// True diff base when known (for example the fork point of this
+        /// agent branch); defaults to the candidate commit's first parent.
+        #[arg(long)]
+        base_ref: Option<String>,
         #[arg(long)]
         worktree: Option<PathBuf>,
     },
@@ -350,7 +373,13 @@ enum CoordinateCommand {
         changeset_id: Option<String>,
     },
     /// Read durable messages for an agent.
-    Inbox { agent_id: String },
+    Inbox {
+        /// Agent id (positional form, kept for compatibility with --agent).
+        agent_id: Option<String>,
+        /// Agent id, matching the --agent convention of sibling commands.
+        #[arg(long = "agent")]
+        agent: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -672,6 +701,10 @@ async fn execute_service(
                 worktree,
             })?)?
         }
+        Commands::Agent(AgentCommand::List) => serde_json::to_value(service.list_agents()?)?,
+        Commands::Intent(IntentCommand::Show { intent_id }) => {
+            serde_json::to_value(service.show_intent(&intent_id)?)?
+        }
         Commands::Intent(IntentCommand::Publish {
             agent_id,
             task,
@@ -780,6 +813,7 @@ async fn execute_service(
             decision_rationale,
             provenance,
             git_ref,
+            base_ref,
             worktree,
         }) => {
             let tests = reported_tests
@@ -816,6 +850,7 @@ async fn execute_service(
                 decisions,
                 provenance: serde_json::from_str(&provenance).context("parse --provenance-json")?,
                 git_ref,
+                base_ref,
                 worktree: worktree.map(|value| value.to_string_lossy().into_owned()),
             })?)?
         }
@@ -869,7 +904,17 @@ async fn execute_service(
             conflict_id,
             changeset_id,
         })?)?,
-        Commands::Coordinate(CoordinateCommand::Inbox { agent_id }) => {
+        Commands::Coordinate(CoordinateCommand::Inbox { agent_id, agent }) => {
+            let agent_id = match (agent_id, agent) {
+                (Some(positional), Some(flag)) if positional != flag => bail!(
+                    "INVALID_INPUT: the positional AGENT_ID ({positional}) and --agent ({flag}) disagree; pass the agent id once"
+                ),
+                (Some(positional), _) => positional,
+                (None, Some(flag)) => flag,
+                (None, None) => {
+                    bail!("INVALID_INPUT: coordinate inbox requires an agent id via --agent")
+                }
+            };
             serde_json::to_value(service.inbox(&agent_id)?)?
         }
         Commands::Events(EventCommand::List { after_seq, limit }) => {

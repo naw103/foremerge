@@ -53,9 +53,11 @@ foremerge --json work start INTENT_ID --agent AGENT_ID
 
 ## Publish, verify, and accept
 
+Conflicts are not delivered as push notifications: a later publish by another agent can create a conflict against your intent after your own publish returned `conflicts: []`. Re-run `check_conflicts` (CLI: `foremerge --json conflicts check --intent-id INTENT_ID`) before publishing a ChangeSet and again before requesting verification. `start_work` and `publish_changeset` responses also include an `open_conflicts` snapshot for your intent. Pass an intent id only via `intent_id`/`--intent-id`; the free-form `intent` text field rejects id-shaped input.
+
 Commit a clean candidate with ordinary Git, then:
 
-1. Call `publish_changeset` with implementation, dependency, decision, and provenance evidence.
+1. Call `publish_changeset` with implementation, dependency, decision, and provenance evidence. Pass `base_ref` when you know the true diff base (for example your branch's fork point); otherwise Foremerge derives it from the candidate commit's first parent.
 2. Call `run_verification` with a configured check name such as `test`.
 3. Resolve any persisted HIGH conflict you are a party to, only after real agreement with the other party; name the agreeing coordination message in the rationale. Explicit HIGH-conflict overrides are CLI-only operator actions and are rejected over MCP: ask a human operator instead of overriding yourself.
 4. Call `accept_changeset`; it must match the clean Git commit and passing fingerprint.
@@ -80,11 +82,15 @@ Use `discard_work` for work that should not land. It preserves history, releases
 Use `query_work` for current semantic state, `coordinate_with_agent` for durable proposals, and these CLI commands when needed:
 
 ```bash
-foremerge --json coordinate inbox AGENT_ID
+foremerge --json agent list
+foremerge --json intent show INTENT_ID
+foremerge --json coordinate inbox --agent AGENT_ID
 foremerge --json events list
 foremerge --json graph
 foremerge work watch
 ```
+
+`agent list` and `intent show` are the read surfaces for mapping a conflict's intent ids to agents before `coordinate send`.
 
 ## MCP tools
 

@@ -45,6 +45,19 @@ Run `cargo run -- --help` to inspect the current command-line interface. Tests
 that create repositories must use temporary directories and set repository-local
 Git identity; they must not depend on a contributor's global Git configuration.
 
+### The repository dogfoods its own coordination
+
+This repository ships its own Foremerge client integration: `.mcp.json` (Claude
+Code), `.cursor/mcp.json` (Cursor), and three copies of the agent skill under
+`.codex/`, `.claude/`, and `.cursor/skills/foremerge/SKILL.md`. If you open the
+repository with one of those coding-agent clients, the client will offer to
+enable the Foremerge MCP server and skill — clients prompt before enabling
+project-level configuration, so nothing runs without your consent. The three
+skill files are generated from one source: `src/integrations.rs` embeds
+`.codex/skills/foremerge/SKILL.md` at compile time and `foremerge setup`
+installs it for every client, so edit that file and copy it byte-for-byte to
+the `.claude` and `.cursor` twins (the setup e2e test enforces the match).
+
 ## What a good change includes
 
 1. A focused problem statement and the reason the change belongs in the MVP.

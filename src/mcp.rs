@@ -446,6 +446,11 @@ pub fn tool_catalog() -> Vec<Value> {
                 },
                 "provenance": { "type": "object", "default": {} },
                 "git_ref": { "type": "string" },
+                "base_ref": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "True diff base when known (for example the fork point of this agent branch); defaults to the candidate commit's first parent."
+                },
                 "worktree": { "type": "string" }
             }),
             &["agent_id", "intent_id", "summary"],

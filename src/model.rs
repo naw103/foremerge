@@ -110,6 +110,19 @@ pub struct Intent {
     pub status: String,
     pub created_at: String,
     pub updated_at: String,
+    /// Open or coordinating conflicts touching this intent at the moment the
+    /// response was produced. Populated on `start_work` responses; absent on
+    /// stored records and other reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_conflicts: Option<OpenConflicts>,
+}
+
+/// Full read view of one intent for the CLI `intent show` convenience.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntentDetail {
+    pub intent: Intent,
+    pub agent: Agent,
+    pub open_conflicts: OpenConflicts,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -252,6 +265,11 @@ pub struct PublishChangeSetRequest {
     pub provenance: Value,
     #[serde(default)]
     pub git_ref: Option<String>,
+    /// Optional true diff base for callers that know it (for example the fork
+    /// point of the agent branch). When absent, Foremerge derives the base
+    /// from the candidate commit's first parent.
+    #[serde(default)]
+    pub base_ref: Option<String>,
     #[serde(default)]
     pub worktree: Option<String>,
 }
@@ -281,6 +299,19 @@ pub struct ChangeSet {
     pub status: String,
     pub created_at: String,
     pub updated_at: String,
+    /// Open or coordinating conflicts touching this ChangeSet's intent at the
+    /// moment the response was produced. Populated on `publish_changeset`
+    /// responses so an earlier publisher learns about conflicts created by
+    /// later publishes; absent on stored records and other reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_conflicts: Option<OpenConflicts>,
+}
+
+/// A snapshot of the OPEN or COORDINATING conflicts touching one intent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenConflicts {
+    pub count: usize,
+    pub ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

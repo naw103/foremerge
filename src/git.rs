@@ -209,6 +209,54 @@ pub fn diff_files(worktree: impl AsRef<Path>) -> Result<Vec<String>> {
     Ok(snapshot(worktree)?.changed_files)
 }
 
+/// The first parent of a commit, or `None` for a root commit.
+pub fn first_parent(worktree: impl AsRef<Path>, commit: &str) -> Result<Option<String>> {
+    let line = git_output(
+        worktree.as_ref(),
+        &["rev-list", "--parents", "--max-count=1", commit],
+    )
+    .with_context(|| format!("INVALID_INPUT: resolve parents of commit '{commit}'"))?;
+    Ok(line.split_whitespace().nth(1).map(str::to_string))
+}
+
+/// The empty tree object id in this repository's object format, used as the
+/// diff base for a root commit.
+pub fn empty_tree_id(worktree: impl AsRef<Path>) -> Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(worktree.as_ref())
+        .args(["hash-object", "-t", "tree", "--stdin"])
+        .stdin(Stdio::null())
+        .output()
+        .context("run git hash-object")?;
+    if !output.status.success() {
+        bail!(
+            "git hash-object failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// SHA-256 over the binary patch bytes of `git diff <base> <commit>`, bounded
+/// by the same content budget as snapshot hashing.
+pub fn diff_patch_hash(worktree: impl AsRef<Path>, base: &str, commit: &str) -> Result<String> {
+    let mut digest = Sha256::new();
+    hash_git_output(
+        worktree.as_ref(),
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--binary",
+            base,
+            commit,
+        ],
+        &mut digest,
+    )?;
+    Ok(format!("{:x}", digest.finalize()))
+}
+
 #[cfg(unix)]
 fn open_untracked_file(path: &Path) -> Result<File> {
     use std::os::unix::fs::OpenOptionsExt;

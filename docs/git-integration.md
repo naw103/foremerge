@@ -108,10 +108,28 @@ When a ChangeSet is published, Foremerge can derive:
 
 - worktree and repository identity;
 - current branch and head;
-- base/current Git ref;
+- the candidate commit and its diff base;
 - changed files;
 - lightweight symbol hints;
 - fingerprint.
+
+The candidate commit is the resolved `git_ref` (default: the worktree `HEAD`).
+Its diff base is chosen in this order and recorded as
+`provenance.git.base_resolution`:
+
+1. `caller_supplied` — an explicit `base_ref` (CLI `--base-ref`) for callers
+   that know their true base, such as the fork point of the agent branch. A
+   base that resolves to the candidate itself is rejected as `INVALID_INPUT`.
+2. `first_parent` — the candidate commit's first parent, the default.
+3. `root_commit` — the candidate has no parent; the diff base is the empty
+   tree.
+4. `unborn_worktree` — the repository has no commits; there is no candidate
+   commit and `diff_hash` falls back to the snapshot's worktree content hash.
+
+`provenance.git.diff_hash` is a SHA-256 over the actual binary patch bytes of
+`git diff <base> <candidate>` (bounded by the same 512 MiB budget as snapshot
+hashing), so a non-merge commit with changes never records the hash of an
+empty diff. The chosen base commit is stored as the ChangeSet's `base_ref`.
 
 Caller-provided files and symbols remain useful when changes are already
 committed or when semantic impact extends beyond the textual diff.

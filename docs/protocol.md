@@ -76,8 +76,8 @@ foremerge doctor [--client codex|claude|cursor|all]
 foremerge daemon [--bind <address>] [--no-auth]
 foremerge mcp
 foremerge checks set|list|remove
-foremerge agent register
-foremerge intent publish
+foremerge agent register|list
+foremerge intent publish|show
 foremerge work claim|query|start|watch|discard
 foremerge conflicts check|list|resolve
 foremerge changeset publish|show|validate|accept|commit
@@ -90,9 +90,15 @@ foremerge request get|post <path>
 
 Use `foremerge <family> <command> --help` for argument spelling. In particular,
 actor flags use `--agent` in the domain CLI, while HTTP/MCP JSON uses
-`agent_id`. `work watch` is polling over the event query; it is not a streaming
-transport. `request` is an authenticated local HTTP escape hatch, not another
-implementation of the service.
+`agent_id`. `coordinate inbox` accepts the agent id either positionally or via
+`--agent`; if both are given they must agree. `work watch` is polling over the
+event query; it is not a streaming transport. `request` is an authenticated
+local HTTP escape hatch, not another implementation of the service.
+
+`agent list` and `intent show <INTENT_ID>` are CLI-only read conveniences: they
+let an agent map a conflict's intent ids to registered agents without scraping
+`events list` or `graph` output. HTTP parity for these reads is roadmap work;
+until then they are not exposed by the daemon or MCP surfaces.
 
 ## Agent registration
 
@@ -190,6 +196,17 @@ Reports include the number of intents examined, structured findings, a blocking
 boolean, and the active policy. Every finding includes evidence and a suggested
 coordination action. See [Conflict detection](conflict-detection.md).
 
+An id-shaped value (`int_` followed by 32 hexadecimal characters) passed as
+free-form `intent` text is rejected with `INVALID_INPUT` instead of being
+compared as prose, because that comparison would silently return a false
+all-clear; pass ids as `intent_id` (CLI: `--intent-id`).
+
+Conflicts are detected when the *later* intent publishes, so the earlier
+publisher's own publish response legitimately reported no conflicts. Re-run
+`check_conflicts` before publishing a ChangeSet and before requesting
+verification; `start_work` and `publish_changeset` responses also include an
+`open_conflicts` snapshot (count and ids) for the acting intent.
+
 ## ChangeSet publication
 
 A ChangeSet captures a useful semantic boundary rather than every edit:
@@ -215,6 +232,7 @@ A ChangeSet captures a useful semantic boundary rather than every edit:
   ],
   "provenance": {"prompt_id": "local-task-42"},
   "git_ref": "HEAD",
+  "base_ref": "optional true diff base commit",
   "worktree": "/repo/worktrees/stripe"
 }
 ```
@@ -222,6 +240,19 @@ A ChangeSet captures a useful semantic boundary rather than every edit:
 Foremerge resolves Git context where possible and stores a fingerprint. The
 `tests` array is agent-reported history. An executed validation is a separate
 record and is the evidence used by the acceptance gate.
+
+The stored `base_ref` is the commit the candidate is diffed against, and
+`provenance.git.diff_hash` is a SHA-256 over the actual `git diff <base>
+<candidate>` patch bytes. When the caller omits `base_ref` the base is derived
+from the candidate commit's first parent (a root commit is diffed against the
+empty tree). `provenance.git.base_resolution` records how the base was chosen
+(`caller_supplied`, `first_parent`, `root_commit`, or `unborn_worktree`), and a
+caller-supplied base equal to the candidate itself is rejected, so a non-merge
+commit with changes never records an empty-diff hash.
+
+The publish response also carries `open_conflicts` (count and ids of OPEN or
+COORDINATING conflicts touching the intent at that moment), so a publisher
+learns about conflicts that later publishes created against it.
 
 On acceptance, the exact validated hash is stored as `accepted_commit` and
 mirrored by `refs/foremerge/accepted/<changeset-id>`. Recording a later landing
@@ -247,6 +278,27 @@ Agents can send a durable message referencing a conflict or ChangeSet:
 This operation records coordination and provenance. It does not interrupt or
 control the target process; the target discovers the message through its normal
 query loop or client integration.
+
+## Conflict resolution
+
+`resolve_conflict` (CLI: `conflicts resolve`) records an audited decision and
+moves a persisted `cfl_*` conflict to `RESOLVED`.
+
+- `resolution` is a free-form decision title describing the agreed outcome; no
+  fixed vocabulary is enforced. Short imperative titles work well, for example
+  `sequenced: provider abstraction lands first`, `split scopes`, or
+  `duplicate: second intent discarded`.
+- `rationale` is required and should reference the coordination that produced
+  the agreement — name the `msg_*` coordination message ids so the decision is
+  auditable against the durable message log.
+- Who may resolve: on the trusted CLI and HTTP surfaces, any registered agent
+  (typically a human operator or an integrator acting through one). Over MCP,
+  resolution is accepted only from an agent whose intent is a party to the
+  conflict, after real agreement with the other party; other agents receive
+  `FORBIDDEN`. The decision is always recorded under the resolving agent's id.
+
+Resolving is a statement that the parties agreed how the work coexists, not a
+merge operation; it unblocks the acceptance gate for both intents.
 
 ## Event envelope
 

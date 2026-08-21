@@ -152,15 +152,20 @@ At the start of a coding session:
 
 At a useful implementation boundary:
 
-1. Call `publish_changeset` with affected files, symbols, contracts,
+1. Re-run `check_conflicts` with your `intent_id`: a later publish by another
+   agent can create a conflict against your intent after your own publish
+   returned `conflicts: []`. `start_work` and `publish_changeset` responses
+   include an `open_conflicts` snapshot for the same reason.
+2. Call `publish_changeset` with affected files, symbols, contracts,
    dependencies, reported tests, decisions, and provenance.
-2. Call `run_verification` with a trusted check name configured by a maintainer.
-3. Re-coordinate high conflicts with `coordinate_with_agent`, then call
+3. Re-run `check_conflicts`, then call `run_verification` with a trusted check
+   name configured by a maintainer.
+4. Re-coordinate high conflicts with `coordinate_with_agent`, then call
    `resolve_conflict` for the durable decision. Over MCP only a party to the
    conflict may resolve it, after real agreement; name the coordination
    message in the rationale.
-4. Call `accept_changeset` only for the validated clean Git state.
-5. Integrate through ordinary Git, then call `record_commit` with the commit
+5. Call `accept_changeset` only for the validated clean Git state.
+6. Integrate through ordinary Git, then call `record_commit` with the commit
    that actually landed.
 
 If the work should not land, call `discard_work` instead of deleting its
@@ -254,9 +259,14 @@ Unpublished preflight:
   "decisions": [],
   "provenance": {"source":"agent"},
   "git_ref": "HEAD",
+  "base_ref": "optional true diff base, e.g. the branch fork point",
   "worktree": "/repo/worktrees/paypal"
 }
 ```
+
+Omit `base_ref` unless you know the true base: Foremerge then derives it from
+the candidate commit's first parent and records the actual `git diff` patch
+hash in provenance (`provenance.git.base_resolution` says which one happened).
 
 ### `coordinate_with_agent`
 
@@ -304,6 +314,16 @@ The agent then sends only:
 ```json
 {"changeset_id":"chg_...","check":"test"}
 ```
+
+Be honest about a stdio consequence: the MCP server processes one message at a
+time, and `run_verification` runs the named check inline, so the serial stdio
+loop is blocked until the check finishes or its configured timeout (up to 3600
+seconds) expires. Every queued client request — including `ping` liveness
+probes — waits behind it, and clients with their own tool timeouts may report
+the call failed or kill the server while Foremerge is still recording the
+validation. Mitigations: keep named check commands short, configure realistic
+`timeout_seconds` on the check, and run long validation through the CLI
+(`foremerge changeset validate`) or the HTTP daemon instead of MCP.
 
 ### `accept_changeset`
 

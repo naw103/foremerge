@@ -997,7 +997,24 @@ fn setup_installs_native_claude_and_cursor_integrations_and_named_checks() {
     let doctor = cli_success(&repo.root, None, ["doctor", "--client", "claude"]);
     assert_eq!(doctor["data"]["clients"][0]["skill_current"], true);
     assert_eq!(doctor["data"]["clients"][0]["mcp_configured"], true);
-    cli_success(&repo.root, None, ["checks", "remove", "test"]);
+    let removed = cli_success(&repo.root, None, ["checks", "remove", "test"]);
+    assert_eq!(
+        removed["data"]["registry"]["checks"],
+        json!({}),
+        "removal must return a registry without the removed check"
+    );
+    let listed_after_removal = cli_success(&repo.root, None, ["checks", "list"]);
+    assert!(
+        listed_after_removal["data"]["registry"]["checks"]
+            .get("test")
+            .is_none(),
+        "removed check must be gone from a subsequent list"
+    );
+    let missing = cli_failure(&repo.root, None, ["checks", "remove", "test"]);
+    assert_eq!(
+        missing["error"]["code"], "NOT_FOUND",
+        "removing an unknown check must fail distinctly: {missing}"
+    );
 }
 
 async fn mcp_tool_call(service: &Foremerge, id: u64, name: &str, arguments: Value) -> Value {
@@ -3564,5 +3581,606 @@ fn doctor_gates_readiness_on_unconfigured_clients_and_keeps_a_typed_envelope() {
         gated["data"]["next_step"].as_str(),
         Some(client_next_step),
         "the client remediation must override the generic next step: {gated}"
+    );
+}
+
+const EMPTY_STRING_SHA256: &str =
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+#[test]
+fn changeset_provenance_derives_first_parent_base_and_a_real_diff_hash() {
+    let repo = create_repo();
+    let initial_commit = git(&repo.root, ["rev-parse", "HEAD"]);
+    let (agent_id, intent_id) =
+        create_active_test_work(&repo.root, "provenance-agent", "provenance-diff");
+
+    fs::write(repo.root.join("src.txt"), "first change\n").expect("write candidate change");
+    git(&repo.root, ["add", "src.txt"]);
+    git(&repo.root, ["commit", "--quiet", "-m", "candidate change"]);
+    let candidate = git(&repo.root, ["rev-parse", "HEAD"]);
+
+    let published = cli_success(
+        &repo.root,
+        None,
+        vec![
+            "changeset".to_string(),
+            "publish".to_string(),
+            "--agent".to_string(),
+            agent_id.clone(),
+            "--intent".to_string(),
+            intent_id.clone(),
+            "--summary".to_string(),
+            "Candidate with real committed changes".to_string(),
+            "--git-ref".to_string(),
+            "HEAD".to_string(),
+        ],
+    );
+    assert_eq!(
+        published["data"]["base_ref"].as_str(),
+        Some(initial_commit.as_str()),
+        "the default base must be the candidate's first parent: {published}"
+    );
+    let git_provenance = &published["data"]["provenance"]["git"];
+    assert_eq!(
+        git_provenance["candidate"].as_str(),
+        Some(candidate.as_str())
+    );
+    assert_eq!(
+        git_provenance["base_ref"].as_str(),
+        Some(initial_commit.as_str())
+    );
+    assert_eq!(git_provenance["base_resolution"], "first_parent");
+    let diff_hash = git_provenance["diff_hash"].as_str().expect("diff hash");
+    assert_ne!(
+        diff_hash, EMPTY_STRING_SHA256,
+        "a non-merge commit with changes must never record an empty-diff hash"
+    );
+
+    fs::write(repo.root.join("src.txt"), "second change\n").expect("write second change");
+    git(&repo.root, ["add", "src.txt"]);
+    git(
+        &repo.root,
+        ["commit", "--quiet", "-m", "second candidate change"],
+    );
+    let revised = cli_success(
+        &repo.root,
+        None,
+        vec![
+            "changeset".to_string(),
+            "publish".to_string(),
+            "--agent".to_string(),
+            agent_id.clone(),
+            "--intent".to_string(),
+            intent_id.clone(),
+            "--summary".to_string(),
+            "Revision with an explicit caller-supplied base".to_string(),
+            "--base-ref".to_string(),
+            initial_commit.clone(),
+        ],
+    );
+    assert_eq!(
+        revised["data"]["base_ref"].as_str(),
+        Some(initial_commit.as_str()),
+        "an explicit --base-ref must be respected: {revised}"
+    );
+    assert_eq!(
+        revised["data"]["provenance"]["git"]["base_resolution"],
+        "caller_supplied"
+    );
+    assert_ne!(
+        revised["data"]["provenance"]["git"]["diff_hash"].as_str(),
+        Some(EMPTY_STRING_SHA256)
+    );
+
+    let vacuous = cli_failure(
+        &repo.root,
+        None,
+        vec![
+            "changeset".to_string(),
+            "publish".to_string(),
+            "--agent".to_string(),
+            agent_id,
+            "--intent".to_string(),
+            intent_id,
+            "--summary".to_string(),
+            "Self-referential base must be rejected".to_string(),
+            "--base-ref".to_string(),
+            "HEAD".to_string(),
+        ],
+    );
+    assert_eq!(vacuous["error"]["code"], "INVALID_INPUT");
+    assert!(
+        vacuous["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("candidate commit itself"),
+        "unexpected vacuous-base error: {vacuous}"
+    );
+}
+
+#[test]
+fn conflicts_check_rejects_an_intent_id_passed_as_intent_text() {
+    let repo = create_repo();
+    let agent_id = register_test_agent(&repo.root, "misparse-agent");
+    let intent_id = publish_test_intent(
+        &repo.root,
+        &agent_id,
+        "misparse-task",
+        "Extend PaymentService with retries",
+        "symbol:PaymentService",
+    );
+
+    let rejected = cli_failure(
+        &repo.root,
+        None,
+        ["conflicts", "check", "--intent", intent_id.as_str()],
+    );
+    assert_eq!(rejected["error"]["code"], "INVALID_INPUT");
+    assert!(
+        rejected["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--intent-id"),
+        "the error must point at --intent-id: {rejected}"
+    );
+
+    let prose = cli_success(
+        &repo.root,
+        None,
+        [
+            "conflicts",
+            "check",
+            "--intent",
+            "Harden int_ prefix parsing in the id layer",
+        ],
+    );
+    assert_eq!(prose["data"]["blocking"], false);
+    assert!(
+        prose["data"]["checked_intents"].as_u64().unwrap() >= 1,
+        "prose containing int_ mid-sentence must still be checked: {prose}"
+    );
+}
+
+#[test]
+fn intent_show_and_agent_list_expose_the_missing_read_surfaces() {
+    let repo = create_repo();
+    let replacer = register_test_agent(&repo.root, "read-surface-replacer");
+    let extender = register_test_agent(&repo.root, "read-surface-extender");
+    let replace_intent = publish_test_intent(
+        &repo.root,
+        &replacer,
+        "replace-payments",
+        "Replace PaymentService with StripePaymentService",
+        "symbol:PaymentService",
+    );
+    let extend = cli_success(
+        &repo.root,
+        None,
+        vec![
+            "intent".to_string(),
+            "publish".to_string(),
+            "--agent".to_string(),
+            extender.clone(),
+            "--task".to_string(),
+            "extend-payments".to_string(),
+            "--summary".to_string(),
+            "Add PayPal support to PaymentService".to_string(),
+            "--scope".to_string(),
+            "symbol:PaymentService".to_string(),
+        ],
+    );
+    let conflict_id = extend["data"]["conflicts"][0]["id"]
+        .as_str()
+        .expect("conflicting publish returns the conflict")
+        .to_string();
+
+    let shown = cli_success(
+        &repo.root,
+        None,
+        ["intent", "show", replace_intent.as_str()],
+    );
+    assert_eq!(
+        shown["data"]["intent"]["id"].as_str(),
+        Some(replace_intent.as_str())
+    );
+    assert_eq!(
+        shown["data"]["intent"]["summary"],
+        "Replace PaymentService with StripePaymentService"
+    );
+    assert_eq!(shown["data"]["intent"]["task"], "replace-payments");
+    assert_eq!(shown["data"]["intent"]["status"], "INTENT");
+    assert_eq!(
+        shown["data"]["intent"]["scopes"][0],
+        json!({ "kind": "symbol", "key": "PaymentService" })
+    );
+    assert_eq!(
+        shown["data"]["agent"]["id"].as_str(),
+        Some(replacer.as_str())
+    );
+    assert_eq!(shown["data"]["agent"]["name"], "read-surface-replacer");
+    assert_eq!(shown["data"]["open_conflicts"]["count"], 1);
+    assert_eq!(
+        shown["data"]["open_conflicts"]["ids"][0].as_str(),
+        Some(conflict_id.as_str())
+    );
+    let missing = cli_failure(&repo.root, None, ["intent", "show", "int_missing"]);
+    assert_eq!(missing["error"]["code"], "NOT_FOUND");
+
+    let listed = cli_success(&repo.root, None, ["agent", "list"]);
+    let agents = listed["data"].as_array().expect("agent list is an array");
+    assert_eq!(agents.len(), 2);
+    let ids: Vec<&str> = agents
+        .iter()
+        .map(|agent| agent["id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&replacer.as_str()) && ids.contains(&extender.as_str()));
+    for agent in agents {
+        assert!(agent["name"].as_str().is_some_and(|name| !name.is_empty()));
+        assert_eq!(agent["model"], "e2e-test");
+        assert_eq!(agent["status"], "ACTIVE");
+        assert!(agent.get("worktree").is_some(), "worktree field present");
+    }
+}
+
+#[test]
+fn coordinate_inbox_accepts_the_agent_flag_and_keeps_the_positional_form() {
+    let repo = create_repo();
+    let sender = register_test_agent(&repo.root, "inbox-sender");
+    let receiver = register_test_agent(&repo.root, "inbox-receiver");
+    cli_success(
+        &repo.root,
+        None,
+        vec![
+            "coordinate".to_string(),
+            "send".to_string(),
+            "--from".to_string(),
+            sender.clone(),
+            "--to".to_string(),
+            receiver.clone(),
+            "--message".to_string(),
+            "Flag and positional must agree".to_string(),
+        ],
+    );
+
+    let positional = cli_success(&repo.root, None, ["coordinate", "inbox", receiver.as_str()]);
+    let flagged = cli_success(
+        &repo.root,
+        None,
+        ["coordinate", "inbox", "--agent", receiver.as_str()],
+    );
+    assert_eq!(positional["data"], flagged["data"]);
+    assert_eq!(flagged["data"].as_array().map(Vec::len), Some(1));
+
+    let agreeing = cli_success(
+        &repo.root,
+        None,
+        [
+            "coordinate",
+            "inbox",
+            receiver.as_str(),
+            "--agent",
+            receiver.as_str(),
+        ],
+    );
+    assert_eq!(agreeing["data"], flagged["data"]);
+
+    let disagreeing = cli_failure(
+        &repo.root,
+        None,
+        [
+            "coordinate",
+            "inbox",
+            receiver.as_str(),
+            "--agent",
+            sender.as_str(),
+        ],
+    );
+    assert_eq!(disagreeing["error"]["code"], "INVALID_INPUT");
+
+    let unspecified = cli_failure(&repo.root, None, ["coordinate", "inbox"]);
+    assert_eq!(unspecified["error"]["code"], "INVALID_INPUT");
+}
+
+#[test]
+fn later_conflicting_publish_surfaces_open_conflicts_to_the_earlier_publisher() {
+    let repo = create_repo();
+    let first = register_test_agent(&repo.root, "first-publisher");
+    let first_intent = publish_test_intent(
+        &repo.root,
+        &first,
+        "extend-payments",
+        "Add PayPal support to PaymentService",
+        "symbol:PaymentService",
+    );
+    claim_test_scope(&repo.root, &first, &first_intent, "symbol:PaymentService");
+    start_test_work(&repo.root, &first, &first_intent);
+    let early = cli_success(
+        &repo.root,
+        None,
+        vec![
+            "changeset".to_string(),
+            "publish".to_string(),
+            "--agent".to_string(),
+            first.clone(),
+            "--intent".to_string(),
+            first_intent.clone(),
+            "--summary".to_string(),
+            "Early candidate before any conflict exists".to_string(),
+        ],
+    );
+    assert_eq!(
+        early["data"]["open_conflicts"]["count"], 0,
+        "the early publish precedes the conflict: {early}"
+    );
+
+    let second = register_test_agent(&repo.root, "second-publisher");
+    let conflicting = cli_success(
+        &repo.root,
+        None,
+        vec![
+            "intent".to_string(),
+            "publish".to_string(),
+            "--agent".to_string(),
+            second.clone(),
+            "--task".to_string(),
+            "replace-payments".to_string(),
+            "--summary".to_string(),
+            "Replace PaymentService with StripePaymentService".to_string(),
+            "--scope".to_string(),
+            "symbol:PaymentService".to_string(),
+        ],
+    );
+    let conflict_id = conflicting["data"]["conflicts"][0]["id"]
+        .as_str()
+        .expect("later publish creates the conflict")
+        .to_string();
+    let second_intent = conflicting["data"]["intent"]["id"]
+        .as_str()
+        .expect("second intent id")
+        .to_string();
+
+    let revised = cli_success(
+        &repo.root,
+        None,
+        vec![
+            "changeset".to_string(),
+            "publish".to_string(),
+            "--agent".to_string(),
+            first,
+            "--intent".to_string(),
+            first_intent,
+            "--summary".to_string(),
+            "Revision published after the conflict appeared".to_string(),
+        ],
+    );
+    let open = &revised["data"]["open_conflicts"];
+    assert!(
+        open["count"].as_u64().unwrap() >= 1,
+        "the earlier publisher must see the later conflict: {revised}"
+    );
+    assert!(
+        open["ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id.as_str() == Some(conflict_id.as_str())),
+        "open_conflicts must carry the conflict id: {revised}"
+    );
+
+    claim_test_scope(&repo.root, &second, &second_intent, "symbol:PaymentService");
+    let started = cli_success(
+        &repo.root,
+        None,
+        vec![
+            "work".to_string(),
+            "start".to_string(),
+            second_intent,
+            "--agent".to_string(),
+            second,
+        ],
+    );
+    assert!(
+        started["data"]["open_conflicts"]["ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id.as_str() == Some(conflict_id.as_str())),
+        "work start must surface open conflicts: {started}"
+    );
+}
+
+fn stdio_request(
+    stdin: &mut impl Write,
+    reader: &mut impl std::io::BufRead,
+    request: Value,
+) -> Value {
+    writeln!(stdin, "{request}").expect("write MCP request");
+    stdin.flush().expect("flush MCP request");
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("read MCP response line");
+    assert!(!line.trim().is_empty(), "MCP server closed the stream");
+    serde_json::from_str(&line).expect("MCP response is JSON")
+}
+
+fn stdio_tool_call(
+    stdin: &mut impl Write,
+    reader: &mut impl std::io::BufRead,
+    id: u64,
+    name: &str,
+    arguments: Value,
+) -> Value {
+    let response = stdio_request(
+        stdin,
+        reader,
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": arguments }
+        }),
+    );
+    assert_eq!(
+        response["result"]["isError"], false,
+        "MCP tool {name} failed over stdio: {response}"
+    );
+    response["result"]["structuredContent"].clone()
+}
+
+#[test]
+fn real_mcp_stdio_drives_the_lifecycle_through_named_verification_and_acceptance() {
+    let repo = create_repo();
+    cli_success(
+        &repo.root,
+        None,
+        ["checks", "set", "test", "--", "git", "diff", "--check"],
+    );
+
+    let mut child = Command::new(foremerge_bin())
+        .arg("--cwd")
+        .arg(&repo.root)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn MCP server");
+    let mut stdin = child.stdin.take().expect("MCP stdin");
+    let mut reader = std::io::BufReader::new(child.stdout.take().expect("MCP stdout"));
+
+    let initialized = stdio_request(
+        &mut stdin,
+        &mut reader,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2026-07-28",
+                "capabilities": {},
+                "clientInfo": { "name": "foremerge-e2e", "version": "1" }
+            }
+        }),
+    );
+    assert_eq!(initialized["result"]["protocolVersion"], "2026-07-28");
+
+    let agent = stdio_tool_call(
+        &mut stdin,
+        &mut reader,
+        2,
+        "register_agent",
+        json!({ "name": "stdio-lifecycle", "model": "e2e", "worktree": repo.root }),
+    );
+    let agent_id = agent["id"].as_str().expect("agent id").to_string();
+    let published = stdio_tool_call(
+        &mut stdin,
+        &mut reader,
+        3,
+        "publish_intent",
+        json!({
+            "agent_id": agent_id,
+            "task": "stdio-lifecycle",
+            "summary": "Drive the full lifecycle over the real stdio transport",
+            "scopes": [{ "kind": "symbol", "key": "StdioLifecycle" }]
+        }),
+    );
+    let intent_id = published["intent"]["id"]
+        .as_str()
+        .expect("intent id")
+        .to_string();
+    stdio_tool_call(
+        &mut stdin,
+        &mut reader,
+        4,
+        "claim_work",
+        json!({
+            "agent_id": agent_id,
+            "intent_id": intent_id,
+            "scopes": [{ "kind": "symbol", "key": "StdioLifecycle" }]
+        }),
+    );
+    let started = stdio_tool_call(
+        &mut stdin,
+        &mut reader,
+        5,
+        "start_work",
+        json!({ "agent_id": agent_id, "intent_id": intent_id }),
+    );
+    assert_eq!(started["status"], "IN_PROGRESS");
+    assert_eq!(started["open_conflicts"]["count"], 0);
+    let changeset = stdio_tool_call(
+        &mut stdin,
+        &mut reader,
+        6,
+        "publish_changeset",
+        json!({
+            "agent_id": agent_id,
+            "intent_id": intent_id,
+            "summary": "Record the clean stdio lifecycle candidate",
+            "symbols": ["StdioLifecycle"]
+        }),
+    );
+    let changeset_id = changeset["id"].as_str().expect("changeset id").to_string();
+    assert_eq!(changeset["open_conflicts"]["count"], 0);
+    // The fixture has exactly one commit, so the candidate is a root commit
+    // and its diff base is the empty tree.
+    assert_eq!(
+        changeset["provenance"]["git"]["base_resolution"],
+        "root_commit"
+    );
+    let validation = stdio_tool_call(
+        &mut stdin,
+        &mut reader,
+        7,
+        "run_verification",
+        json!({ "changeset_id": changeset_id, "check": "test" }),
+    );
+    assert_eq!(
+        validation["passed"], true,
+        "named verification must pass over stdio: {validation}"
+    );
+
+    let rejected_override = stdio_request(
+        &mut stdin,
+        &mut reader,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {
+                "name": "accept_changeset",
+                "arguments": {
+                    "changeset_id": changeset_id,
+                    "allow_high_conflicts": true,
+                    "override_reason": "not allowed over MCP"
+                }
+            }
+        }),
+    );
+    assert_eq!(rejected_override["result"]["isError"], true);
+    assert!(
+        rejected_override["result"]["structuredContent"]["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("FORBIDDEN"),
+        "override must be rejected over stdio: {rejected_override}"
+    );
+
+    let accepted = stdio_tool_call(
+        &mut stdin,
+        &mut reader,
+        9,
+        "accept_changeset",
+        json!({ "changeset_id": changeset_id }),
+    );
+    assert_eq!(accepted["status"], "ACCEPTED");
+
+    drop(stdin);
+    let status = child.wait().expect("wait for MCP server");
+    assert!(status.success(), "MCP server exited abnormally");
+    assert!(
+        Store::open(database_from_doctor(&repo.root))
+            .expect("open lifecycle database")
+            .verify_event_chain()
+            .unwrap()
     );
 }

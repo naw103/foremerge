@@ -195,6 +195,7 @@ impl Foremerge {
             status: "INTENT".to_string(),
             created_at: now.clone(),
             updated_at: now.clone(),
+            open_conflicts: None,
         };
         tx.execute(
             "INSERT INTO intents(id, agent_id, task_id, summary, rationale, scopes_json,
@@ -404,9 +405,10 @@ impl Foremerge {
         }
         require_state(&intent.status, &["CLAIMED"], "start work")?;
         transition_intent(&tx, intent_id, agent_id, "CLAIMED", "IN_PROGRESS")?;
+        let mut started = intent_by_id(&tx, intent_id)?;
+        started.open_conflicts = Some(open_conflicts_for_intent(&tx, intent_id)?);
         tx.commit()?;
-        drop(conn);
-        self.get_intent(intent_id)
+        Ok(started)
     }
 
     pub fn query_work(&self, mut query: WorkQuery) -> Result<Vec<WorkItem>> {
@@ -494,6 +496,16 @@ impl Foremerge {
     }
 
     pub fn check_conflicts(&self, mut request: ConflictCheckRequest) -> Result<ConflictReport> {
+        if let Some(text) = request.intent.as_deref() {
+            // An intent id passed as free-form intent text would be compared
+            // as prose and silently return a false all-clear.
+            if looks_like_intent_id(text.trim()) {
+                bail!(
+                    "INVALID_INPUT: '{}' is an intent id, not free-form intent text; pass it as intent_id (CLI: --intent-id) so the persisted intent is checked",
+                    text.trim()
+                );
+            }
+        }
         request.scopes = normalize_scopes(request.scopes)?;
         if let Some(intent_id) = request.intent_id.as_deref() {
             if request.scopes.is_empty() {
@@ -617,6 +629,44 @@ impl Foremerge {
         if request.symbols.is_empty() {
             request.symbols = git::infer_symbols(&worktree).unwrap_or_default();
         }
+        // Resolve the candidate commit and its true diff base. Recording the
+        // candidate itself as base (the pre-0.2.0 behavior for `--git-ref
+        // HEAD` on a clean worktree) produced a self-referential base and the
+        // hash of an empty diff — vacuous provenance.
+        let candidate = match request.git_ref.as_deref() {
+            Some(reference) => Some(git::verify_ref(&worktree, reference)?),
+            None => snapshot.head.clone(),
+        };
+        let (base_ref, base_resolution, diff_hash) = match (
+            candidate.as_deref(),
+            request.base_ref.as_deref(),
+        ) {
+            (None, Some(_)) => bail!(
+                "INVALID_INPUT: base_ref requires a candidate commit, and this worktree has no commits yet"
+            ),
+            (None, None) => (None, "unborn_worktree", snapshot.diff_hash.clone()),
+            (Some(commit), Some(base)) => {
+                let base = git::verify_ref(&worktree, base)?;
+                if base == commit {
+                    bail!(
+                        "INVALID_INPUT: base_ref must not resolve to the candidate commit itself; the base is the commit the candidate is diffed against (the candidate's first parent is used when base_ref is omitted)"
+                    );
+                }
+                let hash = git::diff_patch_hash(&worktree, &base, commit)?;
+                (Some(base), "caller_supplied", hash)
+            }
+            (Some(commit), None) => match git::first_parent(&worktree, commit)? {
+                Some(parent) => {
+                    let hash = git::diff_patch_hash(&worktree, &parent, commit)?;
+                    (Some(parent), "first_parent", hash)
+                }
+                None => {
+                    let empty_tree = git::empty_tree_id(&worktree)?;
+                    let hash = git::diff_patch_hash(&worktree, &empty_tree, commit)?;
+                    (None, "root_commit", hash)
+                }
+            },
+        };
         let now = Utc::now().to_rfc3339();
         let provenance = json!({
             "agent": {
@@ -641,7 +691,10 @@ impl Foremerge {
                 "branch": snapshot.branch,
                 "head": snapshot.head,
                 "tree": snapshot.tree,
-                "diff_hash": snapshot.diff_hash,
+                "candidate": candidate,
+                "base_ref": base_ref,
+                "base_resolution": base_resolution,
+                "diff_hash": diff_hash,
                 "dirty": snapshot.dirty,
             },
             "declared": request.provenance,
@@ -660,7 +713,7 @@ impl Foremerge {
             tests: request.tests,
             decisions: request.decisions,
             provenance,
-            base_ref: snapshot.head.clone(),
+            base_ref,
             git_ref: request.git_ref.or(snapshot.head.clone()),
             accepted_commit: None,
             integration_commit: None,
@@ -669,6 +722,7 @@ impl Foremerge {
             status: "PROVISIONAL".to_string(),
             created_at: now.clone(),
             updated_at: now.clone(),
+            open_conflicts: None,
         };
 
         let mut conn = self.store.lock()?;
@@ -849,6 +903,10 @@ impl Foremerge {
             Some(&agent.id),
             &serde_json::to_value(&changeset)?,
         )?;
+        // Populate the conflict snapshot after the stored record and event
+        // were serialized: it is response-only visibility for the publisher,
+        // covering conflicts other agents created since this intent published.
+        changeset.open_conflicts = Some(open_conflicts_for_intent(&tx, &intent.id)?);
         tx.commit()?;
         Ok(changeset)
     }
@@ -1772,6 +1830,31 @@ impl Foremerge {
         intent_by_id(&conn, intent_id)
     }
 
+    /// Full read view of one intent: the intent itself, the owning agent, and
+    /// the ids of open or coordinating conflicts touching it.
+    pub fn show_intent(&self, intent_id: &str) -> Result<IntentDetail> {
+        let conn = self.store.lock()?;
+        let intent = intent_by_id(&conn, intent_id)?;
+        let agent = agent_by_id(&conn, &intent.agent_id)?;
+        let open_conflicts = open_conflicts_for_intent(&conn, intent_id)?;
+        Ok(IntentDetail {
+            intent,
+            agent,
+            open_conflicts,
+        })
+    }
+
+    /// Every registered agent, oldest first.
+    pub fn list_agents(&self) -> Result<Vec<Agent>> {
+        let conn = self.store.lock()?;
+        let mut statement = conn.prepare("SELECT id FROM agents ORDER BY registered_at, id")?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        ids.iter().map(|id| agent_by_id(&conn, id)).collect()
+    }
+
     pub fn get_changeset(&self, changeset_id: &str) -> Result<ChangeSet> {
         let conn = self.store.lock()?;
         changeset_by_id(&conn, changeset_id)
@@ -1819,6 +1902,29 @@ impl Foremerge {
             .map(|value| conflict_by_id(&conn, value))
             .collect()
     }
+}
+
+/// True for a string with exactly the shape of a generated intent id:
+/// `int_` followed by 32 hexadecimal characters.
+fn looks_like_intent_id(value: &str) -> bool {
+    value.len() == 36
+        && value.starts_with("int_")
+        && value.as_bytes()[4..].iter().all(u8::is_ascii_hexdigit)
+}
+
+fn open_conflicts_for_intent(conn: &Connection, intent_id: &str) -> Result<OpenConflicts> {
+    let mut statement = conn.prepare(
+        "SELECT id FROM conflicts WHERE status IN ('OPEN', 'COORDINATING')
+         AND (source_intent_id = ?1 OR target_intent_id = ?1)
+         ORDER BY detected_at DESC, id",
+    )?;
+    let ids = statement
+        .query_map([intent_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(OpenConflicts {
+        count: ids.len(),
+        ids,
+    })
 }
 
 fn active_candidates(conn: &Connection, exclude: Option<&str>) -> Result<Vec<IntentCandidate>> {
@@ -2123,6 +2229,7 @@ fn intent_by_id(conn: &Connection, id: &str) -> Result<Intent> {
                 status: row.get(9)?,
                 created_at: row.get(10)?,
                 updated_at: row.get(11)?,
+                open_conflicts: None,
             })
         },
     )
@@ -2189,6 +2296,7 @@ fn changeset_by_id(conn: &Connection, id: &str) -> Result<ChangeSet> {
                 status: row.get(18)?,
                 created_at: row.get(19)?,
                 updated_at: row.get(20)?,
+                open_conflicts: None,
             })
         },
     )
@@ -2420,6 +2528,7 @@ mod tests {
                 decisions: vec![],
                 provenance: json!(42),
                 git_ref: None,
+                base_ref: None,
                 worktree: None,
             })
             .unwrap_err();

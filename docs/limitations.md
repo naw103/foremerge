@@ -16,6 +16,14 @@ scopes remain important for APIs, database schemas, configuration, infrastructur
 migrations, tests, and environment variables. Human review and tests remain
 authoritative.
 
+Conflict detection also runs when the *later* intent publishes, and there are
+no push notifications: an earlier publisher's own publish response
+legitimately reported no conflicts. `start_work` and `publish_changeset`
+responses include an `open_conflicts` snapshot, but between those boundaries
+an agent only learns of new conflicts by re-running `check_conflicts` (or
+reading its inbox). Treat an empty conflicts array as "none known yet", not
+"none will exist".
+
 ## Claims are not locks
 
 Two agents may claim the same scope. Foremerge records the overlap and returns an
