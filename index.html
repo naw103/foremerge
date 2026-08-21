@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Foremerge — catch intent conflicts before code conflicts</title>
+<title>Foremerge: catch intent conflicts before code conflicts</title>
 <meta name="description" content="Foremerge is the open-source coordination protocol for coding agents, built above Git. Agents keep isolated worktrees while sharing intent, semantic claims, ChangeSets, and verification.">
 <meta property="og:title" content="Foremerge">
 <meta property="og:description" content="Catch intent conflicts before code conflicts. The open-source coordination protocol for coding agents, built above Git.">
@@ -203,7 +203,7 @@
 
   <header class="hero">
     <h1>Catch <span class="conflict">intent conflicts</span> before <span class="code">code conflicts</span>.</h1>
-    <p class="sub">Foremerge is the open-source coordination protocol for coding agents, built <strong>above Git</strong>. Claude Code in one worktree, Codex in another — agents from any provider share intent, semantic claims, dependencies, provisional ChangeSets, decisions, and verification through one store, so plans collide in a queryable database, not in your merge.</p>
+    <p class="sub">Foremerge is the open-source coordination protocol for coding agents, built <strong>above Git</strong>. Claude Code in one worktree, Codex in another: agents from any provider share intent, semantic claims, dependencies, provisional ChangeSets, decisions, and verification through one store, so plans collide in a queryable database, not in your merge.</p>
     <div class="cta">
       <a class="btn primary" href="https://github.com/naw103/foremerge">View on GitHub</a>
       <a class="btn" href="https://github.com/naw103/foremerge/blob/main/docs/mcp-setup.md">MCP setup</a>
@@ -211,7 +211,7 @@
     <div class="install mono"><span class="p">$ </span>cargo install --locked --git https://github.com/naw103/foremerge foremerge</div>
 
     <div class="terminal" role="img" aria-label="Terminal session where two agents publish conflicting intents and Foremerge reports a HIGH replace_vs_extend conflict before any code exists">
-      <div class="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="title mono">two clean worktrees — zero lines changed</span></div>
+      <div class="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="title mono">two clean worktrees, zero lines changed</span></div>
 <pre><span class="t-com"># Agent A announces its plan</span>
 <span class="t-prompt">$</span> <span class="t-cmd">foremerge --json intent publish --agent "$STRIPE_AGENT" \
     --summary "Replace PaymentService with StripePaymentService" \
@@ -252,7 +252,7 @@
     </div>
     <div class="finding">
       <span class="sev">HIGH · replace_vs_extend · rule FM-C001</span>
-      <p>One agent removes the extension point the other depends on. No overlapping lines, no diff, nothing for Git to flag — until both implementations exist and the rework is expensive. Foremerge compares declared scopes and intent language <strong>before implementation</strong> and raises an explainable, advisory finding. No hard locks, no LLM in the detection path.</p>
+      <p>One agent removes the extension point the other depends on. No overlapping lines, no diff, nothing for Git to flag until both implementations exist and the rework is expensive. Foremerge compares declared scopes and intent language <strong>before implementation</strong> and raises an explainable, advisory finding. No hard locks, no LLM in the detection path.</p>
     </div>
   </div>
 </section>
@@ -266,12 +266,12 @@
       <div class="card">
         <span class="mono-tag">CLI</span>
         <h3>One binary</h3>
-        <p>Register agents, publish intents, claim scopes, query who is changing what, and gate ChangeSets — with <code>--json</code> for scripting.</p>
+        <p>Register agents, publish intents, claim scopes, query who is changing what, and gate ChangeSets, with <code>--json</code> for scripting.</p>
       </div>
       <div class="card">
         <span class="mono-tag">MCP</span>
         <h3>Seven focused tools</h3>
-        <p><code>register_agent</code>, <code>publish_intent</code>, <code>claim_work</code>, <code>query_work</code>, <code>check_conflicts</code>, <code>publish_changeset</code>, <code>coordinate_with_agent</code> — over stdio, no daemon required.</p>
+        <p><code>register_agent</code>, <code>publish_intent</code>, <code>claim_work</code>, <code>query_work</code>, <code>check_conflicts</code>, <code>publish_changeset</code>, <code>coordinate_with_agent</code>, all over stdio. No daemon required.</p>
       </div>
       <div class="card">
         <span class="mono-tag">JSON API</span>
@@ -288,7 +288,7 @@
       <span class="stage gate">ACCEPTED</span><span class="arrow">→</span>
       <span class="stage">COMMITTED</span>
     </div>
-    <p style="margin-top:1.2rem">Agent-reported test results are provenance, never proof. Acceptance requires Foremerge-executed validation against the exact Git fingerprint of the candidate — and any change after validation makes that evidence stale.</p>
+    <p style="margin-top:1.2rem">Agent-reported test results are provenance, never proof. Acceptance requires Foremerge-executed validation against the exact Git fingerprint of the candidate, and any change after validation makes that evidence stale.</p>
   </div>
 </section>
 
@@ -296,7 +296,7 @@
   <div class="wrap prose">
     <p class="eyebrow">Mixed fleets</p>
     <h2>One store, many models.</h2>
-    <p>The protocol carries nothing provider-specific, so heterogeneous fleets are the design center, not an edge case. Any MCP-capable client drives the same seven tools; anything else uses the CLI or JSON API. Every ChangeSet records which agent and <strong>which model</strong> did what, validated how, against which exact Git fingerprint — so a mixed Claude&nbsp;+&nbsp;Codex run doesn't just work, it produces the cross-model coordination data nobody else is collecting.</p>
+    <p>The protocol carries nothing provider-specific, so heterogeneous fleets are the design center, not an edge case. Any MCP-capable client drives the same seven tools; anything else uses the CLI or JSON API. Every ChangeSet records which agent and <strong>which model</strong> did what, validated how, against which exact Git fingerprint. A mixed Claude&nbsp;+&nbsp;Codex run doesn't just work: it produces the cross-model coordination data nobody else is collecting.</p>
     <div class="agents" aria-label="Mixed-fleet example">
       <div class="agent">
         <div class="who">Worktree A</div>
@@ -323,7 +323,7 @@
       <div class="tool"><span class="name">contract:payment-provider</span><span class="what">A cross-component agreement</span></div>
       <div class="tool"><span class="name">env:STRIPE_API_KEY</span><span class="what">Configuration and environment</span></div>
     </div>
-    <p style="margin-top:1.4rem">Claims are leased and advisory — overlap produces a warning and shared context, never a lock. Twelve scope kinds ship in 0.1.0.</p>
+    <p style="margin-top:1.4rem">Claims are leased and advisory: overlap produces a warning and shared context, never a lock. Twelve scope kinds ship in 0.1.0.</p>
   </div>
 </section>
 
@@ -333,13 +333,13 @@
     <h2>Deliberately small, deliberately honest.</h2>
     <div class="honest">
       <ul>
-        <li>Conflict detection is deterministic and explainable — and heuristic. It can miss synonymous concepts and warn on compatible work.</li>
+        <li>Conflict detection is deterministic, explainable, and heuristic. It can miss synonymous concepts and warn on compatible work.</li>
         <li>Local-first: one machine, one SQLite store shared across worktrees. Multi-machine shared mode is on the roadmap, not in the box.</li>
         <li>There are benchmark fixtures and a reproducible plan, but no published coordinated-vs-uncoordinated results yet. No performance claims until there are.</li>
-        <li>It does not replace code review, CI, architecture ownership, or Git hosting rules — and passing validation proves only what was actually run.</li>
+        <li>It does not replace code review, CI, architecture ownership, or Git hosting rules, and passing validation proves only what was actually run.</li>
       </ul>
     </div>
-    <p style="margin-top:1.6rem">The full trust model is in <a href="https://github.com/naw103/foremerge/blob/main/docs/limitations.md">docs/limitations.md</a>. Protocol feedback — scope vocabulary, conflict evidence, verification policy — is the contribution we want most: <a href="https://github.com/naw103/foremerge/discussions">start a discussion</a>.</p>
+    <p style="margin-top:1.6rem">The full trust model is in <a href="https://github.com/naw103/foremerge/blob/main/docs/limitations.md">docs/limitations.md</a>. Protocol feedback on scope vocabulary, conflict evidence, and verification policy is the contribution we want most: <a href="https://github.com/naw103/foremerge/discussions">start a discussion</a>.</p>
   </div>
 </section>
 
