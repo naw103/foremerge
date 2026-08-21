@@ -323,7 +323,13 @@ fn configure_client_mcp(
             if configure_mcp {
                 configure_codex_mcp(root, foremerge_exe, force)
             } else {
-                let configured = codex_mcp_configured(root);
+                let (configured, warning) = match codex_mcp_configured(root) {
+                    Ok(configured) => (configured, None),
+                    Err(error) => (
+                        false,
+                        Some(format!("Could not probe the codex CLI: {error:#}")),
+                    ),
+                };
                 Ok(McpOutcome {
                     install: None,
                     configured,
@@ -334,7 +340,7 @@ fn configure_client_mcp(
                             root.display()
                         )
                     }),
-                    warning: None,
+                    warning,
                 })
             }
         }
@@ -368,15 +374,22 @@ fn diagnose_client(root: &Path, client: Client) -> ClientDiagnostic {
     let skill_installed = skill_bytes.is_some();
     let skill_current = skill_bytes.as_deref() == Some(SKILL_CONTENT.as_bytes());
     let mcp_path = client.mcp_path(root);
-    let mcp_configured = match mcp_path.as_deref() {
-        Some(path) => mcp_json_configured(path, root),
-        None => codex_mcp_configured(root),
+    let (mcp_configured, mcp_probe_error) = match mcp_path.as_deref() {
+        Some(path) => (mcp_json_configured(path, root), None),
+        None => match codex_mcp_configured(root) {
+            Ok(configured) => (configured, None),
+            Err(error) => (false, Some(format!("{error:#}"))),
+        },
     };
     let client_available = command_available(client.executable())
         || (client == Client::Cursor && command_available("cursor"));
     let ready = client_available && skill_current && mcp_configured;
     let next_step = if !client_available {
         Some(format!("Install the {} client.", client.name()))
+    } else if let Some(error) = mcp_probe_error {
+        Some(format!(
+            "Could not probe the codex CLI ({error}); check that `codex` works, then run `foremerge doctor --client codex` again."
+        ))
     } else if !skill_current || !mcp_configured {
         Some(format!(
             "Run `foremerge setup {}` from this repository.",
@@ -565,13 +578,21 @@ fn configure_codex_mcp(root: &Path, foremerge_exe: &Path, force: bool) -> Result
 /// The Codex CLI's `foremerge` MCP entry, as far as it can be recovered from
 /// `codex mcp get` output. `command` is `None` when only the plain-text form
 /// was parseable.
+#[derive(Debug)]
 struct CodexEntry {
+    enabled: bool,
     command: Option<String>,
     cwd: Option<PathBuf>,
 }
 
 impl CodexEntry {
     fn is_current_for(&self, root: &Path) -> bool {
+        // A disabled registration does not serve tools, and an entry whose
+        // command Codex did not report cannot be verified; neither counts as
+        // current, so setup offers --force and doctor reports not configured.
+        if !self.enabled {
+            return false;
+        }
         let Some(cwd) = self.cwd.as_deref() else {
             return false;
         };
@@ -580,7 +601,7 @@ impl CodexEntry {
         }
         match self.command.as_deref() {
             Some(command) => command_resolves_to_foremerge(command),
-            None => true,
+            None => false,
         }
     }
 
@@ -652,7 +673,12 @@ fn codex_mcp_entry() -> Result<Option<CodexEntry>> {
             .position(|token| *token == "--cwd")
             .and_then(|position| tokens.get(position + 1))
             .map(PathBuf::from);
-        return Ok(Some(CodexEntry { command: None, cwd }));
+        // Plain output marks disabled registrations as "name (disabled)".
+        return Ok(Some(CodexEntry {
+            command: None,
+            cwd,
+            enabled: !text.contains("(disabled)"),
+        }));
     }
     // `codex mcp get` reports a missing entry and a broken CLI the same way
     // (a nonzero exit), so absence is only verifiable through a successful
@@ -699,7 +725,25 @@ fn parse_codex_entry(value: &Value) -> Option<CodexEntry> {
             let position = args.iter().position(|arg| arg.as_str() == Some("--cwd"))?;
             args.get(position + 1)?.as_str().map(PathBuf::from)
         });
-    Some(CodexEntry { command, cwd })
+    Some(CodexEntry {
+        command,
+        cwd,
+        enabled: find_enabled_flag(value).unwrap_or(true),
+    })
+}
+
+/// Codex reports `"enabled": false` for disabled registrations; the flag can
+/// sit above the transport object, so search the whole value. Absence means
+/// enabled, matching Codex versions that predate the flag.
+fn find_enabled_flag(value: &Value) -> Option<bool> {
+    match value {
+        Value::Object(map) => map
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .or_else(|| map.values().find_map(find_enabled_flag)),
+        Value::Array(items) => items.iter().find_map(find_enabled_flag),
+        _ => None,
+    }
 }
 
 fn find_command_object(value: &Value) -> Option<&Map<String, Value>> {
@@ -715,8 +759,11 @@ fn find_command_object(value: &Value) -> Option<&Map<String, Value>> {
     }
 }
 
-fn codex_mcp_configured(root: &Path) -> bool {
-    matches!(codex_mcp_entry(), Ok(Some(entry)) if entry.is_current_for(root))
+/// Ok(true): a current, enabled registration exists. Ok(false): verifiably
+/// absent, stale, or disabled. Err: the codex CLI could not be probed, which
+/// callers must surface rather than treat as absence.
+fn codex_mcp_configured(root: &Path) -> Result<bool> {
+    Ok(matches!(codex_mcp_entry()?, Some(entry) if entry.is_current_for(root)))
 }
 
 fn command_available(command: &str) -> bool {
@@ -899,7 +946,7 @@ mod tests {
         let mut command = Command::new("/bin/sh");
         command.args(["-c", "echo probe-ok; sleep 30 & exit 0"]);
         let started = Instant::now();
-        let output = run_bounded_with_timeout(command, Duration::from_secs(1)).unwrap();
+        let output = run_bounded_with_timeout(command, Duration::from_secs(3)).unwrap();
         assert!(output.success);
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "probe-ok");
         assert!(
@@ -922,6 +969,35 @@ mod tests {
             "the deadline must bound the probe; took {:?}",
             started.elapsed()
         );
+    }
+
+    #[test]
+    fn disabled_or_unverifiable_codex_entries_are_not_current() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let disabled = serde_json::json!({
+            "name": "foremerge",
+            "enabled": false,
+            "transport": {
+                "command": "/usr/local/bin/foremerge",
+                "args": ["--cwd", root.to_string_lossy(), "mcp"],
+            },
+        });
+        let entry = parse_codex_entry(&disabled).expect("entry parses");
+        assert!(!entry.enabled);
+        assert!(!entry.is_current_for(&root));
+
+        let unverifiable = CodexEntry {
+            command: None,
+            cwd: Some(root.clone()),
+            enabled: true,
+        };
+        assert!(!unverifiable.is_current_for(&root));
+
+        let no_flag = serde_json::json!({
+            "transport": { "command": "foremerge", "args": [] },
+        });
+        assert!(parse_codex_entry(&no_flag).expect("entry parses").enabled);
     }
 
     #[test]

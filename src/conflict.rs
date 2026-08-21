@@ -297,6 +297,18 @@ impl ScopeOverlap {
     /// (`schema`, `migration`, `config`), independent of which intent is the
     /// source. When both sides qualify, the canonically smaller scope wins so
     /// the advice reads identically in either publish order.
+    /// Unordered canonical pair, identical for both publish orders of the
+    /// same two scopes, used to break score ties deterministically.
+    fn pair_key(&self) -> (String, String) {
+        let source = self.source.canonical();
+        let target = self.target.canonical();
+        if source <= target {
+            (source, target)
+        } else {
+            (target, source)
+        }
+    }
+
     fn migration_scope(&self) -> Option<&Scope> {
         let source_qualifies = MIGRATION_KINDS.contains(&self.source.kind.as_str());
         let target_qualifies = MIGRATION_KINDS.contains(&self.target.kind.as_str());
@@ -345,10 +357,14 @@ fn scope_overlap(left: &[Scope], right: &[Scope]) -> Option<ScopeOverlap> {
                 })
             };
             if let Some(candidate) = candidate {
-                if best
-                    .as_ref()
-                    .is_none_or(|current| candidate.score > current.score)
-                {
+                // Break score ties with an order-independent total order so the
+                // winning pair, and therefore the recorded scope and advice,
+                // cannot depend on which intent published first.
+                if best.as_ref().is_none_or(|current| {
+                    candidate.score > current.score
+                        || (candidate.score == current.score
+                            && candidate.pair_key() < current.pair_key())
+                }) {
                     best = Some(candidate);
                 }
             }
@@ -944,5 +960,29 @@ mod tests {
         assert_eq!(conflicts[0].evidence["target_scope"], "symbol:creditledger");
         assert!(conflicts[0].explanation.contains("CreditLedgerService"));
         assert!(conflicts[0].explanation.contains("overlaps `CreditLedger`"));
+    }
+
+    #[test]
+    fn multi_scope_ties_resolve_identically_in_both_publish_orders() {
+        let rename = candidate(
+            "a",
+            "Rename users.email to users.primary_email across PaymentService",
+            &["schema:users.email", "symbol:PaymentService"],
+        );
+        let extend = candidate(
+            "b",
+            "Extend PaymentService with stricter users.email validation",
+            &["symbol:PaymentService", "schema:users.email"],
+        );
+        let forward = detect_pair(&rename, &extend);
+        let reverse = detect_pair(&extend, &rename);
+        assert_eq!(forward[0].kind, "replace_vs_extend");
+        assert_eq!(forward[0].kind, reverse[0].kind);
+        assert_eq!(forward[0].suggestion, reverse[0].suggestion);
+        assert!(forward[0].suggestion.contains("migration order"));
+        assert_eq!(
+            forward[0].scope.as_ref().map(Scope::canonical),
+            reverse[0].scope.as_ref().map(Scope::canonical),
+        );
     }
 }

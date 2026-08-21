@@ -3090,13 +3090,14 @@ fn setup_codex_refuses_to_hijack_another_repositorys_entry_without_force() {
 
 #[cfg(unix)]
 #[test]
-fn setup_codex_parses_a_plain_text_mcp_get_fallback() {
+fn setup_codex_treats_a_plain_text_entry_as_unverifiable() {
     let repo = create_repo();
     let stub = CodexStub::create(repo.temp.path());
     let canonical_root = repo.root.canonicalize().expect("canonicalize repo root");
-    // An older codex renders `mcp get` as plain text rather than JSON; the
-    // token fallback must still recover the --cwd target so a matching entry
-    // is reported unchanged instead of refused.
+    // An older codex renders `mcp get` as plain text; the token fallback
+    // recovers only the --cwd target, so the entry's command is unverifiable.
+    // An unverifiable command must not be blessed as current: setup refuses
+    // without --force, and --force repoints it to the absolute installed path.
     fs::write(
         &stub.state,
         format!(
@@ -3106,15 +3107,22 @@ fn setup_codex_parses_a_plain_text_mcp_get_fallback() {
     )
     .expect("write plain-text stub state");
 
-    let setup = stub.run_success(&repo.root, ["setup", "codex"]);
-    let client = &setup["data"]["clients"][0];
-    assert_eq!(client["mcp"]["status"], "unchanged", "{client}");
-    assert_eq!(client["mcp_configured"], true, "{client}");
-    assert_eq!(client["error"], Value::Null, "{client}");
+    let refusal = stub.run_failure(&repo.root, ["setup", "codex"]);
+    assert_eq!(refusal["error"]["code"], "ALREADY_EXISTS", "{refusal}");
     let log = stub.log_contents();
     assert!(
         !log.contains("mcp add") && !log.contains("mcp remove"),
-        "a matching plain-text entry must not be re-registered: {log}"
+        "an unverifiable entry must not be touched without --force: {log}"
+    );
+
+    let forced = stub.run_success(&repo.root, ["setup", "codex", "--force"]);
+    let client = &forced["data"]["clients"][0];
+    assert_eq!(client["mcp"]["status"], "written", "{client}");
+    assert_eq!(client["mcp_configured"], true, "{client}");
+    let log = stub.log_contents();
+    assert!(
+        log.contains("mcp remove") && log.contains("mcp add"),
+        "--force must repoint the unverifiable entry: {log}"
     );
 }
 
