@@ -97,8 +97,8 @@ local HTTP escape hatch, not another implementation of the service.
 
 `agent list` and `intent show <INTENT_ID>` are CLI-only read conveniences: they
 let an agent map a conflict's intent ids to registered agents without scraping
-`events list` or `graph` output. HTTP parity for these reads is roadmap work;
-until then they are not exposed by the daemon or MCP surfaces.
+`events list` or `graph` output. They are not exposed by the daemon or MCP
+surfaces.
 
 ## Agent registration
 
@@ -246,9 +246,15 @@ The stored `base_ref` is the commit the candidate is diffed against, and
 <candidate>` patch bytes. When the caller omits `base_ref` the base is derived
 from the candidate commit's first parent (a root commit is diffed against the
 empty tree). `provenance.git.base_resolution` records how the base was chosen
-(`caller_supplied`, `first_parent`, `root_commit`, or `unborn_worktree`), and a
-caller-supplied base equal to the candidate itself is rejected, so a non-merge
-commit with changes never records an empty-diff hash.
+(`caller_supplied`, `first_parent`, `root_commit`, `shallow_boundary`, or
+`unborn_worktree`), and a caller-supplied base equal to the candidate itself is
+rejected, so a non-merge commit with changes never records an empty-diff hash.
+
+A candidate at a shallow clone's boundary is not a root commit even though Git
+reports it without parents; Foremerge records `shallow_boundary` and falls
+back to the snapshot content hash for `diff_hash` rather than misrecording
+`root_commit`. Pass `base_ref` explicitly (after fetching the true base) to
+get a real commit-range diff hash from a shallow clone.
 
 The publish response also carries `open_conflicts` (count and ids of OPEN or
 COORDINATING conflicts touching the intent at that moment), so a publisher

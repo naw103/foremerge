@@ -564,16 +564,20 @@ impl Store {
             let entity_id: String = row.get(5)?;
             let agent_id: Option<String> = row.get(6)?;
             let payload_json: String = row.get(7)?;
-            let payload: Value = parse_json_column(payload_json, 7)?;
             let created_at: String = row.get(8)?;
             let prev_hash: String = row.get(9)?;
             let event_hash: String = row.get(10)?;
             if prev_hash != expected_prev {
                 return Ok(false);
             }
-            let canonical_payload = serde_json::to_string(&payload)?;
+            // Hash the payload bytes exactly as stored. Appending hashes the
+            // serialized payload it writes, so stored bytes are always the
+            // hashed bytes; re-serializing parsed JSON here would tie
+            // verification to the verifying binary's map key order, and a
+            // chain written by one release could falsely fail audit under
+            // another.
             let material = format!(
-                "{prev_hash}|{event_id}|{schema_version}|{event_type}|{entity_type}|{entity_id}|{}|{created_at}|{canonical_payload}",
+                "{prev_hash}|{event_id}|{schema_version}|{event_type}|{entity_type}|{entity_id}|{}|{created_at}|{payload_json}",
                 agent_id.as_deref().unwrap_or("")
             );
             let actual = format!("{:x}", Sha256::digest(material.as_bytes()));
@@ -691,6 +695,91 @@ mod tests {
             .unwrap();
 
         assert!(store.verify_event_chain().unwrap());
+    }
+
+    #[test]
+    fn event_verification_hashes_stored_payload_bytes_in_any_key_order() {
+        let store = Store::in_memory().unwrap();
+        {
+            let mut conn = store.lock().unwrap();
+            let tx = Store::immediate_tx(&mut conn).unwrap();
+            // Insertion-ordered keys (the preserve_order serializer writes
+            // them as declared, not sorted).
+            Store::append_event(
+                &tx,
+                "test.recorded",
+                "Intent",
+                "int_order",
+                Some("agt_test"),
+                &json!({"zeta": 1, "alpha": {"nested": true}, "mid": [1, 2]}),
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        assert!(store.verify_event_chain().unwrap());
+
+        // A chain segment written by a serializer that sorts keys (the 0.1.0
+        // binary) must verify equally: the stored bytes are the hashed bytes
+        // regardless of which release wrote them.
+        let sorted_payload = r#"{"alpha":2,"zeta":1}"#;
+        let created_at = Utc::now().to_rfc3339();
+        let prev_hash: String = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT event_hash FROM events ORDER BY seq DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let material = format!(
+            "{prev_hash}|evt_sorted|{SCHEMA_VERSION}|legacy.sorted|Intent|int_sorted|agt_test|{created_at}|{sorted_payload}"
+        );
+        let event_hash = format!("{:x}", Sha256::digest(material.as_bytes()));
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO events(event_id, schema_version, event_type, entity_type, entity_id,
+                 agent_id, payload_json, created_at, prev_hash, event_hash)
+                 VALUES('evt_sorted', ?1, 'legacy.sorted', 'Intent', 'int_sorted', 'agt_test',
+                 ?2, ?3, ?4, ?5)",
+                params![
+                    SCHEMA_VERSION,
+                    sorted_payload,
+                    created_at,
+                    prev_hash,
+                    event_hash
+                ],
+            )
+            .unwrap();
+        assert!(store.verify_event_chain().unwrap());
+
+        // Verification is byte-exact: an event whose hash was computed over
+        // differently ordered bytes than the stored payload, even
+        // semantically equal JSON, must fail.
+        let mismatched_material = format!(
+            "{event_hash}|evt_mismatch|{SCHEMA_VERSION}|legacy.mismatch|Intent|int_mismatch|agt_test|{created_at}|{{\"alpha\":2,\"zeta\":1}}"
+        );
+        let mismatched_hash = format!("{:x}", Sha256::digest(mismatched_material.as_bytes()));
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO events(event_id, schema_version, event_type, entity_type, entity_id,
+                 agent_id, payload_json, created_at, prev_hash, event_hash)
+                 VALUES('evt_mismatch', ?1, 'legacy.mismatch', 'Intent', 'int_mismatch',
+                 'agt_test', ?2, ?3, ?4, ?5)",
+                params![
+                    SCHEMA_VERSION,
+                    r#"{"zeta":1,"alpha":2}"#,
+                    created_at,
+                    event_hash,
+                    mismatched_hash
+                ],
+            )
+            .unwrap();
+        assert!(!store.verify_event_chain().unwrap());
     }
 
     #[cfg(unix)]

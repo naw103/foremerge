@@ -660,6 +660,14 @@ impl Foremerge {
                     let hash = git::diff_patch_hash(&worktree, &parent, commit)?;
                     (Some(parent), "first_parent", hash)
                 }
+                None if git::is_shallow(&worktree)? => {
+                    // A shallow clone reports its boundary commits without
+                    // parents even though the real history has them.
+                    // Recording root_commit would be false provenance and an
+                    // empty-tree diff would hash the entire tree, so fall
+                    // back to the snapshot content hash and say so.
+                    (None, "shallow_boundary", snapshot.diff_hash.clone())
+                }
                 None => {
                     let empty_tree = git::empty_tree_id(&worktree)?;
                     let hash = git::diff_patch_hash(&worktree, &empty_tree, commit)?;

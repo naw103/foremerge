@@ -72,6 +72,17 @@ Passing Foremerge-executed validation is a gate; agent-reported tests are
 provenance only. A passing command is not proof that the chosen validation was
 complete or that the software has no defects.
 
+## Agent identity is self-asserted
+
+MCP and local API callers identify themselves with an `agent_id` they supply;
+no transport authenticates that the caller is the agent it names. Guards keyed
+on the caller's identity, such as the MCP `resolve_conflict` party
+restriction, therefore raise the bar against accidental cross-agent actions
+by an honest but confused client, not against a client that deliberately
+presents another agent's id. Anyone who can reach the local daemon or spawn
+the MCP server can act as any registered agent; these checks are not an
+authorization boundary. See `SECURITY.md`.
+
 ## Provenance is only as accurate as its inputs
 
 Agent identity, model, prompt, decisions, summaries, dependencies, and test

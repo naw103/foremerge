@@ -129,6 +129,7 @@ pub fn snapshot(worktree: impl AsRef<Path>) -> Result<GitSnapshot> {
             worktree,
             &["diff", "--no-ext-diff", "--no-textconv", "--binary", "HEAD"],
             &mut digest,
+            "reduce or split the ChangeSet",
         )?
     } else {
         0
@@ -209,7 +210,21 @@ pub fn diff_files(worktree: impl AsRef<Path>) -> Result<Vec<String>> {
     Ok(snapshot(worktree)?.changed_files)
 }
 
-/// The first parent of a commit, or `None` for a root commit.
+/// Whether the repository history is shallow. Commits at a shallow clone's
+/// boundary are reported without parents even though the real history has
+/// them, so a missing first parent in a shallow repository must not be
+/// treated as a root commit.
+pub fn is_shallow(worktree: impl AsRef<Path>) -> Result<bool> {
+    Ok(
+        git_output(worktree.as_ref(), &["rev-parse", "--is-shallow-repository"])
+            .context("determine whether the repository is shallow")?
+            == "true",
+    )
+}
+
+/// The first parent of a commit, or `None` for a root commit. In a shallow
+/// repository a `None` is ambiguous; check [`is_shallow`] before treating it
+/// as a true root.
 pub fn first_parent(worktree: impl AsRef<Path>, commit: &str) -> Result<Option<String>> {
     let line = git_output(
         worktree.as_ref(),
@@ -253,6 +268,7 @@ pub fn diff_patch_hash(worktree: impl AsRef<Path>, base: &str, commit: &str) -> 
             commit,
         ],
         &mut digest,
+        "if the candidate is a merge commit, its default first-parent diff spans the entire merged-in branch, so pass --base-ref (HTTP/MCP: base_ref) with the true fork point; otherwise reduce or split the ChangeSet",
     )?;
     Ok(format!("{:x}", digest.finalize()))
 }
@@ -435,7 +451,12 @@ fn git_output_bytes(cwd: &Path, args: &[&str]) -> Result<Vec<u8>> {
     Ok(captured)
 }
 
-fn hash_git_output(cwd: &Path, args: &[&str], digest: &mut Sha256) -> Result<u64> {
+fn hash_git_output(
+    cwd: &Path,
+    args: &[&str],
+    digest: &mut Sha256,
+    over_budget_hint: &str,
+) -> Result<u64> {
     let mut child = Command::new("git")
         .arg("-C")
         .arg(cwd)
@@ -461,9 +482,7 @@ fn hash_git_output(cwd: &Path, args: &[&str], digest: &mut Sha256) -> Result<u64
         if hashed_bytes > MAX_HASH_BYTES {
             let _ = child.kill();
             let _ = child.wait();
-            bail!(
-                "RESOURCE_LIMIT: git diff exceeds {MAX_HASH_BYTES} bytes; reduce or split the ChangeSet"
-            );
+            bail!("RESOURCE_LIMIT: git diff exceeds {MAX_HASH_BYTES} bytes; {over_budget_hint}");
         }
         digest.update(&buffer[..read]);
     }

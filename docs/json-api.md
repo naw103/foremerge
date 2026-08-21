@@ -201,6 +201,11 @@ fm_curl \
   }' | jq .
 ```
 
+Free-form `intent` text must be prose: an id-shaped value (`int_` followed by
+32 hexadecimal characters) is rejected with `INVALID_INPUT` instead of being
+compared as text, because that comparison would silently return a false
+all-clear. Pass ids as `intent_id`.
+
 The response includes `conflicts`, `checked_intents`, `blocking`, and `policy`.
 See [Conflict detection](conflict-detection.md) for rule evidence and limits.
 
@@ -241,8 +246,14 @@ fm_curl -H 'content-type: application/json' \
   -d '{"agent_id":"agt_REPLACE_ME","reason":"superseded by shared provider work"}' | jq .
 ```
 
+The start response is the updated intent and includes an `open_conflicts`
+snapshot (count and ids of OPEN or COORDINATING conflicts touching it),
+because a later publish by another agent can create a conflict after your own
+publish returned none.
+
 Discarding records the speculative outcome; it does not delete history or Git
-objects.
+objects. The `reason` must be non-empty: an empty or whitespace-only reason is
+rejected with `INVALID_INPUT` (a breaking change in 0.2.0).
 
 ## Publish a ChangeSet
 
@@ -274,6 +285,18 @@ Foremerge derives available Git context and returns the persisted ChangeSet,
 including its fingerprint, status, and `supersedes_changeset_id` when it is a
 revision. Publishing a revision after validation invalidates the prior gate and
 returns the intent to `PROVISIONAL`.
+
+The request also accepts an optional `base_ref` naming the true diff base
+commit; a base equal to the candidate itself is rejected with `INVALID_INPUT`.
+When omitted, the base is derived from the candidate commit's first parent.
+The response's `provenance.git` object records the resolved `candidate`,
+`base_ref`, `base_resolution` (`caller_supplied`, `first_parent`,
+`root_commit`, `shallow_boundary`, or `unborn_worktree`), and `diff_hash` over
+the actual `git diff <base> <candidate>` patch bytes.
+
+The response also carries an `open_conflicts` snapshot (count and ids of OPEN
+or COORDINATING conflicts touching the intent at that moment), so an earlier
+publisher learns about conflicts that later publishes created against it.
 
 ## Validate a ChangeSet
 

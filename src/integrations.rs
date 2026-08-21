@@ -4,24 +4,34 @@ use serde_json::{Map, Value, json};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 /// Client probes and Codex registration commands run external CLIs that may
 /// hang (first-run prompts, wrapper scripts waiting on stdin). Mirror the
-/// validation runner's bounded posture: closed stdin, capped capture, and a
-/// hard timeout with a kill.
+/// validation runner's bounded posture: closed stdin, capped capture, its own
+/// process group, and a hard timeout that kills the whole group.
 const CLIENT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+/// Extra time allowed for the capture readers to observe EOF after the
+/// probe's process group has been killed.
+const CAPTURE_GRACE: Duration = Duration::from_secs(2);
 const MAX_CLIENT_OUTPUT_BYTES: usize = 64 * 1024;
 
+#[derive(Debug)]
 struct BoundedOutput {
     success: bool,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
 }
 
-fn capture_bounded(stream: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+/// Reads a probe output stream on a detached thread and delivers the captured
+/// bytes over a channel at EOF. The thread is never joined directly: the
+/// caller receives with a deadline, and the thread terminates on its own once
+/// every writer of the pipe is gone.
+fn capture_bounded(stream: impl Read + Send + 'static) -> mpsc::Receiver<Vec<u8>> {
+    let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
         let mut stream = stream;
         let mut captured = Vec::new();
@@ -35,12 +45,43 @@ fn capture_bounded(stream: impl Read + Send + 'static) -> std::thread::JoinHandl
                 }
             }
         }
-        captured
-    })
+        let _ = sender.send(captured);
+    });
+    receiver
 }
 
-fn run_bounded(mut command: Command) -> Result<BoundedOutput> {
+fn recv_until(receiver: &mpsc::Receiver<Vec<u8>>, deadline: Instant) -> Option<Vec<u8>> {
+    receiver
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .ok()
+}
+
+/// Kill the probe's whole process group, not only the direct child: a wrapper
+/// script can leave background descendants that inherited the output pipes,
+/// and they must die for the capture readers to ever see EOF. Uses the same
+/// `/bin/kill` group signal as the validation runner.
+fn kill_probe_tree(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let pid = child.id();
+        let _ = Command::new("/bin/kill")
+            .args(["-KILL", "--", &format!("-{pid}")])
+            .status();
+    }
+    let _ = child.kill();
+}
+
+fn run_bounded(command: Command) -> Result<BoundedOutput> {
+    run_bounded_with_timeout(command, CLIENT_COMMAND_TIMEOUT)
+}
+
+fn run_bounded_with_timeout(mut command: Command, timeout: Duration) -> Result<BoundedOutput> {
     let program = command.get_program().to_string_lossy().into_owned();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -57,7 +98,7 @@ fn run_bounded(mut command: Command) -> Result<BoundedOutput> {
         .take()
         .map(capture_bounded)
         .ok_or_else(|| anyhow::anyhow!("capture {program} stderr"))?;
-    let deadline = Instant::now() + CLIENT_COMMAND_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let status = loop {
         if let Some(status) = child
             .try_wait()
@@ -66,20 +107,63 @@ fn run_bounded(mut command: Command) -> Result<BoundedOutput> {
             break status;
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
+            kill_probe_tree(&mut child);
             let _ = child.wait();
             bail!(
                 "RESOURCE_LIMIT: {program} did not finish within {} seconds",
-                CLIENT_COMMAND_TIMEOUT.as_secs()
+                timeout.as_secs()
             );
         }
         std::thread::sleep(Duration::from_millis(25));
     };
+    // The child has exited, but background descendants that inherited its
+    // output pipes keep the readers from seeing EOF. Bound the collection by
+    // the remaining deadline, then kill the group and allow a short grace for
+    // the readers to drain.
+    let stdout_bytes = recv_until(&stdout, deadline);
+    let stderr_bytes = recv_until(&stderr, deadline);
+    let (stdout, stderr) = match (stdout_bytes, stderr_bytes) {
+        (Some(stdout), Some(stderr)) => (stdout, stderr),
+        (stdout_bytes, stderr_bytes) => {
+            kill_probe_tree(&mut child);
+            let grace = Instant::now() + CAPTURE_GRACE;
+            let stdout_bytes = stdout_bytes.or_else(|| recv_until(&stdout, grace));
+            let stderr_bytes = stderr_bytes.or_else(|| recv_until(&stderr, grace));
+            match (stdout_bytes, stderr_bytes) {
+                (Some(stdout), Some(stderr)) => (stdout, stderr),
+                _ => bail!(
+                    "RESOURCE_LIMIT: {program} exited but left background processes holding its output pipes, so its output could not be captured within {} seconds",
+                    timeout.as_secs()
+                ),
+            }
+        }
+    };
     Ok(BoundedOutput {
         success: status.success(),
-        stdout: stdout.join().unwrap_or_default(),
-        stderr: stderr.join().unwrap_or_default(),
+        stdout,
+        stderr,
     })
+}
+
+/// Wrap `error` with `action` while keeping any UPPER_SNAKE error code first,
+/// so typed codes (RESOURCE_LIMIT, ALREADY_EXISTS, ...) are not demoted to the
+/// generic ERROR by the setup failure envelope. Errors without a code get
+/// `fallback_code`.
+fn coded(error: anyhow::Error, fallback_code: &str, action: &str) -> anyhow::Error {
+    let message = format!("{error:#}");
+    match message.split_once(':') {
+        Some((code, rest)) if is_error_code(code) => {
+            anyhow::anyhow!("{code}: {action}: {}", rest.trim_start())
+        }
+        _ => anyhow::anyhow!("{fallback_code}: {action}: {message}"),
+    }
+}
+
+fn is_error_code(candidate: &str) -> bool {
+    !candidate.is_empty()
+        && candidate
+            .chars()
+            .all(|character| character.is_ascii_uppercase() || character == '_')
 }
 
 pub const SKILL_CONTENT: &str = include_str!("../.codex/skills/foremerge/SKILL.md");
@@ -358,7 +442,7 @@ fn merge_mcp_config(
                 });
             }
             bail!(
-                "ALREADY_EXISTS: {} already defines mcpServers.foremerge as {}; inspect it or rerun with --force to replace it",
+                "ALREADY_EXISTS: {} already defines mcpServers.foremerge as {}; inspect it or rerun with --force to replace it with the absolute installed path",
                 path.display(),
                 serde_json::to_string(existing)
                     .unwrap_or_else(|_| "an unserializable entry".to_string())
@@ -384,7 +468,10 @@ fn configure_codex_mcp(root: &Path, foremerge_exe: &Path, force: bool) -> Result
             warning: None,
         });
     }
-    let existing = codex_mcp_entry();
+    // A probe failure must abort configuration: treating it as "no entry"
+    // would skip the second-repository refusal below and silently repoint a
+    // registration this process could not even read.
+    let existing = codex_mcp_entry()?;
     if let Some(entry) = &existing {
         if entry.is_current_for(root) {
             return Ok(McpOutcome {
@@ -409,7 +496,8 @@ fn configure_codex_mcp(root: &Path, foremerge_exe: &Path, force: bool) -> Result
         }
         let mut remove = Command::new("codex");
         remove.args(["mcp", "remove", "foremerge"]);
-        let output = run_bounded(remove).context("run `codex mcp remove foremerge`")?;
+        let output = run_bounded(remove)
+            .map_err(|error| coded(error, "CHECK_FAILED", "run `codex mcp remove foremerge`"))?;
         if !output.success {
             bail!(
                 "CHECK_FAILED: Codex could not replace the existing Foremerge MCP entry: {}",
@@ -417,17 +505,34 @@ fn configure_codex_mcp(root: &Path, foremerge_exe: &Path, force: bool) -> Result
             );
         }
     }
+    // The Codex CLI has no atomic replace: the previous registration is
+    // already gone at this point, so a failed add must say so and explain how
+    // to restore it.
+    let removed_note = existing.as_ref().map(|entry| {
+        format!(
+            "; note: the previous user-global registration ({}) was already removed; restore it with {}",
+            entry.serialized(),
+            entry.restore_command()
+        )
+    });
     let mut add = Command::new("codex");
     add.args(["mcp", "add", "foremerge", "--"])
         .arg(foremerge_exe)
         .arg("--cwd")
         .arg(root)
         .arg("mcp");
-    let output = run_bounded(add).context("run `codex mcp add foremerge`")?;
+    let output = run_bounded(add).map_err(|error| {
+        let error = coded(error, "CHECK_FAILED", "run `codex mcp add foremerge`");
+        match removed_note.as_deref() {
+            Some(note) => anyhow::anyhow!("{error:#}{note}"),
+            None => error,
+        }
+    })?;
     if !output.success {
         bail!(
-            "CHECK_FAILED: Codex could not register the Foremerge MCP server: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            "CHECK_FAILED: Codex could not register the Foremerge MCP server: {}{}",
+            String::from_utf8_lossy(&output.stderr).trim(),
+            removed_note.as_deref().unwrap_or("")
         );
     }
     let warning = existing.map(|entry| {
@@ -478,9 +583,38 @@ impl CodexEntry {
             None => true,
         }
     }
+
+    fn serialized(&self) -> String {
+        format!(
+            "command: {}, cwd: {}",
+            self.command.as_deref().unwrap_or("unknown"),
+            self.cwd
+                .as_deref()
+                .map_or_else(|| "unknown".to_string(), |cwd| cwd.display().to_string())
+        )
+    }
+
+    fn restore_command(&self) -> String {
+        match (self.command.as_deref(), self.cwd.as_deref()) {
+            (Some(command), Some(cwd)) => {
+                format!(
+                    "`codex mcp add foremerge -- {command} --cwd {} mcp`",
+                    cwd.display()
+                )
+            }
+            _ => {
+                "`codex mcp add foremerge -- <foremerge binary> --cwd <repository> mcp`".to_string()
+            }
+        }
+    }
 }
 
-fn codex_mcp_entry() -> Option<CodexEntry> {
+/// The Codex CLI's recorded `foremerge` MCP entry. Returns `Ok(Some(_))` when
+/// an entry exists, `Ok(None)` only when its absence is verifiable, and `Err`
+/// when the codex CLI could not be read at all. Callers must never treat a
+/// probe failure as absence: doing so would bypass the second-repository
+/// refusal and silently overwrite another repository's registration.
+fn codex_mcp_entry() -> Result<Option<CodexEntry>> {
     let mut json_probe = Command::new("codex");
     json_probe.args(["mcp", "get", "foremerge", "--json"]);
     if let Ok(output) = run_bounded(json_probe) {
@@ -490,31 +624,66 @@ fn codex_mcp_entry() -> Option<CodexEntry> {
                 .as_ref()
                 .and_then(parse_codex_entry);
             if let Some(entry) = parsed {
-                return Some(entry);
+                return Ok(Some(entry));
             }
         }
     }
     let mut text_probe = Command::new("codex");
     text_probe.args(["mcp", "get", "foremerge"]);
-    let output = run_bounded(text_probe).ok()?;
-    if !output.success {
-        return None;
+    let output = run_bounded(text_probe).map_err(|error| {
+        coded(
+            error,
+            "CHECK_FAILED",
+            "read the Codex MCP registration with `codex mcp get foremerge`; check that the codex CLI works, then re-run setup",
+        )
+    })?;
+    if output.success {
+        let text = String::from_utf8_lossy(&output.stdout);
+        let parsed = serde_json::from_str::<Value>(&text)
+            .ok()
+            .as_ref()
+            .and_then(parse_codex_entry);
+        if let Some(entry) = parsed {
+            return Ok(Some(entry));
+        }
+        let tokens: Vec<&str> = text.split_whitespace().collect();
+        let cwd = tokens
+            .iter()
+            .position(|token| *token == "--cwd")
+            .and_then(|position| tokens.get(position + 1))
+            .map(PathBuf::from);
+        return Ok(Some(CodexEntry { command: None, cwd }));
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let parsed = serde_json::from_str::<Value>(&text)
-        .ok()
-        .as_ref()
-        .and_then(parse_codex_entry);
-    if let Some(entry) = parsed {
-        return Some(entry);
+    // `codex mcp get` reports a missing entry and a broken CLI the same way
+    // (a nonzero exit), so absence is only verifiable through a successful
+    // `codex mcp list` that does not name the entry.
+    let mut list_probe = Command::new("codex");
+    list_probe.args(["mcp", "list"]);
+    let listed = run_bounded(list_probe).map_err(|error| {
+        coded(
+            error,
+            "CHECK_FAILED",
+            "confirm the Codex MCP registration state with `codex mcp list`; check that the codex CLI works, then re-run setup",
+        )
+    })?;
+    if !listed.success {
+        bail!(
+            "CHECK_FAILED: `codex mcp get foremerge` and `codex mcp list` both failed ({}); check that the codex CLI works, then re-run setup",
+            String::from_utf8_lossy(&listed.stderr).trim()
+        );
     }
-    let tokens: Vec<&str> = text.split_whitespace().collect();
-    let cwd = tokens
-        .iter()
-        .position(|token| *token == "--cwd")
-        .and_then(|position| tokens.get(position + 1))
-        .map(PathBuf::from);
-    Some(CodexEntry { command: None, cwd })
+    let listing = String::from_utf8_lossy(&listed.stdout);
+    let names_foremerge = listing
+        .split(|character: char| {
+            !(character.is_ascii_alphanumeric() || character == '_' || character == '-')
+        })
+        .any(|token| token == "foremerge");
+    if names_foremerge {
+        bail!(
+            "CHECK_FAILED: Codex lists a `foremerge` MCP entry but `codex mcp get foremerge` could not read it; check that the codex CLI works, then re-run setup"
+        );
+    }
+    Ok(None)
 }
 
 fn parse_codex_entry(value: &Value) -> Option<CodexEntry> {
@@ -547,7 +716,7 @@ fn find_command_object(value: &Value) -> Option<&Map<String, Value>> {
 }
 
 fn codex_mcp_configured(root: &Path) -> bool {
-    codex_mcp_entry().is_some_and(|entry| entry.is_current_for(root))
+    matches!(codex_mcp_entry(), Ok(Some(entry)) if entry.is_current_for(root))
 }
 
 fn command_available(command: &str) -> bool {
@@ -565,7 +734,7 @@ fn mcp_json_configured(path: &Path, root: &Path) -> bool {
 }
 
 /// True only for an entry that is verifiably current for this repository: its
-/// command resolves to an existing executable named `foremerge`, its last
+/// command is an absolute path to an existing `foremerge` binary, its last
 /// argument is `mcp`, and any `--cwd` argument canonicalizes to `root`.
 fn mcp_entry_current(entry: &Value, root: &Path) -> bool {
     let Some(command) = entry.get("command").and_then(Value::as_str) else {
@@ -589,19 +758,17 @@ fn mcp_entry_current(entry: &Value, root: &Path) -> bool {
     }
 }
 
+/// Only an absolute path to an existing file named `foremerge` is verifiably
+/// current. A bare or relative command would be resolved in the MCP client's
+/// own PATH and working directory, which need not match this process's, so
+/// such entries are treated as not current; setup writes absolute paths, so
+/// legitimate installs still pass, and `--force` normalizes an unverifiable
+/// entry to the absolute installed path.
 fn command_resolves_to_foremerge(command: &str) -> bool {
     let path = Path::new(command);
-    if path.file_name().and_then(|value| value.to_str()) != Some("foremerge") {
-        return false;
-    }
-    if path.components().count() > 1 {
-        path.is_file()
-    } else {
-        std::env::var_os("PATH").is_some_and(|paths| {
-            std::env::split_paths(&paths)
-                .any(|dir| !dir.as_os_str().is_empty() && dir.join(command).is_file())
-        })
-    }
+    path.is_absolute()
+        && path.file_name().and_then(|value| value.to_str()) == Some("foremerge")
+        && path.is_file()
 }
 
 fn paths_match(left: &Path, right: &Path) -> bool {
@@ -708,6 +875,72 @@ mod tests {
                 .iter()
                 .all(|report| report.skill.status == "unchanged" && report.error.is_none())
         );
+    }
+
+    #[test]
+    fn only_an_absolute_existing_foremerge_binary_is_verifiably_current() {
+        // Bare and relative commands resolve in the MCP client's own PATH and
+        // working directory, not this process's, so they are never blessed.
+        assert!(!command_resolves_to_foremerge("foremerge"));
+        assert!(!command_resolves_to_foremerge("target/debug/foremerge"));
+        assert!(!command_resolves_to_foremerge("/nonexistent/foremerge"));
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("foremerge");
+        fs::write(&path, b"#!/bin/sh\n").unwrap();
+        assert!(command_resolves_to_foremerge(&path.to_string_lossy()));
+        let other = temp.path().join("not-foremerge");
+        fs::write(&other, b"#!/bin/sh\n").unwrap();
+        assert!(!command_resolves_to_foremerge(&other.to_string_lossy()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_bounded_is_not_hung_by_a_background_descendant_holding_the_pipes() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "echo probe-ok; sleep 30 & exit 0"]);
+        let started = Instant::now();
+        let output = run_bounded_with_timeout(command, Duration::from_secs(1)).unwrap();
+        assert!(output.success);
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "probe-ok");
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "capture must be bounded even when a descendant holds the pipes; took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_bounded_kills_a_probe_that_exceeds_its_deadline() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 30"]);
+        let started = Instant::now();
+        let error = run_bounded_with_timeout(command, Duration::from_secs(1)).unwrap_err();
+        assert!(format!("{error:#}").starts_with("RESOURCE_LIMIT:"));
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "the deadline must bound the probe; took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn coded_preserves_typed_error_codes_through_context() {
+        let wrapped = coded(
+            anyhow::anyhow!("RESOURCE_LIMIT: codex did not finish within 10 seconds"),
+            "CHECK_FAILED",
+            "run `codex mcp add foremerge`",
+        );
+        assert_eq!(
+            format!("{wrapped:#}"),
+            "RESOURCE_LIMIT: run `codex mcp add foremerge`: codex did not finish within 10 seconds"
+        );
+        let fallback = coded(
+            anyhow::anyhow!("no such file"),
+            "CHECK_FAILED",
+            "run `codex mcp add foremerge`",
+        );
+        assert!(format!("{fallback:#}").starts_with("CHECK_FAILED: "));
     }
 
     #[test]

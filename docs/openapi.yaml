@@ -94,6 +94,10 @@ paths:
     post:
       operationId: startWork
       summary: Transition a claimed intent to IN_PROGRESS
+      description: >-
+        The response data is the updated intent and includes an
+        open_conflicts snapshot (count and ids of OPEN or COORDINATING
+        conflicts touching it) captured at the transition.
       parameters:
         - $ref: "#/components/parameters/IntentId"
       requestBody:
@@ -248,6 +252,14 @@ paths:
     post:
       operationId: publishChangeSet
       summary: Publish a provisional ChangeSet or revision
+      description: >-
+        The response data is the persisted ChangeSet. Its provenance.git
+        object records the resolved candidate commit, base_ref,
+        base_resolution (caller_supplied, first_parent, root_commit,
+        shallow_boundary, or unborn_worktree), and diff_hash over the actual
+        patch bytes. The response also carries an open_conflicts snapshot
+        (count and ids of OPEN or COORDINATING conflicts touching the intent
+        at that moment).
       requestBody:
         required: true
         content:
@@ -491,6 +503,10 @@ components:
           type: [string, "null"]
         intent:
           type: [string, "null"]
+          description: >-
+            Free-form intent text. An id-shaped value (int_ followed by 32
+            hexadecimal characters) is rejected with INVALID_INPUT; pass ids
+            as intent_id.
         scopes:
           type: array
           items:
@@ -588,6 +604,13 @@ components:
           default: {}
         git_ref:
           type: [string, "null"]
+        base_ref:
+          type: [string, "null"]
+          description: >-
+            Optional true diff base commit for provenance. When omitted the
+            base is derived from the candidate commit's first parent. A base
+            that resolves to the candidate itself is rejected with
+            INVALID_INPUT.
         worktree:
           type: [string, "null"]
     ValidationRequest:
@@ -652,3 +675,7 @@ components:
           type: string
         reason:
           type: string
+          minLength: 1
+          description: >-
+            Must be non-empty; an empty or whitespace-only reason is rejected
+            with INVALID_INPUT.

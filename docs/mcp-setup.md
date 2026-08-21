@@ -64,9 +64,15 @@ git rev-parse --path-format=absolute --git-common-dir
 The database is `foremerge/state.sqlite3` below that directory.
 
 With an explicit `--database`, the spawn directory of the MCP process does not
-matter for trust decisions: named verification checks are read from the
-`checks.json` registry of the repository the store is bound to, not from the
-process working directory.
+matter for trust decisions once the store is bound to a repository: named
+verification checks are read from the `checks.json` registry of the repository
+the store is bound to, not from the process working directory. Bind the store
+explicitly by running `foremerge init` from the repository before wiring MCP
+clients: a fresh, never-bound database is bound by the first process that
+opens it from inside a Git repository, so for an unbound store the spawn
+directory does select the repository. While a store remains unbound, named
+verification checks are rejected with `INVALID_INPUT` until an agent registers
+a worktree inside the repository, which binds the store.
 
 If the MCP client supports a working-directory setting, repository discovery is
 also sufficient:
@@ -135,7 +141,12 @@ CLI and HTTP operator surfaces:
   believes an override is justified must ask a human operator.
 - `resolve_conflict` is accepted only from an agent whose intent is a party to
   the conflict, after real agreement with the other party. The recorded
-  decision carries the resolver's agent id.
+  decision carries the resolver's agent id. Note that MCP callers
+  self-identify: the transport does not authenticate the supplied `agent_id`,
+  so this restriction raises the bar against accidental cross-agent
+  resolution by an honest but confused client, not against a client that
+  deliberately presents another agent's id. It is not an authorization
+  boundary; see [Limitations](limitations.md).
 
 ## Suggested agent workflow
 
@@ -434,7 +445,9 @@ database. The MVP has no daemon autostart or automatic endpoint discovery.
   is not sandboxed.
 - HIGH-conflict overrides on `accept_changeset` are CLI-only operator actions
   and are rejected over MCP; `resolve_conflict` over MCP is limited to agents
-  that are parties to the conflict.
+  that are parties to the conflict. Agent ids are self-asserted over MCP, so
+  the party limit guards against accidental cross-agent resolution, not
+  against a deliberately lying client.
 - `publish_changeset` inspects the supplied local worktree through Git. Only
   connect clients you trust with local path access.
 - Test output and caller-provided provenance are stored locally in SQLite.

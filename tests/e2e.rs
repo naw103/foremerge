@@ -2882,13 +2882,31 @@ case "$1" in
   mcp)
     case "$2" in
       get)
+        if [ -n "$CODEX_STUB_FAIL_MCP_READS" ]; then
+          echo "codex-stub: cannot read the MCP registry" >&2
+          exit 3
+        fi
         if [ -f "$CODEX_STUB_STATE" ]; then
           cat "$CODEX_STUB_STATE"
           exit 0
         fi
         exit 1
         ;;
+      list)
+        if [ -n "$CODEX_STUB_FAIL_MCP_READS" ]; then
+          echo "codex-stub: cannot read the MCP registry" >&2
+          exit 3
+        fi
+        if [ -f "$CODEX_STUB_STATE" ]; then
+          echo "foremerge"
+        fi
+        exit 0
+        ;;
       add)
+        if [ -n "$CODEX_STUB_FAIL_MCP_ADD" ]; then
+          echo "codex-stub: add rejected" >&2
+          exit 3
+        fi
         shift 3
         if [ "$1" = "--" ]; then shift; fi
         exe="$1"
@@ -3067,6 +3085,148 @@ fn setup_codex_refuses_to_hijack_another_repositorys_entry_without_force() {
     assert!(
         last_add.contains(&canonical_b.display().to_string()),
         "repointed entry must target repo B: {last_add}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_codex_parses_a_plain_text_mcp_get_fallback() {
+    let repo = create_repo();
+    let stub = CodexStub::create(repo.temp.path());
+    let canonical_root = repo.root.canonicalize().expect("canonicalize repo root");
+    // An older codex renders `mcp get` as plain text rather than JSON; the
+    // token fallback must still recover the --cwd target so a matching entry
+    // is reported unchanged instead of refused.
+    fs::write(
+        &stub.state,
+        format!(
+            "foremerge enabled command foremerge args --cwd {} mcp\n",
+            canonical_root.display()
+        ),
+    )
+    .expect("write plain-text stub state");
+
+    let setup = stub.run_success(&repo.root, ["setup", "codex"]);
+    let client = &setup["data"]["clients"][0];
+    assert_eq!(client["mcp"]["status"], "unchanged", "{client}");
+    assert_eq!(client["mcp_configured"], true, "{client}");
+    assert_eq!(client["error"], Value::Null, "{client}");
+    let log = stub.log_contents();
+    assert!(
+        !log.contains("mcp add") && !log.contains("mcp remove"),
+        "a matching plain-text entry must not be re-registered: {log}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_codex_aborts_when_the_probe_fails_instead_of_silently_adding() {
+    let repo = create_repo();
+    let stub = CodexStub::create(repo.temp.path());
+    // `codex mcp get` and `codex mcp list` both failing means the CLI state
+    // is unreadable; setup must abort rather than treat that as "no entry"
+    // and add over a registration it could not read.
+    let output = {
+        let mut command = stub.command(&repo.root, ["setup", "codex"]);
+        command.env("CODEX_STUB_FAIL_MCP_READS", "1");
+        command.output().expect("run foremerge")
+    };
+    assert!(
+        !output.status.success(),
+        "setup must fail when the codex probe fails: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let value = parse_cli_json(&output);
+    assert_eq!(value["ok"], false, "{value}");
+    assert_eq!(value["error"]["code"], "CHECK_FAILED", "{value}");
+    let message = value["error"]["message"].as_str().expect("error message");
+    assert!(
+        message.contains("codex CLI"),
+        "the error must tell the user to check the codex CLI: {message}"
+    );
+    let log = stub.log_contents();
+    assert!(
+        !log.contains("mcp add"),
+        "a failed probe must never lead to an add: {log}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_codex_forced_repoint_discloses_a_removed_registration_when_add_fails() {
+    let repo_a = create_repo();
+    let repo_b = create_repo();
+    let stub = CodexStub::create(repo_a.temp.path());
+    stub.run_success(&repo_a.root, ["setup", "codex"]);
+    let canonical_a = repo_a.root.canonicalize().expect("canonicalize repo A");
+
+    let output = {
+        let mut command = stub.command(&repo_b.root, ["setup", "codex", "--force"]);
+        command.env("CODEX_STUB_FAIL_MCP_ADD", "1");
+        command.output().expect("run foremerge")
+    };
+    assert!(
+        !output.status.success(),
+        "setup must fail when the add fails: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let value = parse_cli_json(&output);
+    assert_eq!(value["error"]["code"], "CHECK_FAILED", "{value}");
+    let message = value["error"]["message"].as_str().expect("error message");
+    assert!(
+        message.contains("was already removed"),
+        "the error must disclose the destroyed registration: {message}"
+    );
+    assert!(
+        message.contains(&canonical_a.display().to_string()),
+        "the error must name the removed registration's repository: {message}"
+    );
+    assert!(
+        message.contains("restore it with"),
+        "the error must explain how to restore the previous entry: {message}"
+    );
+}
+
+#[test]
+fn setup_claude_refuses_a_bare_command_entry_it_cannot_verify() {
+    let repo = create_repo();
+    let canonical_root = repo.root.canonicalize().expect("canonicalize repo root");
+    // A bare command resolves in the MCP client's own PATH, not this
+    // process's, so it can never be blessed as current even when a binary of
+    // that name is findable here.
+    fs::write(
+        repo.root.join(".mcp.json"),
+        serde_json::to_vec_pretty(&json!({
+            "mcpServers": {
+                "foremerge": {
+                    "command": "foremerge",
+                    "args": ["--cwd", canonical_root.to_string_lossy(), "mcp"]
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let refusal = cli_failure(&repo.root, None, ["setup", "claude"]);
+    assert_eq!(refusal["error"]["code"], "ALREADY_EXISTS", "{refusal}");
+    assert!(
+        refusal["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("--force")),
+        "the refusal must suggest --force normalization: {refusal}"
+    );
+
+    let forced = cli_success(&repo.root, None, ["setup", "claude", "--force"]);
+    assert_eq!(forced["data"]["clients"][0]["mcp"]["status"], "written");
+    let value: Value =
+        serde_json::from_slice(&fs::read(repo.root.join(".mcp.json")).unwrap()).unwrap();
+    let command = value["mcpServers"]["foremerge"]["command"]
+        .as_str()
+        .expect("rewritten command");
+    assert!(
+        Path::new(command).is_absolute(),
+        "--force must normalize to the absolute installed path: {command}"
     );
 }
 
@@ -3696,6 +3856,70 @@ fn changeset_provenance_derives_first_parent_base_and_a_real_diff_hash() {
             .contains("candidate commit itself"),
         "unexpected vacuous-base error: {vacuous}"
     );
+}
+
+#[test]
+fn changeset_provenance_records_shallow_boundary_not_root_commit() {
+    let upstream = create_repo();
+    fs::write(upstream.root.join("second.txt"), "two\n").expect("write second file");
+    git(&upstream.root, ["add", "second.txt"]);
+    git(&upstream.root, ["commit", "--quiet", "-m", "second"]);
+
+    // A depth-1 clone reports its boundary commit without parents even
+    // though the real history has one; provenance must say so instead of
+    // misrecording a root commit.
+    let clone_parent = tempfile::tempdir().expect("create clone directory");
+    let clone_root = clone_parent.path().join("shallow");
+    let upstream_url = format!(
+        "file://{}",
+        upstream
+            .root
+            .canonicalize()
+            .expect("canonicalize upstream")
+            .display()
+    );
+    git(
+        clone_parent.path(),
+        [
+            "clone",
+            "--quiet",
+            "--depth",
+            "1",
+            upstream_url.as_str(),
+            clone_root.to_str().expect("UTF-8 clone path"),
+        ],
+    );
+    git(&clone_root, ["config", "user.name", "Foremerge Test"]);
+    git(
+        &clone_root,
+        ["config", "user.email", "foremerge-test@example.invalid"],
+    );
+
+    let (agent_id, intent_id) =
+        create_active_test_work(&clone_root, "shallow-agent", "shallow-task");
+    let published = cli_success(
+        &clone_root,
+        None,
+        vec![
+            "changeset".to_string(),
+            "publish".to_string(),
+            "--agent".to_string(),
+            agent_id,
+            "--intent".to_string(),
+            intent_id,
+            "--summary".to_string(),
+            "Publish a candidate at the shallow boundary".to_string(),
+            "--git-ref".to_string(),
+            "HEAD".to_string(),
+        ],
+    );
+    let git_provenance = &published["data"]["provenance"]["git"];
+    assert_eq!(
+        git_provenance["base_resolution"], "shallow_boundary",
+        "a shallow boundary commit must not be recorded as a root commit: {published}"
+    );
+    assert_eq!(git_provenance["base_ref"], Value::Null);
+    assert_eq!(published["data"]["base_ref"], Value::Null);
 }
 
 #[test]
