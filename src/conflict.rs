@@ -22,6 +22,16 @@ static IDENT_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b[A-Z][A-Za-z0-9_]*(?:Service|Provider|Client|API|Schema)?\b").unwrap()
 });
 
+/// English sentence-starters and connectives that IDENT_RE can match at the
+/// start of a sentence but that are never code identifiers.
+const SUBJECT_STOPLIST: &[&str] = &[
+    "a", "add", "after", "all", "also", "an", "and", "any", "as", "at", "before", "both", "but",
+    "by", "do", "does", "each", "ensure", "first", "fix", "for", "from", "if", "in", "it", "its",
+    "keep", "make", "new", "next", "no", "none", "not", "note", "now", "of", "on", "once", "only",
+    "or", "our", "second", "so", "some", "the", "then", "these", "they", "this", "those", "thus",
+    "to", "update", "use", "we", "when", "while", "with", "yes",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
     Add,
@@ -96,26 +106,10 @@ fn infer(summary: &str) -> Inference {
         };
     }
 
-    let lower = summary.to_lowercase();
-    let operation = if contains_word(&lower, &["replace", "rewrite", "supersede", "swap"]) {
-        Operation::Replace
-    } else if contains_word(&lower, &["remove", "delete", "drop", "retire"]) {
-        Operation::Remove
-    } else if contains_word(&lower, &["rename", "move"]) {
-        Operation::Rename
-    } else if contains_word(&lower, &["migrate", "convert"]) {
-        Operation::Migrate
-    } else if lower.contains("support") || contains_word(&lower, &["extend", "augment"]) {
-        Operation::Extend
-    } else if contains_word(&lower, &["add", "introduce", "implement", "create"]) {
-        Operation::Add
-    } else if contains_word(&lower, &["modify", "change", "update", "refactor", "fix"]) {
-        Operation::Modify
-    } else {
-        Operation::Unknown
-    };
+    let operation = classify_operation(summary);
     let subject = IDENT_RE
         .find_iter(summary)
+        .filter(|found| confident_identifier(summary, found))
         .last()
         .map(|value| value.as_str().to_string());
     Inference {
@@ -131,10 +125,64 @@ fn infer(summary: &str) -> Inference {
     }
 }
 
-fn contains_word(text: &str, words: &[&str]) -> bool {
-    tokenize(text)
-        .iter()
-        .any(|token| words.iter().any(|word| token == word))
+/// Classify by the FIRST operation keyword by position in the summary, so a
+/// summary such as "Add promotional credits, then migrate callers" reads as
+/// additive rather than destructive.
+fn classify_operation(summary: &str) -> Operation {
+    summary
+        .to_lowercase()
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .find_map(keyword_operation)
+        .unwrap_or(Operation::Unknown)
+}
+
+fn keyword_operation(token: &str) -> Option<Operation> {
+    match token {
+        "replace" | "rewrite" | "supersede" | "swap" => Some(Operation::Replace),
+        "remove" | "delete" | "drop" | "retire" => Some(Operation::Remove),
+        "rename" | "move" => Some(Operation::Rename),
+        "migrate" | "convert" => Some(Operation::Migrate),
+        "extend" | "augment" | "support" | "supports" | "supported" | "supporting" => {
+            Some(Operation::Extend)
+        }
+        "add" | "introduce" | "implement" | "create" => Some(Operation::Add),
+        "modify" | "change" | "update" | "refactor" | "fix" => Some(Operation::Modify),
+        _ => None,
+    }
+}
+
+/// A fallback-extracted subject must look like a code identifier: CamelCase
+/// with at least two humps (PaymentService, CreditLedger), containing `_` or
+/// `::`, or wrapped in backticks in the summary — and never a stoplisted
+/// English sentence-starter such as "No" or "This".
+fn confident_identifier(summary: &str, found: &regex::Match) -> bool {
+    let word = found.as_str();
+    if SUBJECT_STOPLIST.contains(&word.to_ascii_lowercase().as_str()) {
+        return false;
+    }
+    if word.contains('_') || word.contains("::") || camel_humps(word) >= 2 {
+        return true;
+    }
+    let bytes = summary.as_bytes();
+    found.start() > 0 && bytes[found.start() - 1] == b'`' && bytes.get(found.end()) == Some(&b'`')
+}
+
+fn camel_humps(word: &str) -> usize {
+    let mut humps = 0;
+    let mut previous_is_lower_or_digit = false;
+    for character in word.chars() {
+        if character.is_ascii_uppercase() {
+            if humps == 0 || previous_is_lower_or_digit {
+                humps += 1;
+            }
+            previous_is_lower_or_digit = false;
+        } else {
+            previous_is_lower_or_digit =
+                character.is_ascii_lowercase() || character.is_ascii_digit();
+        }
+    }
+    humps
 }
 
 pub fn tokenize(text: &str) -> HashSet<String> {
@@ -171,30 +219,66 @@ fn jaccard(left: &HashSet<String>, right: &HashSet<String>) -> f64 {
     intersection / union
 }
 
-fn scope_overlap(left: &[Scope], right: &[Scope]) -> Option<(Scope, f64, String)> {
+#[derive(Debug, Clone)]
+struct ScopeOverlap {
+    /// Best-overlapping scope declared by the source intent.
+    source: Scope,
+    /// Best-overlapping scope declared by the target intent.
+    target: Scope,
+    score: f64,
+    reason: String,
+}
+
+impl ScopeOverlap {
+    fn keys_differ(&self) -> bool {
+        !self.source.key.eq_ignore_ascii_case(&self.target.key)
+    }
+
+    /// Human-readable clause naming both sides when their keys differ, so
+    /// each agent can match the conflict against a scope it declared.
+    fn describe(&self) -> String {
+        if self.keys_differ() {
+            format!(
+                "`{}` overlaps `{}` ({})",
+                self.source.key, self.target.key, self.reason
+            )
+        } else {
+            format!("both rely on {}", self.reason)
+        }
+    }
+}
+
+fn scope_overlap(left: &[Scope], right: &[Scope]) -> Option<ScopeOverlap> {
     for first in left {
         for second in right {
             if first.canonical() == second.canonical() {
-                return Some((first.clone(), 1.0, "exact semantic scope".to_string()));
+                return Some(ScopeOverlap {
+                    source: first.clone(),
+                    target: second.clone(),
+                    score: 1.0,
+                    reason: "exact semantic scope".to_string(),
+                });
             }
             let first_key = first.key.to_lowercase();
             let second_key = second.key.to_lowercase();
             if first_key == second_key {
-                return Some((
-                    first.clone(),
-                    0.9,
-                    "same semantic key across scope kinds".to_string(),
-                ));
+                return Some(ScopeOverlap {
+                    source: first.clone(),
+                    target: second.clone(),
+                    score: 0.9,
+                    reason: "same semantic key across scope kinds".to_string(),
+                });
             }
             let first_tokens = tokenize(&first.key);
             let second_tokens = tokenize(&second.key);
             let similarity = jaccard(&first_tokens, &second_tokens);
             if similarity >= 0.66 {
-                return Some((
-                    first.clone(),
-                    0.65 + similarity * 0.2,
-                    "overlapping semantic scope tokens".to_string(),
-                ));
+                return Some(ScopeOverlap {
+                    source: first.clone(),
+                    target: second.clone(),
+                    score: 0.65 + similarity * 0.2,
+                    reason: "overlapping semantic scope tokens".to_string(),
+                });
             }
         }
     }
@@ -208,6 +292,17 @@ fn inferred_scope(left: &Inference, right: &Inference) -> Option<Scope> {
         }
         _ => None,
     }
+}
+
+/// Scope kinds where the right coordination advice is agreeing an explicit
+/// migration order rather than introducing a provider abstraction.
+const MIGRATION_KINDS: &[&str] = &["schema", "migration", "config"];
+
+fn migration_order_suggestion(scope: &Scope) -> String {
+    format!(
+        "Agree the migration order first: land both changes to `{}` as one sequenced migration plan, or rebase one intent onto the other's outcome. This is a heuristic suggestion, not an automatic design decision.",
+        scope.key
+    )
 }
 
 fn provider_suggestion(scope: &Scope, destructive: &Inference, additive: &Inference) -> String {
@@ -251,18 +346,19 @@ pub fn detect_pair(source: &IntentCandidate, target: &IntentCandidate) -> Vec<Co
     let explicit_overlap = scope_overlap(&source.scopes, &target.scopes);
     let inferred = inferred_scope(&source_inference, &target_inference);
     let overlap = explicit_overlap.or_else(|| {
-        inferred.map(|scope| {
-            (
-                scope,
-                0.78,
-                "shared identifier inferred from intent".to_string(),
-            )
+        inferred.map(|scope| ScopeOverlap {
+            source: scope.clone(),
+            target: scope,
+            score: 0.78,
+            reason: "shared identifier inferred from intent".to_string(),
         })
     });
     let summary_similarity = jaccard(&tokenize(&source.summary), &tokenize(&target.summary));
     let mut results = Vec::new();
 
-    if let Some((scope, scope_score, overlap_reason)) = overlap.clone() {
+    if let Some(overlap) = &overlap {
+        let scope = overlap.source.clone();
+        let scope_score = overlap.score;
         let operations_collide = (source_inference.operation.destructive()
             && target_inference.operation.additive())
             || (target_inference.operation.destructive() && source_inference.operation.additive());
@@ -274,6 +370,11 @@ pub fn detect_pair(source: &IntentCandidate, target: &IntentCandidate) -> Vec<Co
             };
             let score =
                 (scope_score * destructive.confidence.min(additive.confidence) * 1.02).min(0.99);
+            let suggestion = if MIGRATION_KINDS.contains(&scope.kind.as_str()) {
+                migration_order_suggestion(&scope)
+            } else {
+                provider_suggestion(&scope, destructive, additive)
+            };
             results.push(make_conflict(
                 "replace_vs_extend",
                 "HIGH",
@@ -282,17 +383,20 @@ pub fn detect_pair(source: &IntentCandidate, target: &IntentCandidate) -> Vec<Co
                 target,
                 Some(scope.clone()),
                 format!(
-                    "One intent will {} `{}` while the other will {} it; both rely on {overlap_reason}.",
+                    "One intent will {} `{}` while the other will {} it; {}.",
                     destructive.operation.as_str(),
                     destructive.subject.as_deref().unwrap_or(&scope.key),
-                    additive.operation.as_str()
+                    additive.operation.as_str(),
+                    overlap.describe()
                 ),
-                provider_suggestion(&scope, destructive, additive),
+                suggestion,
                 json!({
                     "rule": "FM-C001",
                     "source_operation": source_inference.operation.as_str(),
                     "target_operation": target_inference.operation.as_str(),
-                    "overlap": overlap_reason,
+                    "overlap": overlap.reason,
+                    "source_scope": overlap.source.canonical(),
+                    "target_scope": overlap.target.canonical(),
                     "detected_before_code": true,
                 }),
             ));
@@ -303,6 +407,25 @@ pub fn detect_pair(source: &IntentCandidate, target: &IntentCandidate) -> Vec<Co
             && target_inference.operation.destructive()
             && source_inference.destination != target_inference.destination
         {
+            let explanation = if overlap.keys_differ() {
+                format!(
+                    "Both intents destructively change `{}` (overlapping `{}`), but they point toward different outcomes.",
+                    overlap.source.key, overlap.target.key
+                )
+            } else {
+                format!(
+                    "Both intents destructively change `{}`, but they point toward different outcomes.",
+                    scope.key
+                )
+            };
+            let suggestion = if MIGRATION_KINDS.contains(&scope.kind.as_str()) {
+                migration_order_suggestion(&scope)
+            } else {
+                format!(
+                    "Choose one target design for `{}` and record the decision before either agent continues.",
+                    scope.key
+                )
+            };
             results.push(make_conflict(
                 "divergent_replacement",
                 "HIGH",
@@ -310,18 +433,14 @@ pub fn detect_pair(source: &IntentCandidate, target: &IntentCandidate) -> Vec<Co
                 source,
                 target,
                 Some(scope.clone()),
-                format!(
-                    "Both intents destructively change `{}`, but they point toward different outcomes.",
-                    scope.key
-                ),
-                format!(
-                    "Choose one target design for `{}` and record the decision before either agent continues.",
-                    scope.key
-                ),
+                explanation,
+                suggestion,
                 json!({
                     "rule": "FM-C002",
                     "source_destination": source_inference.destination,
                     "target_destination": target_inference.destination,
+                    "source_scope": overlap.source.canonical(),
+                    "target_scope": overlap.target.canonical(),
                 }),
             ));
             return results;
@@ -339,14 +458,17 @@ pub fn detect_pair(source: &IntentCandidate, target: &IntentCandidate) -> Vec<Co
                 target,
                 Some(scope.clone()),
                 format!(
-                    "Both intents change `{}` ({overlap_reason}); their implementations may depend on the same contract.",
-                    scope.key
+                    "Both intents change `{}` ({}); their implementations may depend on the same contract.",
+                    scope.key,
+                    overlap.describe()
                 ),
                 "Exchange the proposed contract and dependency order before publishing ChangeSets. Claims remain advisory and both agents may continue.".to_string(),
                 json!({
                     "rule": "FM-C003",
                     "source_operation": source_inference.operation.as_str(),
                     "target_operation": target_inference.operation.as_str(),
+                    "source_scope": overlap.source.canonical(),
+                    "target_scope": overlap.target.canonical(),
                 }),
             ));
         }
@@ -363,16 +485,18 @@ pub fn detect_pair(source: &IntentCandidate, target: &IntentCandidate) -> Vec<Co
             (0.55 + summary_similarity * 0.4).min(0.96),
             source,
             target,
-            overlap.map(|value| value.0),
+            overlap.as_ref().map(|value| value.source.clone()),
             "The two intents have substantially similar goals and may be solving the same work twice."
                 .to_string(),
-            "Compare intended outcomes and either split the scope or select one agent as the implementation owner."
+            "Coordinate ownership: compare intended outcomes and either split the scope or pick one implementation owner."
                 .to_string(),
             json!({
                 "rule": "FM-C004",
                 "summary_jaccard": summary_similarity,
                 "source_operation": source_inference.operation.as_str(),
                 "target_operation": target_inference.operation.as_str(),
+                "source_scope": overlap.as_ref().map(|value| value.source.canonical()),
+                "target_scope": overlap.as_ref().map(|value| value.target.canonical()),
             }),
         ));
     }
@@ -404,7 +528,12 @@ pub fn claim_overlap_conflict(
         format!("Another active agent already claims `{}`.", scope.canonical()),
         "Coordinate ownership or split the semantic scope. This warning is advisory; Foremerge does not hard-lock work."
             .to_string(),
-        json!({ "rule": "FM-C005", "soft_claim": true }),
+        json!({
+            "rule": "FM-C005",
+            "soft_claim": true,
+            "source_scope": scope.canonical(),
+            "target_scope": scope.canonical(),
+        }),
     )
 }
 
@@ -498,10 +627,102 @@ mod tests {
             "Implement retry support for BillingClient",
             &["symbol:BillingClient"],
         );
-        assert!(
-            detect_pair(&first, &second)
-                .iter()
-                .any(|conflict| conflict.kind == "duplicate_work")
+        let conflicts = detect_pair(&first, &second);
+        let duplicate = conflicts
+            .iter()
+            .find(|conflict| conflict.kind == "duplicate_work")
+            .expect("duplicate_work finding");
+        assert!(duplicate.suggestion.to_lowercase().contains("coordinate"));
+    }
+
+    #[test]
+    fn sentence_starters_are_not_extracted_as_subjects() {
+        let migrate = candidate(
+            "a",
+            "Centralize credit ledger arithmetic into a new service and migrate callers. No schema changes; behavior preserved.",
+            &["symbol:CreditLedgerService"],
         );
+        let extend = candidate(
+            "b",
+            "Extend the credit ledger with promotional credits",
+            &["symbol:CreditLedger"],
+        );
+        let conflicts = detect_pair(&migrate, &extend);
+        assert_eq!(conflicts[0].kind, "replace_vs_extend");
+        assert!(!conflicts[0].explanation.contains("`No`"));
+        assert!(!conflicts[0].explanation.contains("No`"));
+        assert!(!conflicts[0].suggestion.contains("NoProvider"));
+        assert!(!conflicts[0].suggestion.contains("`No`"));
+        assert!(conflicts[0].explanation.contains("CreditLedgerService"));
+    }
+
+    #[test]
+    fn first_operation_keyword_wins_over_later_destructive_words() {
+        let inference = infer("Add promotional credits, then migrate callers");
+        assert_eq!(inference.operation, Operation::Add);
+        assert!(inference.operation.additive());
+    }
+
+    #[test]
+    fn camel_case_identifiers_require_two_humps_or_backticks() {
+        assert_eq!(
+            infer("Update PaymentService for the new flow")
+                .subject
+                .as_deref(),
+            Some("PaymentService")
+        );
+        assert_eq!(
+            infer("No schema changes; behavior preserved.").subject,
+            None
+        );
+        assert_eq!(
+            infer("Update the `Invoice` model rendering")
+                .subject
+                .as_deref(),
+            Some("Invoice")
+        );
+        assert_eq!(infer("Then update the invoice rendering").subject, None);
+    }
+
+    #[test]
+    fn schema_conflicts_suggest_migration_order() {
+        let rename = candidate(
+            "a",
+            "Rename users.email to users.primary_email and update the public user contract",
+            &["schema:users.email", "contract:api.User.email"],
+        );
+        let index = candidate(
+            "b",
+            "Add a unique index and normalization migration for users.email",
+            &["schema:users.email", "migration:users-email-unique"],
+        );
+        let conflicts = detect_pair(&rename, &index);
+        assert_eq!(conflicts[0].kind, "replace_vs_extend");
+        assert_eq!(conflicts[0].severity, "HIGH");
+        assert!(conflicts[0].suggestion.contains("migration order"));
+        assert!(!conflicts[0].suggestion.contains("Provider"));
+    }
+
+    #[test]
+    fn token_overlap_evidence_names_both_scopes() {
+        let migrate = candidate(
+            "a",
+            "Centralize credit ledger arithmetic into a new service and migrate callers",
+            &["symbol:CreditLedgerService"],
+        );
+        let extend = candidate(
+            "b",
+            "Extend the credit ledger with promotional credits",
+            &["symbol:CreditLedger"],
+        );
+        let conflicts = detect_pair(&migrate, &extend);
+        assert_eq!(conflicts[0].kind, "replace_vs_extend");
+        assert_eq!(
+            conflicts[0].evidence["source_scope"],
+            "symbol:creditledgerservice"
+        );
+        assert_eq!(conflicts[0].evidence["target_scope"], "symbol:creditledger");
+        assert!(conflicts[0].explanation.contains("CreditLedgerService"));
+        assert!(conflicts[0].explanation.contains("overlaps `CreditLedger`"));
     }
 }

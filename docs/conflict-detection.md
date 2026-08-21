@@ -47,7 +47,10 @@ add Y support to X               -> extend X with variant Y, confidence 0.97
 The regular expressions also recognize close variants such as “swap out X for
 Y” and “implement Y support for X”.
 
-Otherwise, a small verb lexicon assigns an operation with confidence `0.72`:
+Otherwise, a small verb lexicon assigns an operation with confidence `0.72`.
+The classifier scans the summary word by word and uses the **first** operation
+keyword by position, so “Add promotional credits, then migrate callers” reads
+as additive even though a destructive word appears later:
 
 | Operation | Representative words |
 | --- | --- |
@@ -55,13 +58,25 @@ Otherwise, a small verb lexicon assigns an operation with confidence `0.72`:
 | remove | remove, delete, drop, retire |
 | rename | rename, move |
 | migrate | migrate, convert |
-| extend | support, extend, augment |
+| extend | extend, augment, support(s/ed/ing) |
 | add | add, introduce, implement, create |
 | modify | modify, change, update, refactor, fix |
 
-If no operation is found, confidence is `0.35`. A final capitalized identifier
-is used as a possible subject. This is intentionally modest natural-language
-processing, not general semantic understanding.
+If no operation is found, confidence is `0.35`.
+
+The last confident identifier in the summary is used as a possible subject. To
+count as confident, a candidate must look like a code identifier:
+
+- CamelCase with at least two humps (`PaymentService`, `CreditLedger`); or
+- containing `_` or `::`; or
+- wrapped in backticks in the summary;
+
+and it must not be a stoplisted English sentence-starter (“No”, “The”, “This”,
+“Then”, and similar), which the pattern would otherwise match at the start of a
+sentence. When no confident subject exists, explanations and suggestions fall
+back to the overlapping scope’s key instead of a mis-extracted word. This is
+intentionally modest natural-language processing, not general semantic
+understanding.
 
 ## Scope matching
 
@@ -100,6 +115,14 @@ severity: HIGH
 This rule returns immediately for the pair because it is the strongest and most
 actionable explanation.
 
+The suggestion is scope-kind-aware. For `schema`, `migration`, and `config`
+scopes, Foremerge suggests agreeing the migration order explicitly — sequencing
+both changes as one migration plan or rebasing one intent onto the other’s
+outcome — because a provider abstraction is the wrong advice for a schema
+change. For other kinds (such as `symbol`, `contract`, `component`, and `api`)
+it keeps the provider-abstraction suggestion described below. Both are
+heuristic advice, not automatic design decisions.
+
 ### FM-C002: divergent replacement
 
 If both intents are destructive on an overlapping scope and point toward
@@ -111,7 +134,8 @@ severity: HIGH
 ```
 
 The suggestion asks agents to choose and record one target design before
-continuing.
+continuing. For `schema`, `migration`, and `config` scopes it instead suggests
+agreeing the migration order explicitly, as in FM-C001.
 
 ### FM-C003: shared semantic scope
 
@@ -135,7 +159,9 @@ finding when:
 - summary similarity is at least `0.62`; or
 - operations match, scopes overlap, and summary similarity is above `0.42`.
 
-One pair can receive both shared-scope and duplicate-work findings.
+One pair can receive both shared-scope and duplicate-work findings. The
+suggestion asks the agents to coordinate ownership: compare intended outcomes
+and either split the scope or pick one implementation owner.
 
 ### FM-C005: overlapping claim
 
@@ -202,6 +228,8 @@ Each finding contains:
     "source_operation": "extend",
     "target_operation": "replace",
     "overlap": "exact semantic scope",
+    "source_scope": "symbol:paymentservice",
+    "target_scope": "symbol:paymentservice",
     "detected_before_code": true
   },
   "status": "OPEN",
@@ -211,6 +239,15 @@ Each finding contains:
 
 Scores are rounded to three decimal places. They rank evidence inside the
 ruleset; they are not calibrated probabilities.
+
+The top-level `scope` names the source intent’s best-overlapping scope, but the
+evidence records the canonical best-overlapping scope from **each** side as
+`source_scope` and `target_scope` (or `null` when no scope overlap was
+determinable, as in a purely summary-based duplicate-work finding). When the
+two keys differ — for example a token-based overlap between
+`symbol:CreditLedgerService` and `symbol:CreditLedger` — the explanation names
+both, so each agent can match the conflict against a scope it actually
+declared.
 
 ## Persistence and gating
 
