@@ -462,7 +462,7 @@ pub fn detect_pair(source: &IntentCandidate, target: &IntentCandidate) -> Vec<Co
                     scope.key,
                     overlap.describe()
                 ),
-                "Exchange the proposed contract and dependency order before publishing ChangeSets. Claims remain advisory and both agents may continue.".to_string(),
+                "Coordinate before publishing ChangeSets: exchange the proposed contract and dependency order. Claims remain advisory and both agents may continue.".to_string(),
                 json!({
                     "rule": "FM-C003",
                     "source_operation": source_inference.operation.as_str(),
