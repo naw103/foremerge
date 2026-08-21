@@ -125,6 +125,10 @@ Its diff base is chosen in this order and recorded as
    tree.
 4. `unborn_worktree`: the repository has no commits; there is no candidate
    commit and `diff_hash` falls back to the snapshot's worktree content hash.
+5. `shallow_boundary`: the repository is a shallow clone and the candidate's
+   parent lies outside it, so no honest diff base exists; `diff_hash` falls
+   back to the snapshot's worktree content hash. Pass `--base-ref` with a
+   fetched base to record a real diff from a shallow clone.
 
 `provenance.git.diff_hash` is a SHA-256 over the actual binary patch bytes of
 `git diff <base> <candidate>` (bounded by the same 512 MiB budget as snapshot
