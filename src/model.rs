@@ -384,6 +384,10 @@ pub struct DoctorReport {
     pub mcp_transport: String,
     pub ready: bool,
     pub next_step: String,
+    /// Per-client integration diagnostics; present only when the doctor run
+    /// was asked to inspect specific clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clients: Option<Vec<crate::integrations::ClientDiagnostic>>,
 }
 
 pub fn empty_object() -> Value {

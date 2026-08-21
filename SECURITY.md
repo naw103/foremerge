@@ -57,10 +57,12 @@ issue.
   before publishing or exporting it.
 - The MCP stdio transport reserves stdout for protocol messages. Diagnostics and
   logs belong on stderr.
-- Named MCP verification checks are stored privately under Git's common
-  directory, but they are not a sandbox or multi-user authorization boundary.
-  Anyone permitted to change that local repository state can change executable
-  validation policy; review checks as trusted automation.
+- Named MCP verification checks are stored under Git's common directory with
+  private file permissions where the platform supports them. The registry
+  requires a real Git repository and is never read from a plain `.foremerge`
+  fallback directory, but it is not a sandbox or multi-user authorization
+  boundary. Anyone permitted to change that local repository state can change
+  executable validation policy; review checks as trusted automation.
 
 See [`docs/limitations.md`](docs/limitations.md) for the broader trust model and
 known product limitations.

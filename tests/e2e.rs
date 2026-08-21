@@ -1000,16 +1000,9 @@ fn setup_installs_native_claude_and_cursor_integrations_and_named_checks() {
     cli_success(&repo.root, None, ["checks", "remove", "test"]);
 }
 
-async fn mcp_tool_call(
-    service: &Foremerge,
-    cwd: &Path,
-    id: u64,
-    name: &str,
-    arguments: Value,
-) -> Value {
-    let response = mcp::handle_message_at(
+async fn mcp_tool_call(service: &Foremerge, id: u64, name: &str, arguments: Value) -> Value {
+    let response = mcp::handle_message(
         service,
-        cwd,
         json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -1034,7 +1027,6 @@ async fn mcp_exposes_the_complete_work_lifecycle_with_named_verification() {
 
     let agent = mcp_tool_call(
         &service,
-        &repo.root,
         1,
         "register_agent",
         json!({ "name": "mcp-lifecycle", "model": "e2e", "worktree": repo.root }),
@@ -1043,7 +1035,6 @@ async fn mcp_exposes_the_complete_work_lifecycle_with_named_verification() {
     let agent_id = agent["id"].as_str().unwrap();
     let published = mcp_tool_call(
         &service,
-        &repo.root,
         2,
         "publish_intent",
         json!({
@@ -1058,7 +1049,6 @@ async fn mcp_exposes_the_complete_work_lifecycle_with_named_verification() {
     let intent_id = published["intent"]["id"].as_str().unwrap();
     mcp_tool_call(
         &service,
-        &repo.root,
         3,
         "check_conflicts",
         json!({ "intent_id": intent_id }),
@@ -1066,7 +1056,6 @@ async fn mcp_exposes_the_complete_work_lifecycle_with_named_verification() {
     .await;
     mcp_tool_call(
         &service,
-        &repo.root,
         4,
         "claim_work",
         json!({
@@ -1078,24 +1067,15 @@ async fn mcp_exposes_the_complete_work_lifecycle_with_named_verification() {
     .await;
     let started = mcp_tool_call(
         &service,
-        &repo.root,
         5,
         "start_work",
         json!({ "agent_id": agent_id, "intent_id": intent_id }),
     )
     .await;
     assert_eq!(started["status"], "IN_PROGRESS");
-    mcp_tool_call(
-        &service,
-        &repo.root,
-        6,
-        "query_work",
-        json!({ "agent_id": agent_id }),
-    )
-    .await;
+    mcp_tool_call(&service, 6, "query_work", json!({ "agent_id": agent_id })).await;
     let changeset = mcp_tool_call(
         &service,
-        &repo.root,
         7,
         "publish_changeset",
         json!({
@@ -1119,7 +1099,6 @@ async fn mcp_exposes_the_complete_work_lifecycle_with_named_verification() {
     .unwrap();
     let validation = mcp_tool_call(
         &service,
-        &repo.root,
         8,
         "run_verification",
         json!({ "changeset_id": changeset_id, "check": "test" }),
@@ -1128,7 +1107,6 @@ async fn mcp_exposes_the_complete_work_lifecycle_with_named_verification() {
     assert_eq!(validation["passed"], true);
     let accepted = mcp_tool_call(
         &service,
-        &repo.root,
         9,
         "accept_changeset",
         json!({ "changeset_id": changeset_id }),
@@ -1143,7 +1121,6 @@ async fn mcp_exposes_the_complete_work_lifecycle_with_named_verification() {
     );
     let committed = mcp_tool_call(
         &service,
-        &repo.root,
         10,
         "record_commit",
         json!({ "changeset_id": changeset_id, "git_ref": "HEAD" }),
@@ -1153,7 +1130,6 @@ async fn mcp_exposes_the_complete_work_lifecycle_with_named_verification() {
 
     let peer = mcp_tool_call(
         &service,
-        &repo.root,
         11,
         "register_agent",
         json!({ "name": "mcp-peer", "model": "e2e", "worktree": repo.root }),
@@ -1162,7 +1138,6 @@ async fn mcp_exposes_the_complete_work_lifecycle_with_named_verification() {
     let peer_id = peer["id"].as_str().unwrap();
     let replacement = mcp_tool_call(
         &service,
-        &repo.root,
         12,
         "publish_intent",
         json!({
@@ -1176,7 +1151,6 @@ async fn mcp_exposes_the_complete_work_lifecycle_with_named_verification() {
     let replacement_id = replacement["intent"]["id"].as_str().unwrap();
     let extension = mcp_tool_call(
         &service,
-        &repo.root,
         13,
         "publish_intent",
         json!({
@@ -1191,7 +1165,6 @@ async fn mcp_exposes_the_complete_work_lifecycle_with_named_verification() {
     let conflict_id = extension["conflicts"][0]["id"].as_str().unwrap();
     mcp_tool_call(
         &service,
-        &repo.root,
         14,
         "coordinate_with_agent",
         json!({
@@ -1204,7 +1177,6 @@ async fn mcp_exposes_the_complete_work_lifecycle_with_named_verification() {
     .await;
     let resolved = mcp_tool_call(
         &service,
-        &repo.root,
         15,
         "resolve_conflict",
         json!({
@@ -1216,9 +1188,8 @@ async fn mcp_exposes_the_complete_work_lifecycle_with_named_verification() {
     )
     .await;
     assert_eq!(resolved["status"], "RESOLVED");
-    let rejected_discard = mcp::handle_message_at(
+    let rejected_discard = mcp::handle_message(
         &service,
-        &repo.root,
         json!({
             "jsonrpc": "2.0",
             "id": 16,
@@ -1240,11 +1211,10 @@ async fn mcp_exposes_the_complete_work_lifecycle_with_named_verification() {
         rejected_discard["result"]["structuredContent"]["error"]
             .as_str()
             .unwrap()
-            .contains("discard reason is required")
+            .contains("non-empty --reason is now required")
     );
     let discarded = mcp_tool_call(
         &service,
-        &repo.root,
         17,
         "discard_work",
         json!({
@@ -3267,5 +3237,332 @@ fn setup_refuses_a_dangling_symlinked_mcp_config() {
     assert_eq!(
         forced["error"]["code"], "INVALID_INPUT",
         "--force must not bypass the symlink refusal: {forced}"
+    );
+}
+
+#[test]
+fn named_check_registry_resolves_from_the_repository_not_the_mcp_process_cwd() {
+    let repo = create_repo();
+    let database = database_from_doctor(&repo.root);
+    let (agent_id, intent_id) = create_active_test_work(&repo.root, "registry-agent", "verify");
+    let changeset_id = publish_test_revision(&repo.root, &agent_id, &intent_id, "Clean candidate");
+    cli_success(
+        &repo.root,
+        None,
+        [
+            "checks",
+            "set",
+            "repo-check",
+            "--",
+            "git",
+            "diff",
+            "--check",
+        ],
+    );
+
+    // A decoy registry in the MCP server's spawn directory must never become a
+    // trusted command source: neither for names the repository configured nor
+    // for names only the decoy defines.
+    let unrelated = tempfile::tempdir().expect("create unrelated spawn directory");
+    fs::create_dir_all(unrelated.path().join(".foremerge")).unwrap();
+    fs::write(
+        unrelated.path().join(".foremerge/checks.json"),
+        br#"{"version":1,"checks":{"repo-check":{"command":["false"],"timeout_seconds":10},"decoy-only":{"command":["false"],"timeout_seconds":10}}}"#,
+    )
+    .unwrap();
+
+    let mut child = Command::new(foremerge_bin())
+        .current_dir(unrelated.path())
+        .arg("--database")
+        .arg(&database)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn MCP server outside the repository");
+    let mut stdin = child.stdin.take().expect("MCP stdin");
+    let requests = [
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2026-07-28",
+                "capabilities": {},
+                "clientInfo": { "name": "foremerge-e2e", "version": "1" }
+            }
+        }),
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized", "params": {} }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "run_verification",
+                "arguments": { "changeset_id": changeset_id, "check": "repo-check" }
+            }
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "run_verification",
+                "arguments": { "changeset_id": changeset_id, "check": "decoy-only" }
+            }
+        }),
+    ];
+    for request in requests {
+        writeln!(stdin, "{request}").expect("write MCP request");
+    }
+    drop(stdin);
+    let output = child.wait_with_output().expect("wait for MCP server");
+    assert!(
+        output.status.success(),
+        "MCP process failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let responses = String::from_utf8(output.stdout)
+        .expect("MCP output is UTF-8")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).expect("every MCP stdout line is JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(responses.len(), 3);
+    assert_eq!(responses[1]["id"], 2);
+    assert_eq!(
+        responses[1]["result"]["isError"], false,
+        "repository-configured check must run from an unrelated spawn cwd: {}",
+        responses[1]
+    );
+    assert_eq!(responses[1]["result"]["structuredContent"]["passed"], true);
+    assert_eq!(responses[2]["id"], 3);
+    assert_eq!(
+        responses[2]["result"]["isError"], true,
+        "a check defined only by the spawn directory's decoy registry must stay unknown: {}",
+        responses[2]
+    );
+    assert!(
+        responses[2]["result"]["structuredContent"]["error"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("NOT_FOUND")
+                && message.contains("not configured")
+                && !message.contains("checks set")),
+        "{}",
+        responses[2]
+    );
+}
+
+#[test]
+fn checks_commands_refuse_outside_a_git_repository() {
+    let temp = tempfile::tempdir().expect("create non-git directory");
+    fs::create_dir_all(temp.path().join(".foremerge")).unwrap();
+    fs::write(
+        temp.path().join(".foremerge/checks.json"),
+        br#"{"version":1,"checks":{"build":{"command":["false"],"timeout_seconds":10}}}"#,
+    )
+    .unwrap();
+    for args in [
+        vec!["checks", "list"],
+        vec!["checks", "set", "build", "--", "true"],
+        vec!["checks", "remove", "build"],
+    ] {
+        let refusal = cli_failure(temp.path(), None, args);
+        assert_eq!(refusal["error"]["code"], "INVALID_INPUT", "{refusal}");
+        assert!(
+            refusal["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("repository-scoped")),
+            "{refusal}"
+        );
+    }
+    assert!(
+        !temp.path().join(".foremerge/state.sqlite3").exists(),
+        "refused checks commands must not create a fallback store"
+    );
+}
+
+#[tokio::test]
+async fn mcp_accept_changeset_rejects_high_conflict_overrides() {
+    let service = Foremerge::new(Store::in_memory().unwrap());
+    for arguments in [
+        json!({ "changeset_id": "chg_x", "allow_high_conflicts": true, "override_reason": "self-service" }),
+        json!({ "changeset_id": "chg_x", "allow_high_conflicts": true }),
+        json!({ "changeset_id": "chg_x", "override_reason": "self-service" }),
+    ] {
+        let response = mcp::handle_message(
+            &service,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": { "name": "accept_changeset", "arguments": arguments }
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        assert!(
+            response["result"]["structuredContent"]["error"]
+                .as_str()
+                .is_some_and(
+                    |message| message.starts_with("FORBIDDEN") && message.contains("CLI-only")
+                ),
+            "{response}"
+        );
+    }
+    // Without override arguments the request reaches the ordinary gates.
+    let plain = mcp::handle_message(
+        &service,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": { "name": "accept_changeset", "arguments": { "changeset_id": "chg_x" } }
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(plain["result"]["isError"], true);
+    assert!(
+        plain["result"]["structuredContent"]["error"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("NOT_FOUND")),
+        "{plain}"
+    );
+}
+
+#[tokio::test]
+async fn mcp_resolve_conflict_is_limited_to_conflict_parties() {
+    let service = Foremerge::new(Store::in_memory().unwrap());
+    let replacer = mcp_tool_call(
+        &service,
+        1,
+        "register_agent",
+        json!({ "name": "party-replacer", "model": "e2e" }),
+    )
+    .await;
+    let replacer_id = replacer["id"].as_str().unwrap();
+    let extender = mcp_tool_call(
+        &service,
+        2,
+        "register_agent",
+        json!({ "name": "party-extender", "model": "e2e" }),
+    )
+    .await;
+    let extender_id = extender["id"].as_str().unwrap();
+    let outsider = mcp_tool_call(
+        &service,
+        3,
+        "register_agent",
+        json!({ "name": "outsider", "model": "e2e" }),
+    )
+    .await;
+    let outsider_id = outsider["id"].as_str().unwrap();
+    mcp_tool_call(
+        &service,
+        4,
+        "publish_intent",
+        json!({
+            "agent_id": replacer_id,
+            "task": "replace-payments",
+            "summary": "Replace PaymentService with StripePaymentService",
+            "scopes": [{ "kind": "symbol", "key": "PaymentService" }]
+        }),
+    )
+    .await;
+    let extension = mcp_tool_call(
+        &service,
+        5,
+        "publish_intent",
+        json!({
+            "agent_id": extender_id,
+            "task": "extend-payments",
+            "summary": "Add PayPal support to PaymentService",
+            "scopes": [{ "kind": "symbol", "key": "PaymentService" }]
+        }),
+    )
+    .await;
+    let conflict_id = extension["conflicts"][0]["id"].as_str().unwrap();
+
+    let rejected = mcp::handle_message(
+        &service,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "resolve_conflict",
+                "arguments": {
+                    "conflict_id": conflict_id,
+                    "agent_id": outsider_id,
+                    "resolution": "Outsider closes the gate",
+                    "rationale": "Trying to clear another pair's blocker"
+                }
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rejected["result"]["isError"], true, "{rejected}");
+    assert!(
+        rejected["result"]["structuredContent"]["error"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("FORBIDDEN") && message.contains("party")),
+        "{rejected}"
+    );
+
+    let resolved = mcp_tool_call(
+        &service,
+        7,
+        "resolve_conflict",
+        json!({
+            "conflict_id": conflict_id,
+            "agent_id": extender_id,
+            "resolution": "Introduce PaymentProvider before provider-specific work",
+            "rationale": "Agreed in coordination message with party-replacer"
+        }),
+    )
+    .await;
+    assert_eq!(resolved["status"], "RESOLVED");
+    let resolution_event = service
+        .events(0, 500)
+        .unwrap()
+        .into_iter()
+        .find(|event| event.event_type == "conflict.resolved")
+        .expect("resolution event recorded");
+    assert_eq!(
+        resolution_event.agent_id.as_deref(),
+        Some(extender_id),
+        "the recorded resolution must carry the resolver's agent id"
+    );
+}
+
+#[test]
+fn doctor_gates_readiness_on_unconfigured_clients_and_keeps_a_typed_envelope() {
+    let repo = create_repo();
+    let plain = cli_success(&repo.root, None, ["doctor"]);
+    assert!(
+        plain["data"].get("clients").is_none(),
+        "doctor without --client must omit the clients field: {plain}"
+    );
+    let gated = cli_success(&repo.root, None, ["doctor", "--client", "claude"]);
+    assert_eq!(
+        gated["data"]["ready"], false,
+        "an unconfigured client must gate overall readiness: {gated}"
+    );
+    assert_eq!(gated["data"]["clients"][0]["client"], "claude");
+    assert_eq!(gated["data"]["clients"][0]["skill_installed"], false);
+    assert_eq!(gated["data"]["clients"][0]["skill_current"], false);
+    assert_eq!(gated["data"]["clients"][0]["ready"], false);
+    let client_next_step = gated["data"]["clients"][0]["next_step"]
+        .as_str()
+        .expect("not-ready client publishes a next step");
+    assert_eq!(
+        gated["data"]["next_step"].as_str(),
+        Some(client_next_step),
+        "the client remediation must override the generic next step: {gated}"
     );
 }

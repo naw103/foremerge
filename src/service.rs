@@ -32,6 +32,37 @@ impl Foremerge {
         &self.store
     }
 
+    /// The Git common directory this store is bound to, if any. Repository
+    /// binding happens on the first repository-derived mutation, so a fresh or
+    /// repository-less store returns `None`.
+    pub fn repository_common_dir(&self) -> Result<Option<PathBuf>> {
+        let conn = self.store.lock()?;
+        let value: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'repository_common_dir'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value.map(PathBuf::from))
+    }
+
+    /// The agent ids whose intents are parties to a conflict, used by less
+    /// trusted surfaces to restrict resolution to the involved agents.
+    pub fn conflict_party_agents(&self, conflict_id: &str) -> Result<Vec<String>> {
+        let conn = self.store.lock()?;
+        let conflict = conflict_by_id(&conn, conflict_id)?;
+        let mut parties = Vec::new();
+        if let Some(source_intent_id) = conflict.source_intent_id.as_deref() {
+            parties.push(intent_by_id(&conn, source_intent_id)?.agent_id);
+        }
+        let target = intent_by_id(&conn, &conflict.target_intent_id)?.agent_id;
+        if !parties.contains(&target) {
+            parties.push(target);
+        }
+        Ok(parties)
+    }
+
     pub fn bind_repository_cwd(&self, cwd: &std::path::Path) -> Result<()> {
         let Ok(repo) = git::discover(cwd) else {
             return Ok(());
@@ -1177,7 +1208,7 @@ impl Foremerge {
                     .is_none_or(|reason| reason.trim().is_empty())
             {
                 bail!(
-                    "INVALID_INPUT: --override-reason is required when overriding unresolved HIGH conflicts"
+                    "INVALID_INPUT: overriding unresolved HIGH conflicts requires an explicit operator override with a recorded reason"
                 );
             }
             let mut resolved_dependencies = Vec::new();
@@ -1291,7 +1322,7 @@ impl Foremerge {
                 .is_none_or(|reason| reason.trim().is_empty())
         {
             bail!(
-                "INVALID_INPUT: --override-reason is required when overriding unresolved HIGH conflicts"
+                "INVALID_INPUT: overriding unresolved HIGH conflicts requires an explicit operator override with a recorded reason"
             );
         }
         for dependency in &fresh.dependencies {
@@ -1515,7 +1546,7 @@ impl Foremerge {
 
     pub fn discard_work(&self, agent_id: &str, intent_id: &str, reason: &str) -> Result<Intent> {
         if reason.trim().is_empty() {
-            bail!("INVALID_INPUT: discard reason is required");
+            bail!("INVALID_INPUT: a non-empty --reason is now required to discard work");
         }
         let mut conn = self.store.lock()?;
         let tx = Store::immediate_tx(&mut conn)?;

@@ -63,6 +63,11 @@ git rev-parse --path-format=absolute --git-common-dir
 
 The database is `foremerge/state.sqlite3` below that directory.
 
+With an explicit `--database`, the spawn directory of the MCP process does not
+matter for trust decisions: named verification checks are read from the
+`checks.json` registry of the repository the store is bound to, not from the
+process working directory.
+
 If the MCP client supports a working-directory setting, repository discovery is
 also sufficient:
 
@@ -118,7 +123,19 @@ The complete MVP MCP tool surface is:
 
 Tool names are stable protocol identifiers; CLI command spelling is allowed to
 differ. Direct arbitrary validation argv remains a CLI/JSON API operation;
-MCP verification is deliberately limited to configured check names.
+MCP verification is deliberately limited to configured check names, and the
+check registry is resolved from the repository the coordination store is bound
+to, never from the MCP server process's working directory.
+
+Two further operations are deliberately narrower over MCP than over the trusted
+CLI and HTTP operator surfaces:
+
+- `accept_changeset` rejects `allow_high_conflicts` and `override_reason`.
+  Explicit HIGH-conflict overrides are CLI-only operator actions; an agent that
+  believes an override is justified must ask a human operator.
+- `resolve_conflict` is accepted only from an agent whose intent is a party to
+  the conflict, after real agreement with the other party. The recorded
+  decision carries the resolver's agent id.
 
 ## Suggested agent workflow
 
@@ -139,7 +156,9 @@ At a useful implementation boundary:
    dependencies, reported tests, decisions, and provenance.
 2. Call `run_verification` with a trusted check name configured by a maintainer.
 3. Re-coordinate high conflicts with `coordinate_with_agent`, then call
-   `resolve_conflict` for the durable decision.
+   `resolve_conflict` for the durable decision. Over MCP only a party to the
+   conflict may resolve it, after real agreement; name the coordination
+   message in the rationale.
 4. Call `accept_changeset` only for the validated clean Git state.
 5. Integrate through ordinary Git, then call `record_commit` with the commit
    that actually landed.
@@ -267,6 +286,10 @@ Unpublished preflight:
 }
 ```
 
+`agent_id` must be a party to the conflict (the agent behind its source or
+target intent); other agents are rejected. Resolve only after real agreement,
+and name the agreeing coordination message in the rationale.
+
 ### `run_verification`
 
 Configure trusted argv outside the MCP request:
@@ -288,8 +311,11 @@ The agent then sends only:
 {"changeset_id":"chg_...","git_ref":"HEAD"}
 ```
 
-A HIGH-conflict override additionally requires both
-`"allow_high_conflicts":true` and a nonempty `"override_reason"`.
+MCP acceptance always applies the full HIGH-conflict gate:
+`allow_high_conflicts` and `override_reason` are rejected over MCP. Explicit
+overrides are CLI-only operator actions
+(`foremerge changeset accept ... --allow-high-conflicts --override-reason`),
+so ask a human operator instead of overriding.
 
 ### `record_commit`
 
@@ -361,7 +387,8 @@ clients, because that erases ownership and model provenance.
 
 ### Verification reports that a check is not configured
 
-- Run `foremerge checks list` from the same Git repository.
+- Run `foremerge checks list` from the same Git repository. The checks
+  commands are repository-scoped and refuse to run outside a Git repository.
 - Ask a trusted maintainer to add the intended argv with `foremerge checks set`.
 - Do not work around the named-check boundary by accepting agent-reported tests;
   they are provenance only.
@@ -380,8 +407,14 @@ database. The MVP has no daemon autostart or automatic endpoint discovery.
 
 ## Security notes
 
-- MCP can execute only named checks from the repository-private registry. The
-  check argv is trusted local code and is not sandboxed.
+- MCP can execute only named checks from the trusted registry under the bound
+  repository's Git common directory. The registry requires a real Git
+  repository, is never read from a plain `.foremerge` fallback directory or
+  the server's spawn directory, and the check argv is trusted local code that
+  is not sandboxed.
+- HIGH-conflict overrides on `accept_changeset` are CLI-only operator actions
+  and are rejected over MCP; `resolve_conflict` over MCP is limited to agents
+  that are parties to the conflict.
 - `publish_changeset` inspects the supplied local worktree through Git. Only
   connect clients you trust with local path access.
 - Test output and caller-provided provenance are stored locally in SQLite.

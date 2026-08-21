@@ -2,13 +2,12 @@ use crate::model::*;
 use crate::{Foremerge, checks};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const CURRENT_PROTOCOL: &str = "2026-07-28";
 const LEGACY_PROTOCOL: &str = "2025-11-25";
 
-pub async fn run_stdio(service: Foremerge, cwd: PathBuf) -> anyhow::Result<()> {
+pub async fn run_stdio(service: Foremerge) -> anyhow::Result<()> {
     let stdin = tokio::io::stdin();
     let mut lines = BufReader::new(stdin).lines();
     let mut stdout = tokio::io::stdout();
@@ -17,7 +16,7 @@ pub async fn run_stdio(service: Foremerge, cwd: PathBuf) -> anyhow::Result<()> {
             continue;
         }
         let response = match serde_json::from_str::<Value>(&line) {
-            Ok(message) => handle_message_at(&service, &cwd, message).await,
+            Ok(message) => handle_message(&service, message).await,
             Err(error) => Some(jsonrpc_error(
                 Value::Null,
                 -32700,
@@ -35,11 +34,6 @@ pub async fn run_stdio(service: Foremerge, cwd: PathBuf) -> anyhow::Result<()> {
 }
 
 pub async fn handle_message(service: &Foremerge, message: Value) -> Option<Value> {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    handle_message_at(service, &cwd, message).await
-}
-
-pub async fn handle_message_at(service: &Foremerge, cwd: &Path, message: Value) -> Option<Value> {
     let id = message.get("id").cloned()?;
     let method = message.get("method").and_then(Value::as_str).unwrap_or("");
     let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
@@ -62,7 +56,7 @@ pub async fn handle_message_at(service: &Foremerge, cwd: &Path, message: Value) 
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tool_catalog() })),
-        "tools/call" => call_tool(service, cwd, params).await,
+        "tools/call" => call_tool(service, params).await,
         _ => {
             return Some(jsonrpc_error(
                 id,
@@ -129,7 +123,19 @@ struct RecordCommitToolRequest {
     git_ref: String,
 }
 
-async fn call_tool(service: &Foremerge, cwd: &Path, params: Value) -> Result<Value, (i64, String)> {
+/// Resolve a named check from the registry of the repository this service's
+/// store is bound to. MCP callers never influence which registry is trusted:
+/// neither the server's spawn directory nor tool arguments select it.
+fn trusted_check(service: &Foremerge, name: &str) -> anyhow::Result<checks::NamedCheck> {
+    let common_dir = service.repository_common_dir()?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "INVALID_INPUT: verification checks are repository-scoped and this coordination store is not bound to a Git repository yet; register an agent with a worktree inside the repository first"
+        )
+    })?;
+    checks::get_at(&checks::registry_path(&common_dir), name)
+}
+
+async fn call_tool(service: &Foremerge, params: Value) -> Result<Value, (i64, String)> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
@@ -164,7 +170,7 @@ async fn call_tool(service: &Foremerge, cwd: &Path, params: Value) -> Result<Val
             .and_then(|request| service.start_work(&request.agent_id, &request.intent_id))
             .and_then(to_value),
         "run_verification" => match parse::<RunVerificationToolRequest>(arguments) {
-            Ok(request) => match checks::get(cwd, &request.check) {
+            Ok(request) => match trusted_check(service, &request.check) {
                 Ok(check) => service
                     .validate_changeset(
                         &request.changeset_id,
@@ -182,6 +188,12 @@ async fn call_tool(service: &Foremerge, cwd: &Path, params: Value) -> Result<Val
         },
         "resolve_conflict" => parse::<ResolveConflictToolRequest>(arguments)
             .and_then(|request| {
+                let parties = service.conflict_party_agents(&request.conflict_id)?;
+                if !parties.iter().any(|party| party == &request.agent_id) {
+                    anyhow::bail!(
+                        "FORBIDDEN: over MCP a conflict may be resolved only by an agent whose intent is a party to it, after real agreement; coordinate with the parties via coordinate_with_agent or ask a human operator to resolve it from the CLI"
+                    );
+                }
                 service.resolve_conflict(
                     &request.conflict_id,
                     ResolveConflictRequest {
@@ -194,12 +206,17 @@ async fn call_tool(service: &Foremerge, cwd: &Path, params: Value) -> Result<Val
             .and_then(to_value),
         "accept_changeset" => parse::<AcceptChangeSetToolRequest>(arguments)
             .and_then(|request| {
+                if request.allow_high_conflicts || request.override_reason.is_some() {
+                    anyhow::bail!(
+                        "FORBIDDEN: explicit HIGH-conflict overrides are CLI-only operator actions and are not accepted over MCP; ask a human operator to review the conflict and run the override from the CLI"
+                    );
+                }
                 service.accept_changeset(
                     &request.changeset_id,
                     AcceptRequest {
                         git_ref: request.git_ref,
-                        allow_high_conflicts: request.allow_high_conflicts,
-                        override_reason: request.override_reason,
+                        allow_high_conflicts: false,
+                        override_reason: None,
                     },
                 )
             })
@@ -311,12 +328,10 @@ pub fn tool_catalog() -> Vec<Value> {
         tool(
             "accept_changeset",
             "Accept a validated ChangeSet",
-            "Apply Foremerge's final conflict, dependency, fingerprint, validation, and Git gates, then pin the accepted commit.",
+            "Apply Foremerge's final conflict, dependency, fingerprint, validation, and Git gates, then pin the accepted commit. Explicit HIGH-conflict overrides (allow_high_conflicts, override_reason) are CLI-only operator actions and are rejected over MCP; ask a human operator instead.",
             json!({
                 "changeset_id": { "type": "string", "minLength": 1 },
-                "git_ref": { "type": "string", "minLength": 1 },
-                "allow_high_conflicts": { "type": "boolean", "default": false },
-                "override_reason": { "type": "string", "minLength": 1 }
+                "git_ref": { "type": "string", "minLength": 1 }
             }),
             &["changeset_id"],
             false,
@@ -497,7 +512,7 @@ pub fn tool_catalog() -> Vec<Value> {
         tool(
             "resolve_conflict",
             "Resolve a persisted conflict",
-            "Record an audited resolution decision for a durable cfl_* conflict so blocked work can proceed.",
+            "Record an audited resolution decision for a durable cfl_* conflict so blocked work can proceed. Over MCP only an agent whose intent is a party to the conflict may resolve it, after real agreement with the other party (name the coordination message in the rationale); the decision is recorded under the resolver's agent id.",
             json!({
                 "conflict_id": { "type": "string", "pattern": "^cfl_" },
                 "agent_id": { "type": "string", "minLength": 1 },
@@ -511,7 +526,7 @@ pub fn tool_catalog() -> Vec<Value> {
         tool(
             "run_verification",
             "Run a trusted verification check",
-            "Run one named check from the repository-private Foremerge registry. Raw commands are intentionally not accepted over MCP.",
+            "Run one named check from the trusted Foremerge registry of the repository this store is bound to. Raw commands are intentionally not accepted over MCP, and the registry cannot be selected by the caller or the server's working directory.",
             json!({
                 "changeset_id": { "type": "string", "minLength": 1 },
                 "check": {

@@ -57,7 +57,7 @@ Commit a clean candidate with ordinary Git, then:
 
 1. Call `publish_changeset` with implementation, dependency, decision, and provenance evidence.
 2. Call `run_verification` with a configured check name such as `test`.
-3. Resolve any persisted HIGH conflict, or use an explicit audited override only when authorized.
+3. Resolve any persisted HIGH conflict you are a party to, only after real agreement with the other party; name the agreeing coordination message in the rationale. Explicit HIGH-conflict overrides are CLI-only operator actions and are rejected over MCP: ask a human operator instead of overriding yourself.
 4. Call `accept_changeset`; it must match the clean Git commit and passing fingerprint.
 5. Land the accepted commit through ordinary Git or a pull request.
 6. Call `record_commit` with the actual target-branch integration ref.
@@ -69,7 +69,7 @@ foremerge checks set test -- cargo test --all-targets
 foremerge checks set lint -- cargo clippy --all-targets -- -D warnings
 ```
 
-Do not add or replace named checks unless the user has authorized that repository configuration. Agent-reported tests on `publish_changeset` are provenance only and never satisfy acceptance.
+Do not add or replace named checks unless the user has authorized that repository configuration. If a check you need is not configured, ask a human operator to configure it rather than provisioning it yourself. Checks are repository-scoped: the registry lives under Git's common directory and the commands refuse to run outside a Git repository. Agent-reported tests on `publish_changeset` are provenance only and never satisfy acceptance.
 
 Acceptance creates `refs/foremerge/accepted/<changeset-id>`; it does not merge code. Do not call `record_commit` on the feature-branch HEAD merely because ancestry is reflexive.
 

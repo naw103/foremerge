@@ -515,19 +515,19 @@ async fn execute(cli: Cli) -> Result<()> {
             let store = Store::open(&database);
             let repo = git::discover(&cwd).ok();
             let token_path = git::runtime_dir(&cwd).join("token");
-            let client_diagnostics = client
-                .map(|value| {
-                    integrations::diagnose(
-                        repo.as_ref()
-                            .map_or(cwd.as_path(), |value| value.root.as_path()),
-                        &value.clients(),
-                    )
-                })
-                .unwrap_or_default();
-            let clients_ready = client_diagnostics.iter().all(|value| value.ready);
+            let client_diagnostics = client.map(|value| {
+                integrations::diagnose(
+                    repo.as_ref()
+                        .map_or(cwd.as_path(), |value| value.root.as_path()),
+                    &value.clients(),
+                )
+            });
+            let clients_ready = client_diagnostics
+                .as_ref()
+                .is_none_or(|values| values.iter().all(|value| value.ready));
             let next_client_step = client_diagnostics
-                .iter()
-                .find_map(|value| value.next_step.clone());
+                .as_ref()
+                .and_then(|values| values.iter().find_map(|value| value.next_step.clone()));
             let report = DoctorReport {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 database: database.to_string_lossy().into_owned(),
@@ -553,10 +553,9 @@ async fn execute(cli: Cli) -> Result<()> {
                     "Run inside a Git worktree (recommended), or continue with --database PATH."
                         .to_string()
                 },
+                clients: client_diagnostics,
             };
-            let mut value = serde_json::to_value(report)?;
-            value["clients"] = serde_json::to_value(client_diagnostics)?;
-            emit(cli.json, value)?;
+            emit(cli.json, serde_json::to_value(report)?)?;
         }
         Commands::Daemon { bind, no_auth } => {
             if !bind.ip().is_loopback() {
@@ -577,29 +576,35 @@ async fn execute(cli: Cli) -> Result<()> {
         }
         Commands::Mcp => {
             let service = open_service(&database, &cwd)?;
-            mcp::run_stdio(service, cwd.clone()).await?;
+            mcp::run_stdio(service).await?;
         }
         Commands::Checks(command) => {
-            let _service = open_service(&database, &cwd)?;
+            // The trusted check registry is repository-scoped: resolve it
+            // through Git discovery first so a non-Git directory fails before
+            // any store file is created.
+            let registry_path = checks::path(&cwd)?;
+            // Opening the service surfaces store problems and binds the shared
+            // store to this repository before validation policy changes.
+            open_service(&database, &cwd)?;
             let registry = match command {
                 CheckCommand::Set {
                     name,
                     timeout_seconds,
                     command,
-                } => checks::set(
-                    &cwd,
+                } => checks::set_at(
+                    &registry_path,
                     &name,
                     checks::NamedCheck {
                         command,
                         timeout_seconds,
                     },
                 )?,
-                CheckCommand::List => checks::load(&cwd)?,
-                CheckCommand::Remove { name } => checks::remove(&cwd, &name)?,
+                CheckCommand::List => checks::load_at(&registry_path)?,
+                CheckCommand::Remove { name } => checks::remove_at(&registry_path, &name)?,
             };
             emit(
                 cli.json,
-                json!({ "path": checks::path(&cwd), "registry": registry }),
+                json!({ "path": registry_path, "registry": registry }),
             )?;
         }
         Commands::Request(request) => run_raw_request(&cwd, request, cli.json).await?,

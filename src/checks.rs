@@ -35,41 +35,68 @@ impl Default for CheckRegistry {
     }
 }
 
-pub fn path(cwd: &Path) -> PathBuf {
-    git::runtime_dir(cwd).join("checks.json")
+/// The trusted registry path inside a resolved Git common directory.
+pub fn registry_path(common_dir: &Path) -> PathBuf {
+    common_dir.join("foremerge").join("checks.json")
+}
+
+/// Resolve the registry strictly through Git discovery. The registry is a
+/// trusted command source, so it must live under Git's common directory; the
+/// distributable `.foremerge` fallback directory is deliberately refused.
+pub fn path(cwd: &Path) -> Result<PathBuf> {
+    let repo = git::discover(cwd).map_err(|_| {
+        anyhow::anyhow!(
+            "INVALID_INPUT: verification checks are repository-scoped and live under Git's common directory; run this inside the Git repository whose checks you want to use"
+        )
+    })?;
+    Ok(registry_path(&repo.common_dir))
 }
 
 pub fn load(cwd: &Path) -> Result<CheckRegistry> {
-    load_path(&path(cwd))
+    load_path(&path(cwd)?)
+}
+
+pub fn load_at(config_path: &Path) -> Result<CheckRegistry> {
+    load_path(config_path)
 }
 
 pub fn get(cwd: &Path, name: &str) -> Result<NamedCheck> {
+    get_at(&path(cwd)?, name)
+}
+
+pub fn get_at(config_path: &Path, name: &str) -> Result<NamedCheck> {
     validate_name(name)?;
-    load(cwd)?
+    load_path(config_path)?
         .checks
         .get(name)
         .cloned()
-        .ok_or_else(|| anyhow::anyhow!("NOT_FOUND: verification check '{name}' is not configured; run `foremerge checks set {name} -- COMMAND ...`"))
+        .ok_or_else(|| anyhow::anyhow!("NOT_FOUND: verification check '{name}' is not configured for this repository; a repository operator can configure trusted checks with the 'foremerge checks' CLI"))
 }
 
 pub fn set(cwd: &Path, name: &str, check: NamedCheck) -> Result<CheckRegistry> {
+    set_at(&path(cwd)?, name, check)
+}
+
+pub fn set_at(config_path: &Path, name: &str, check: NamedCheck) -> Result<CheckRegistry> {
     validate_name(name)?;
     validate_check(&check)?;
-    let config_path = path(cwd);
-    let mut registry = load_path(&config_path)?;
+    let mut registry = load_path(config_path)?;
     registry.checks.insert(name.to_string(), check);
-    save_path(&config_path, &registry)?;
+    save_path(config_path, &registry)?;
     Ok(registry)
 }
 
 pub fn remove(cwd: &Path, name: &str) -> Result<CheckRegistry> {
+    remove_at(&path(cwd)?, name)
+}
+
+pub fn remove_at(config_path: &Path, name: &str) -> Result<CheckRegistry> {
     validate_name(name)?;
-    let config_path = path(cwd);
-    let mut registry = load_path(&config_path)?;
+    let mut registry = load_path(config_path)?;
     if registry.checks.remove(name).is_none() {
         bail!("NOT_FOUND: verification check '{name}' is not configured");
     }
-    save_path(&config_path, &registry)?;
+    save_path(config_path, &registry)?;
     Ok(registry)
 }
 
@@ -196,9 +223,20 @@ fn validate_check(check: &NamedCheck) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn init_repo(cwd: &Path) {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
     #[test]
     fn named_checks_round_trip_and_reject_invalid_input() {
         let temp = tempfile::tempdir().unwrap();
+        init_repo(temp.path());
         let expected = NamedCheck {
             command: vec!["cargo".into(), "test".into()],
             timeout_seconds: 300,
@@ -219,6 +257,42 @@ mod tests {
             .is_err()
         );
         assert!(remove(temp.path(), "test").unwrap().checks.is_empty());
-        assert!(get(temp.path(), "test").is_err());
+        let missing = get(temp.path(), "test").unwrap_err();
+        let message = format!("{missing:#}");
+        assert!(message.starts_with("NOT_FOUND:"), "{message}");
+        assert!(
+            !message.contains("checks set test"),
+            "the error must not coach callers to self-provision trusted checks: {message}"
+        );
+    }
+
+    #[test]
+    fn checks_require_a_git_repository_and_never_use_the_fallback_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(".foremerge")).unwrap();
+        std::fs::write(
+            temp.path().join(".foremerge/checks.json"),
+            br#"{"version":1,"checks":{"build":{"command":["true"],"timeout_seconds":10}}}"#,
+        )
+        .unwrap();
+        for result in [
+            path(temp.path()).map(|_| ()),
+            load(temp.path()).map(|_| ()),
+            get(temp.path(), "build").map(|_| ()),
+            set(
+                temp.path(),
+                "build",
+                NamedCheck {
+                    command: vec!["true".into()],
+                    timeout_seconds: 10,
+                },
+            )
+            .map(|_| ()),
+            remove(temp.path(), "build").map(|_| ()),
+        ] {
+            let error = format!("{:#}", result.unwrap_err());
+            assert!(error.starts_with("INVALID_INPUT:"), "{error}");
+            assert!(error.contains("repository-scoped"), "{error}");
+        }
     }
 }

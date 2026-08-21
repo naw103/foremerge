@@ -2,10 +2,85 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use uuid::Uuid;
+
+/// Client probes and Codex registration commands run external CLIs that may
+/// hang (first-run prompts, wrapper scripts waiting on stdin). Mirror the
+/// validation runner's bounded posture: closed stdin, capped capture, and a
+/// hard timeout with a kill.
+const CLIENT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_CLIENT_OUTPUT_BYTES: usize = 64 * 1024;
+
+struct BoundedOutput {
+    success: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn capture_bounded(stream: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut stream = stream;
+        let mut captured = Vec::new();
+        let mut buffer = [0_u8; 8 * 1024];
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    let remaining = MAX_CLIENT_OUTPUT_BYTES.saturating_sub(captured.len());
+                    captured.extend_from_slice(&buffer[..read.min(remaining)]);
+                }
+            }
+        }
+        captured
+    })
+}
+
+fn run_bounded(mut command: Command) -> Result<BoundedOutput> {
+    let program = command.get_program().to_string_lossy().into_owned();
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("run {program}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .map(capture_bounded)
+        .ok_or_else(|| anyhow::anyhow!("capture {program} stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .map(capture_bounded)
+        .ok_or_else(|| anyhow::anyhow!("capture {program} stderr"))?;
+    let deadline = Instant::now() + CLIENT_COMMAND_TIMEOUT;
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("wait for {program}"))?
+        {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!(
+                "RESOURCE_LIMIT: {program} did not finish within {} seconds",
+                CLIENT_COMMAND_TIMEOUT.as_secs()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    Ok(BoundedOutput {
+        success: status.success(),
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
+}
 
 pub const SKILL_CONTENT: &str = include_str!("../.codex/skills/foremerge/SKILL.md");
 
@@ -332,26 +407,24 @@ fn configure_codex_mcp(root: &Path, foremerge_exe: &Path, force: bool) -> Result
                 root.display()
             );
         }
-        let output = Command::new("codex")
-            .args(["mcp", "remove", "foremerge"])
-            .output()
-            .context("run `codex mcp remove foremerge`")?;
-        if !output.status.success() {
+        let mut remove = Command::new("codex");
+        remove.args(["mcp", "remove", "foremerge"]);
+        let output = run_bounded(remove).context("run `codex mcp remove foremerge`")?;
+        if !output.success {
             bail!(
                 "CHECK_FAILED: Codex could not replace the existing Foremerge MCP entry: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
     }
-    let output = Command::new("codex")
-        .args(["mcp", "add", "foremerge", "--"])
+    let mut add = Command::new("codex");
+    add.args(["mcp", "add", "foremerge", "--"])
         .arg(foremerge_exe)
         .arg("--cwd")
         .arg(root)
-        .arg("mcp")
-        .output()
-        .context("run `codex mcp add foremerge`")?;
-    if !output.status.success() {
+        .arg("mcp");
+    let output = run_bounded(add).context("run `codex mcp add foremerge`")?;
+    if !output.success {
         bail!(
             "CHECK_FAILED: Codex could not register the Foremerge MCP server: {}",
             String::from_utf8_lossy(&output.stderr).trim()
@@ -408,11 +481,10 @@ impl CodexEntry {
 }
 
 fn codex_mcp_entry() -> Option<CodexEntry> {
-    let json_form = Command::new("codex")
-        .args(["mcp", "get", "foremerge", "--json"])
-        .output();
-    if let Ok(output) = json_form {
-        if output.status.success() {
+    let mut json_probe = Command::new("codex");
+    json_probe.args(["mcp", "get", "foremerge", "--json"]);
+    if let Ok(output) = run_bounded(json_probe) {
+        if output.success {
             let parsed = serde_json::from_slice::<Value>(&output.stdout)
                 .ok()
                 .as_ref()
@@ -422,11 +494,10 @@ fn codex_mcp_entry() -> Option<CodexEntry> {
             }
         }
     }
-    let output = Command::new("codex")
-        .args(["mcp", "get", "foremerge"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
+    let mut text_probe = Command::new("codex");
+    text_probe.args(["mcp", "get", "foremerge"]);
+    let output = run_bounded(text_probe).ok()?;
+    if !output.success {
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout);
@@ -480,10 +551,9 @@ fn codex_mcp_configured(root: &Path) -> bool {
 }
 
 fn command_available(command: &str) -> bool {
-    Command::new(command)
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
+    let mut probe = Command::new(command);
+    probe.arg("--version");
+    run_bounded(probe).is_ok_and(|output| output.success)
 }
 
 fn mcp_json_configured(path: &Path, root: &Path) -> bool {
