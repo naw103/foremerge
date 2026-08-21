@@ -1,5 +1,6 @@
 /target/
 /.foremerge/
+/launch/
 *.db
 *.db-shm
 *.db-wal

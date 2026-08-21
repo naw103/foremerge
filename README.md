@@ -2,6 +2,10 @@
 
 **Catch intent conflicts before code conflicts.**
 
+[![CI](https://github.com/naw103/foremerge/actions/workflows/ci.yml/badge.svg)](https://github.com/naw103/foremerge/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/foremerge.svg)](https://crates.io/crates/foremerge)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 Foremerge is the open-source coordination protocol for coding agents, built
 above Git. Agents keep isolated worktrees while sharing intent, semantic
 claims, dependencies, provisional ChangeSets, decisions, validation, and
@@ -33,7 +37,7 @@ architecture decision or a hard lock.
 Git remains the durable repository. Foremerge supplies the missing shared
 awareness above it.
 
-![Terminal rendering of an actual Foremerge release demo detecting the PaymentService conflict before either worktree changed](docs/assets/foremerge-terminal-demo.png)
+![Terminal rendering of an actual Foremerge release demo detecting the PaymentService conflict before either worktree changed](https://raw.githubusercontent.com/naw103/foremerge/main/docs/assets/foremerge-terminal-demo.png)
 
 _Rendered from the actual conflict fields captured by the `0.1.0`
 release-binary run in
@@ -42,10 +46,17 @@ command uses the shown `jq` filter; output is abridged for readability._
 
 ## Quickstart: first conflict in under five minutes
 
-You need Rust 1.85 or newer, a recent Git, and `jq`. From this source checkout:
+You need Rust 1.85 or newer, a recent Git, and `jq`. Install straight from
+GitHub:
 
 ```sh
-cargo install --locked --path .
+cargo install --locked --git https://github.com/naw103/foremerge foremerge
+```
+
+or from a source checkout with `cargo install --locked --path .`. Then, inside
+the repository you want to coordinate:
+
+```sh
 foremerge init
 foremerge doctor
 ```
