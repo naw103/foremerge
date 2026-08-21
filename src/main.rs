@@ -467,17 +467,49 @@ async fn execute(cli: Cli) -> Result<()> {
             let doctor_client = client.name();
             let clients = client.clients();
             let reports =
-                integrations::install(&repo.root, &clients, &executable, force, !skip_mcp)?;
-            emit(
-                cli.json,
-                json!({
-                    "repository": repo.root,
-                    "database": service.store().path(),
-                    "token_file": token_path,
-                    "clients": reports,
-                    "next_step": format!("foremerge --json doctor --client {doctor_client}")
-                }),
-            )?;
+                integrations::install(&repo.root, &clients, &executable, force, !skip_mcp);
+            let failures: Vec<String> = reports
+                .iter()
+                .filter_map(|report| {
+                    report
+                        .error
+                        .as_ref()
+                        .map(|error| format!("{}: {error}", report.client))
+                })
+                .collect();
+            let data = json!({
+                "repository": repo.root,
+                "database": service.store().path(),
+                "token_file": token_path,
+                "clients": reports,
+                "next_step": format!("foremerge --json doctor --client {doctor_client}")
+            });
+            if failures.is_empty() {
+                emit(cli.json, data)?;
+            } else {
+                let code = reports
+                    .iter()
+                    .find_map(|report| report.error.as_deref())
+                    .map(error_code_from_message)
+                    .unwrap_or_else(|| "ERROR".to_string());
+                let message = format!(
+                    "setup did not complete for {} of {} client(s): {}",
+                    failures.len(),
+                    reports.len(),
+                    failures.join("; ")
+                );
+                if cli.json {
+                    write_stdout_line(&serde_json::to_string(&json!({
+                        "ok": false,
+                        "error": { "code": code, "message": message },
+                        "data": data
+                    }))?)?;
+                } else {
+                    write_stdout_line(&serde_json::to_string_pretty(&data)?)?;
+                    eprintln!("error: {message}");
+                }
+                std::process::exit(1);
+            }
         }
         Commands::Doctor { client } => {
             let store = Store::open(&database);
@@ -963,7 +995,10 @@ async fn run_raw_request(cwd: &Path, request: RequestArgs, json_mode: bool) -> R
 }
 
 fn error_code(error: &anyhow::Error) -> String {
-    let message = format!("{error:#}");
+    error_code_from_message(&format!("{error:#}"))
+}
+
+fn error_code_from_message(message: &str) -> String {
     message
         .split_once(':')
         .map(|(value, _)| value)

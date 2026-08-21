@@ -2865,3 +2865,407 @@ fn validation_output_is_bounded_to_the_latest_sixteen_kibibytes_per_stream() {
     assert!(stdout.ends_with('0'));
     assert!(stderr.ends_with('1'));
 }
+
+// ---------------------------------------------------------------------------
+// Setup / client-integration coverage (stubbed `codex` CLI on PATH).
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+struct CodexStub {
+    bin_dir: PathBuf,
+    log: PathBuf,
+    state: PathBuf,
+}
+
+#[cfg(unix)]
+impl CodexStub {
+    fn create(dir: &Path) -> CodexStub {
+        use std::os::unix::fs::PermissionsExt;
+        let bin_dir = dir.join("codex-stub-bin");
+        fs::create_dir_all(&bin_dir).expect("create stub bin directory");
+        let log = dir.join("codex-stub.log");
+        let state = dir.join("codex-stub-state.json");
+        let script = r#"#!/bin/sh
+printf '%s\n' "$*" >> "$CODEX_STUB_LOG"
+case "$1" in
+  --version)
+    echo "codex-stub 0.0.0"
+    exit 0
+    ;;
+  mcp)
+    case "$2" in
+      get)
+        if [ -f "$CODEX_STUB_STATE" ]; then
+          cat "$CODEX_STUB_STATE"
+          exit 0
+        fi
+        exit 1
+        ;;
+      add)
+        shift 3
+        if [ "$1" = "--" ]; then shift; fi
+        exe="$1"
+        cwd=""
+        if [ "$2" = "--cwd" ]; then cwd="$3"; fi
+        printf '{"command":"%s","args":["--cwd","%s","mcp"]}\n' "$exe" "$cwd" > "$CODEX_STUB_STATE"
+        exit 0
+        ;;
+      remove)
+        rm -f "$CODEX_STUB_STATE"
+        exit 0
+        ;;
+    esac
+    exit 1
+    ;;
+esac
+exit 1
+"#;
+        let script_path = bin_dir.join("codex");
+        fs::write(&script_path, script).expect("write codex stub");
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))
+            .expect("mark codex stub executable");
+        CodexStub {
+            bin_dir,
+            log,
+            state,
+        }
+    }
+
+    fn command<I, S>(&self, cwd: &Path, args: I) -> Command
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut command = Command::new(foremerge_bin());
+        command.arg("--json").arg("--cwd").arg(cwd).args(args);
+        let mut paths = vec![self.bin_dir.clone()];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        command.env("PATH", std::env::join_paths(paths).expect("join PATH"));
+        command.env("CODEX_STUB_LOG", &self.log);
+        command.env("CODEX_STUB_STATE", &self.state);
+        command
+    }
+
+    fn run_success<I, S>(&self, cwd: &Path, args: I) -> Value
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let output = self.command(cwd, args).output().expect("run foremerge");
+        assert!(
+            output.status.success(),
+            "Foremerge command failed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value = parse_cli_json(&output);
+        assert_eq!(value["ok"], true, "unexpected success envelope: {value}");
+        value
+    }
+
+    fn run_failure<I, S>(&self, cwd: &Path, args: I) -> Value
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let output = self.command(cwd, args).output().expect("run foremerge");
+        assert!(
+            !output.status.success(),
+            "Foremerge command unexpectedly succeeded: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let value = parse_cli_json(&output);
+        assert_eq!(value["ok"], false, "unexpected error envelope: {value}");
+        value
+    }
+
+    fn log_contents(&self) -> String {
+        fs::read_to_string(&self.log).unwrap_or_default()
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_codex_registers_the_global_mcp_entry_and_is_idempotent() {
+    let repo = create_repo();
+    let stub = CodexStub::create(repo.temp.path());
+    let setup = stub.run_success(&repo.root, ["setup", "codex"]);
+    let client = &setup["data"]["clients"][0];
+    assert_eq!(client["client"], "codex");
+    assert_eq!(client["skill"]["status"], "written");
+    assert_eq!(client["mcp_configured"], true);
+    assert_eq!(
+        client["mcp"]["path"],
+        "Codex user-level configuration (codex mcp)"
+    );
+    assert_eq!(client["mcp"]["status"], "written");
+    assert_eq!(client["error"], Value::Null);
+    assert_eq!(client["warning"], Value::Null);
+
+    let canonical_root = repo.root.canonicalize().expect("canonicalize repo root");
+    let log = stub.log_contents();
+    let add_line = log
+        .lines()
+        .find(|line| line.starts_with("mcp add foremerge"))
+        .expect("codex mcp add was invoked");
+    assert!(
+        add_line.ends_with(&format!("--cwd {} mcp", canonical_root.display())),
+        "unexpected add argv: {add_line}"
+    );
+
+    let again = stub.run_success(&repo.root, ["setup", "codex"]);
+    assert_eq!(again["data"]["clients"][0]["mcp"]["status"], "unchanged");
+    assert_eq!(again["data"]["clients"][0]["mcp_configured"], true);
+    let adds = stub
+        .log_contents()
+        .lines()
+        .filter(|line| line.starts_with("mcp add"))
+        .count();
+    assert_eq!(adds, 1, "second setup must not re-register the entry");
+
+    let doctor = stub.run_success(&repo.root, ["doctor", "--client", "codex"]);
+    assert_eq!(doctor["data"]["clients"][0]["mcp_configured"], true);
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_codex_refuses_to_hijack_another_repositorys_entry_without_force() {
+    let repo_a = create_repo();
+    let repo_b = create_repo();
+    let stub = CodexStub::create(repo_a.temp.path());
+    stub.run_success(&repo_a.root, ["setup", "codex"]);
+    let canonical_a = repo_a.root.canonicalize().expect("canonicalize repo A");
+    let canonical_b = repo_b.root.canonicalize().expect("canonicalize repo B");
+
+    let refusal = stub.run_failure(&repo_b.root, ["setup", "codex"]);
+    assert_eq!(refusal["error"]["code"], "ALREADY_EXISTS");
+    let message = refusal["error"]["message"].as_str().expect("error message");
+    assert!(message.contains("user-global"), "{message}");
+    assert!(
+        message.contains(&canonical_a.display().to_string()),
+        "refusal must name the other repository: {message}"
+    );
+    let client = &refusal["data"]["clients"][0];
+    assert_eq!(client["client"], "codex");
+    assert!(
+        client["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("user-global")),
+        "per-client report must carry the error: {client}"
+    );
+
+    let forced = stub.run_success(&repo_b.root, ["setup", "codex", "--force"]);
+    let client = &forced["data"]["clients"][0];
+    assert_eq!(client["mcp"]["status"], "written");
+    let warning = client["warning"].as_str().expect("repoint warning");
+    assert!(
+        warning.contains(&canonical_b.display().to_string()),
+        "warning must name the repository Codex now coordinates: {warning}"
+    );
+    assert!(
+        warning.contains(&canonical_a.display().to_string()) && warning.contains("switch back"),
+        "warning must explain how to switch back: {warning}"
+    );
+    let log = stub.log_contents();
+    assert!(
+        log.lines().any(|line| line == "mcp remove foremerge"),
+        "force repoint must remove the previous entry: {log}"
+    );
+    let last_add = log
+        .lines()
+        .rfind(|line| line.starts_with("mcp add"))
+        .expect("codex mcp add was invoked");
+    assert!(
+        last_add.contains(&canonical_b.display().to_string()),
+        "repointed entry must target repo B: {last_add}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_all_attempts_every_client_and_reports_the_failing_one() {
+    let repo = create_repo();
+    let stub = CodexStub::create(repo.temp.path());
+    fs::write(
+        repo.root.join(".mcp.json"),
+        serde_json::to_vec_pretty(&json!({
+            "mcpServers": {
+                "foremerge": { "command": "some-other-tool", "args": ["serve"] }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let value = stub.run_failure(&repo.root, ["setup", "all"]);
+    assert_eq!(value["error"]["code"], "ALREADY_EXISTS");
+    let clients = value["data"]["clients"].as_array().expect("clients array");
+    assert_eq!(clients.len(), 3, "every requested client must be reported");
+    let by_name = |name: &str| {
+        clients
+            .iter()
+            .find(|client| client["client"] == name)
+            .unwrap_or_else(|| panic!("missing report for {name}"))
+    };
+    let claude = by_name("claude");
+    assert!(
+        claude["error"]
+            .as_str()
+            .is_some_and(|error| error.starts_with("ALREADY_EXISTS")),
+        "claude must report its merge refusal: {claude}"
+    );
+    assert_eq!(claude["skill"]["status"], "written");
+    let codex = by_name("codex");
+    assert_eq!(codex["error"], Value::Null);
+    assert_eq!(codex["mcp_configured"], true);
+    let cursor = by_name("cursor");
+    assert_eq!(cursor["error"], Value::Null);
+    assert_eq!(cursor["mcp"]["status"], "written");
+    assert!(
+        repo.root.join(".cursor/mcp.json").is_file(),
+        "cursor must still be configured after claude failed"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_skip_mcp_installs_skills_without_touching_mcp_configuration() {
+    let repo = create_repo();
+    let stub = CodexStub::create(repo.temp.path());
+    let setup = stub.run_success(&repo.root, ["setup", "all", "--skip-mcp"]);
+    let clients = setup["data"]["clients"].as_array().expect("clients array");
+    assert_eq!(clients.len(), 3);
+    for client in clients {
+        assert_eq!(client["skill"]["status"], "written", "{client}");
+        assert_eq!(client["mcp"], Value::Null, "{client}");
+        assert_eq!(client["mcp_configured"], false, "{client}");
+        assert!(client["next_step"].as_str().is_some(), "{client}");
+        assert_eq!(client["error"], Value::Null, "{client}");
+    }
+    for skill_dir in [".codex", ".claude", ".cursor"] {
+        assert!(
+            repo.root
+                .join(skill_dir)
+                .join("skills/foremerge/SKILL.md")
+                .is_file()
+        );
+    }
+    assert!(!repo.root.join(".mcp.json").exists());
+    assert!(!repo.root.join(".cursor/mcp.json").exists());
+    let log = stub.log_contents();
+    assert!(
+        !log.contains("mcp add") && !log.contains("mcp remove"),
+        "--skip-mcp must not mutate Codex configuration: {log}"
+    );
+}
+
+#[test]
+fn setup_claude_merge_preserves_unrelated_entries_and_key_order() {
+    let repo = create_repo();
+    fs::write(
+        repo.root.join(".mcp.json"),
+        concat!(
+            "{\n",
+            "  \"zeta\": {\"first\": true},\n",
+            "  \"mcpServers\": {\n",
+            "    \"other\": {\"command\": \"other-server\", \"args\": [\"--flag\"]}\n",
+            "  },\n",
+            "  \"alpha\": 1\n",
+            "}\n"
+        ),
+    )
+    .unwrap();
+    cli_success(&repo.root, None, ["setup", "claude"]);
+    let raw = fs::read_to_string(repo.root.join(".mcp.json")).unwrap();
+    let value: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(value["mcpServers"]["other"]["command"], "other-server");
+    assert_eq!(value["mcpServers"]["other"]["args"], json!(["--flag"]));
+    assert!(value["mcpServers"]["foremerge"].is_object());
+    assert_eq!(value["alpha"], 1);
+    assert_eq!(value["zeta"]["first"], true);
+    let zeta = raw.find("\"zeta\"").expect("zeta key");
+    let servers = raw.find("\"mcpServers\"").expect("mcpServers key");
+    let alpha = raw.find("\"alpha\"").expect("alpha key");
+    assert!(
+        zeta < servers && servers < alpha,
+        "top-level key order was not preserved:\n{raw}"
+    );
+    assert!(
+        raw.contains("\n  \"mcpServers\""),
+        "output must stay 2-space pretty-printed:\n{raw}"
+    );
+}
+
+#[test]
+fn setup_claude_force_repairs_a_stale_entry_pointing_at_another_repository() {
+    let repo = create_repo();
+    let exe = foremerge_bin();
+    fs::write(
+        repo.root.join(".mcp.json"),
+        serde_json::to_vec_pretty(&json!({
+            "mcpServers": {
+                "foremerge": {
+                    "command": exe.to_string_lossy(),
+                    "args": ["--cwd", "/somewhere/that/moved", "mcp"]
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let refusal = cli_failure(&repo.root, None, ["setup", "claude"]);
+    assert_eq!(
+        refusal["error"]["code"], "ALREADY_EXISTS",
+        "a stale --cwd must not be reported as unchanged: {refusal}"
+    );
+    assert!(
+        refusal["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("/somewhere/that/moved")),
+        "refusal must name the differing entry: {refusal}"
+    );
+
+    let forced = cli_success(&repo.root, None, ["setup", "claude", "--force"]);
+    let client = &forced["data"]["clients"][0];
+    assert_eq!(client["mcp"]["status"], "written");
+    let value: Value =
+        serde_json::from_slice(&fs::read(repo.root.join(".mcp.json")).unwrap()).unwrap();
+    let canonical_root = repo.root.canonicalize().unwrap();
+    assert_eq!(
+        value["mcpServers"]["foremerge"]["args"][1],
+        canonical_root.to_string_lossy().as_ref(),
+        "--force must repoint the entry at this repository"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_refuses_a_dangling_symlinked_mcp_config() {
+    let repo = create_repo();
+    std::os::unix::fs::symlink(
+        repo.root.join("missing-target.json"),
+        repo.root.join(".mcp.json"),
+    )
+    .unwrap();
+    let refusal = cli_failure(&repo.root, None, ["setup", "claude"]);
+    assert_eq!(refusal["error"]["code"], "INVALID_INPUT");
+    assert!(
+        refusal["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("regular file")),
+        "{refusal}"
+    );
+    let metadata = fs::symlink_metadata(repo.root.join(".mcp.json")).unwrap();
+    assert!(
+        metadata.file_type().is_symlink(),
+        "the user's symlink must be left in place"
+    );
+    let forced = cli_failure(&repo.root, None, ["setup", "claude", "--force"]);
+    assert_eq!(
+        forced["error"]["code"], "INVALID_INPUT",
+        "--force must not bypass the symlink refusal: {forced}"
+    );
+}

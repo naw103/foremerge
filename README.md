@@ -71,8 +71,12 @@ foremerge doctor --client all
 ```
 
 Use `setup codex`, `setup claude`, or `setup cursor` for one client. Setup
-preserves unrelated configuration and refuses to replace a differing skill or
-Foremerge MCP entry unless you explicitly pass `--force`.
+preserves unrelated configuration (including key order in project MCP JSON) and
+refuses to replace a differing or stale skill or Foremerge MCP entry unless you
+explicitly pass `--force`. `setup all` attempts every client and reports each
+result, exiting nonzero if any failed. The Codex MCP registration is user-level
+and points at one repository at a time; see
+[agent client setup](docs/agent-clients.md).
 
 `init` creates local coordination state under the repository's Git common
 directory. It does not change tracked files. The following no-worktree sessions

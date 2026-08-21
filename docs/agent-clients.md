@@ -23,13 +23,20 @@ foremerge doctor --client all
 
 Setup initializes Foremerge state if needed and reports every file or client
 registration it changed. New MCP entries use an absolute binary and repository
-path; the installer also recognizes the equivalent portable templates shipped
-in a source clone. Setup is idempotent when installed content is current.
+path; the installer also accepts an existing entry that is verifiably current —
+its command resolves to an existing `foremerge` executable (including the
+portable templates shipped in a source clone) and any `--cwd` argument points
+at this repository. Setup is idempotent when installed content is current.
 
 Setup never replaces a differing skill file or `mcpServers.foremerge` entry by
-default. Inspect the existing content first; use `--force` only when replacing
-it is intentional. Use `--skip-mcp` to install the skill without changing MCP
-configuration.
+default; a stale entry (moved repository, deleted binary) is refused rather
+than reported as configured. Inspect the existing content first; use `--force`
+only when replacing it is intentional. Use `--skip-mcp` to install the skill
+without changing MCP configuration.
+
+`setup all` attempts every requested client even when one fails: the report
+lists each client's result, failed clients carry an `error` field, and the
+command exits nonzero if any client failed.
 
 ## What each client receives
 
@@ -39,10 +46,20 @@ configuration.
 | Claude Code | `.claude/skills/foremerge/SKILL.md` | Project `.mcp.json` |
 | Cursor | `.cursor/skills/foremerge/SKILL.md` | Project `.cursor/mcp.json` |
 
-Codex's CLI stores MCP registrations in its own configuration, so Foremerge uses
-the supported `codex mcp` command rather than editing that file directly. If
-the Codex CLI is unavailable, setup still installs the repository skill and
-returns the exact registration command as its next step.
+Codex's CLI stores MCP registrations in user-global configuration, not in the
+repository, so Foremerge uses the supported `codex mcp` command rather than
+editing that file directly. Setup reports this one out-of-repository write as
+`Codex user-level configuration (codex mcp)`. If the Codex CLI is unavailable,
+setup still installs the repository skill and returns the exact registration
+command as its next step.
+
+Because the registration is user-global, Codex coordinates one repository at a
+time: the single `foremerge` entry bakes in the repository's `--cwd`. Running
+`foremerge setup codex` in a second repository refuses when the entry points at
+a different repository; pass `--force` to repoint Codex at the current
+repository. The report then carries an explicit warning naming the repository
+Codex now coordinates and the previous repository where `foremerge setup codex`
+must be re-run to switch back.
 
 Claude Code and Cursor use project JSON files. Foremerge merges only the
 `mcpServers.foremerge` entry and preserves other top-level keys and servers.

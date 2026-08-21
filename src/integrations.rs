@@ -59,7 +59,21 @@ pub struct ClientInstallReport {
     pub mcp: Option<FileInstall>,
     pub mcp_configured: bool,
     pub next_step: Option<String>,
+    pub warning: Option<String>,
+    pub error: Option<String>,
 }
+
+struct McpOutcome {
+    install: Option<FileInstall>,
+    configured: bool,
+    next_step: Option<String>,
+    warning: Option<String>,
+}
+
+/// Human-readable scope label for the one setup write that lands outside the
+/// repository: the Codex CLI stores MCP registrations in user-level
+/// configuration rather than a project file.
+pub const CODEX_MCP_SCOPE: &str = "Codex user-level configuration (codex mcp)";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientDiagnostic {
@@ -80,7 +94,7 @@ pub fn install(
     foremerge_exe: &Path,
     force: bool,
     configure_mcp: bool,
-) -> Result<Vec<ClientInstallReport>> {
+) -> Vec<ClientInstallReport> {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     clients
         .iter()
@@ -103,56 +117,90 @@ fn install_client(
     foremerge_exe: &Path,
     force: bool,
     configure_mcp: bool,
-) -> Result<ClientInstallReport> {
+) -> ClientInstallReport {
     let skill_path = client.skill_path(root);
-    let skill = write_managed(&skill_path, SKILL_CONTENT.as_bytes(), force)?;
-    let (mcp, mcp_configured, next_step) = match client {
+    let mut report = ClientInstallReport {
+        client: client.name().to_string(),
+        skill: FileInstall {
+            path: skill_path.to_string_lossy().into_owned(),
+            status: "failed".to_string(),
+        },
+        mcp: None,
+        mcp_configured: false,
+        next_step: None,
+        warning: None,
+        error: None,
+    };
+    match write_managed(&skill_path, SKILL_CONTENT.as_bytes(), force) {
+        Ok(skill) => report.skill = skill,
+        Err(error) => {
+            report.error = Some(format!("{error:#}"));
+            return report;
+        }
+    }
+    match configure_client_mcp(root, client, foremerge_exe, force, configure_mcp) {
+        Ok(outcome) => {
+            report.mcp = outcome.install;
+            report.mcp_configured = outcome.configured;
+            report.next_step = outcome.next_step;
+            report.warning = outcome.warning;
+        }
+        Err(error) => {
+            report.error = Some(format!("{error:#}"));
+        }
+    }
+    report
+}
+
+fn configure_client_mcp(
+    root: &Path,
+    client: Client,
+    foremerge_exe: &Path,
+    force: bool,
+    configure_mcp: bool,
+) -> Result<McpOutcome> {
+    match client {
         Client::Codex => {
             if configure_mcp {
-                let configured = configure_codex_mcp(root, foremerge_exe, force)?;
-                let next = (!configured).then(|| {
-                    format!(
-                        "Run `codex mcp add foremerge -- {} --cwd {} mcp` after installing Codex CLI.",
-                        foremerge_exe.display(),
-                        root.display()
-                    )
-                });
-                (None, configured, next)
+                configure_codex_mcp(root, foremerge_exe, force)
             } else {
-                let configured = codex_mcp_configured();
-                (
-                    None,
+                let configured = codex_mcp_configured(root);
+                Ok(McpOutcome {
+                    install: None,
                     configured,
-                    (!configured).then(|| format!(
-                        "Run `codex mcp add foremerge -- {} --cwd {} mcp` to enable Foremerge tools.",
-                        foremerge_exe.display(),
-                        root.display()
-                    )),
-                )
+                    next_step: (!configured).then(|| {
+                        format!(
+                            "Run `codex mcp add foremerge -- {} --cwd {} mcp` to enable Foremerge tools.",
+                            foremerge_exe.display(),
+                            root.display()
+                        )
+                    }),
+                    warning: None,
+                })
             }
         }
         Client::Claude | Client::Cursor => {
             let path = client.mcp_path(root).expect("project MCP path");
             if configure_mcp {
                 let change = merge_mcp_config(&path, root, foremerge_exe, force)?;
-                (Some(change), true, None)
+                Ok(McpOutcome {
+                    install: Some(change),
+                    configured: true,
+                    next_step: None,
+                    warning: None,
+                })
             } else {
-                let configured = mcp_json_configured(&path);
-                (
-                    None,
+                let configured = mcp_json_configured(&path, root);
+                Ok(McpOutcome {
+                    install: None,
                     configured,
-                    (!configured).then(|| format!("Configure Foremerge in {}.", path.display())),
-                )
+                    next_step: (!configured)
+                        .then(|| format!("Configure Foremerge in {}.", path.display())),
+                    warning: None,
+                })
             }
         }
-    };
-    Ok(ClientInstallReport {
-        client: client.name().to_string(),
-        skill,
-        mcp,
-        mcp_configured,
-        next_step,
-    })
+    }
 }
 
 fn diagnose_client(root: &Path, client: Client) -> ClientDiagnostic {
@@ -162,8 +210,8 @@ fn diagnose_client(root: &Path, client: Client) -> ClientDiagnostic {
     let skill_current = skill_bytes.as_deref() == Some(SKILL_CONTENT.as_bytes());
     let mcp_path = client.mcp_path(root);
     let mcp_configured = match mcp_path.as_deref() {
-        Some(path) => mcp_json_configured(path),
-        None => codex_mcp_configured(),
+        Some(path) => mcp_json_configured(path, root),
+        None => codex_mcp_configured(root),
     };
     let client_available = command_available(client.executable())
         || (client == Client::Cursor && command_available("cursor"));
@@ -221,16 +269,24 @@ fn merge_mcp_config(
         "args": ["--cwd", root.to_string_lossy(), "mcp"]
     });
     if let Some(existing) = servers.get("foremerge") {
-        if existing == &desired || mcp_entry_configured(existing) {
+        if existing == &desired {
             return Ok(FileInstall {
                 path: path.to_string_lossy().into_owned(),
                 status: "unchanged".to_string(),
             });
         }
         if !force {
+            if mcp_entry_current(existing, root) {
+                return Ok(FileInstall {
+                    path: path.to_string_lossy().into_owned(),
+                    status: "unchanged".to_string(),
+                });
+            }
             bail!(
-                "ALREADY_EXISTS: {} already defines mcpServers.foremerge differently; inspect it or rerun with --force",
-                path.display()
+                "ALREADY_EXISTS: {} already defines mcpServers.foremerge as {}; inspect it or rerun with --force to replace it",
+                path.display(),
+                serde_json::to_string(existing)
+                    .unwrap_or_else(|_| "an unserializable entry".to_string())
             );
         }
     }
@@ -240,15 +296,42 @@ fn merge_mcp_config(
     write_managed(path, &encoded, true)
 }
 
-fn configure_codex_mcp(root: &Path, foremerge_exe: &Path, force: bool) -> Result<bool> {
+fn configure_codex_mcp(root: &Path, foremerge_exe: &Path, force: bool) -> Result<McpOutcome> {
     if !command_available("codex") {
-        return Ok(false);
+        return Ok(McpOutcome {
+            install: None,
+            configured: false,
+            next_step: Some(format!(
+                "Run `codex mcp add foremerge -- {} --cwd {} mcp` after installing Codex CLI.",
+                foremerge_exe.display(),
+                root.display()
+            )),
+            warning: None,
+        });
     }
-    let configured = codex_mcp_configured();
-    if configured && !force {
-        return Ok(true);
-    }
-    if configured {
+    let existing = codex_mcp_entry();
+    if let Some(entry) = &existing {
+        if entry.is_current_for(root) {
+            return Ok(McpOutcome {
+                install: Some(FileInstall {
+                    path: CODEX_MCP_SCOPE.to_string(),
+                    status: "unchanged".to_string(),
+                }),
+                configured: true,
+                next_step: None,
+                warning: None,
+            });
+        }
+        if !force {
+            bail!(
+                "ALREADY_EXISTS: Codex MCP configuration is user-global and its `foremerge` entry currently points at {}; rerun `foremerge setup codex --force` to repoint Codex at {}",
+                entry.cwd.as_deref().map_or_else(
+                    || "a different or stale target".to_string(),
+                    |cwd| format!("repository {}", cwd.display())
+                ),
+                root.display()
+            );
+        }
         let output = Command::new("codex")
             .args(["mcp", "remove", "foremerge"])
             .output()
@@ -274,14 +357,126 @@ fn configure_codex_mcp(root: &Path, foremerge_exe: &Path, force: bool) -> Result
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    Ok(true)
+    let warning = existing.map(|entry| {
+        let mut message = format!(
+            "Codex MCP registration is user-global: Codex now coordinates {}",
+            root.display()
+        );
+        match entry.cwd {
+            Some(previous) if !paths_match(&previous, root) => {
+                message.push_str(&format!(
+                    "; re-run `foremerge setup codex` in {} to switch back.",
+                    previous.display()
+                ));
+            }
+            _ => message.push('.'),
+        }
+        message
+    });
+    Ok(McpOutcome {
+        install: Some(FileInstall {
+            path: CODEX_MCP_SCOPE.to_string(),
+            status: "written".to_string(),
+        }),
+        configured: true,
+        next_step: None,
+        warning,
+    })
 }
 
-fn codex_mcp_configured() -> bool {
-    Command::new("codex")
+/// The Codex CLI's `foremerge` MCP entry, as far as it can be recovered from
+/// `codex mcp get` output. `command` is `None` when only the plain-text form
+/// was parseable.
+struct CodexEntry {
+    command: Option<String>,
+    cwd: Option<PathBuf>,
+}
+
+impl CodexEntry {
+    fn is_current_for(&self, root: &Path) -> bool {
+        let Some(cwd) = self.cwd.as_deref() else {
+            return false;
+        };
+        if !paths_match(cwd, root) {
+            return false;
+        }
+        match self.command.as_deref() {
+            Some(command) => command_resolves_to_foremerge(command),
+            None => true,
+        }
+    }
+}
+
+fn codex_mcp_entry() -> Option<CodexEntry> {
+    let json_form = Command::new("codex")
+        .args(["mcp", "get", "foremerge", "--json"])
+        .output();
+    if let Ok(output) = json_form {
+        if output.status.success() {
+            let parsed = serde_json::from_slice::<Value>(&output.stdout)
+                .ok()
+                .as_ref()
+                .and_then(parse_codex_entry);
+            if let Some(entry) = parsed {
+                return Some(entry);
+            }
+        }
+    }
+    let output = Command::new("codex")
         .args(["mcp", "get", "foremerge"])
         .output()
-        .is_ok_and(|output| output.status.success())
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let parsed = serde_json::from_str::<Value>(&text)
+        .ok()
+        .as_ref()
+        .and_then(parse_codex_entry);
+    if let Some(entry) = parsed {
+        return Some(entry);
+    }
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    let cwd = tokens
+        .iter()
+        .position(|token| *token == "--cwd")
+        .and_then(|position| tokens.get(position + 1))
+        .map(PathBuf::from);
+    Some(CodexEntry { command: None, cwd })
+}
+
+fn parse_codex_entry(value: &Value) -> Option<CodexEntry> {
+    let object = find_command_object(value)?;
+    let command = object
+        .get("command")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let cwd = object
+        .get("args")
+        .and_then(Value::as_array)
+        .and_then(|args| {
+            let position = args.iter().position(|arg| arg.as_str() == Some("--cwd"))?;
+            args.get(position + 1)?.as_str().map(PathBuf::from)
+        });
+    Some(CodexEntry { command, cwd })
+}
+
+fn find_command_object(value: &Value) -> Option<&Map<String, Value>> {
+    match value {
+        Value::Object(map) => {
+            if map.get("command").is_some_and(Value::is_string) {
+                return Some(map);
+            }
+            map.values().find_map(find_command_object)
+        }
+        Value::Array(items) => items.iter().find_map(find_command_object),
+        _ => None,
+    }
+}
+
+fn codex_mcp_configured(root: &Path) -> bool {
+    codex_mcp_entry().is_some_and(|entry| entry.is_current_for(root))
 }
 
 fn command_available(command: &str) -> bool {
@@ -291,50 +486,87 @@ fn command_available(command: &str) -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
-fn mcp_json_configured(path: &Path) -> bool {
+fn mcp_json_configured(path: &Path, root: &Path) -> bool {
     fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         .and_then(|value| value.get("mcpServers")?.get("foremerge").cloned())
-        .is_some_and(|entry| mcp_entry_configured(&entry))
+        .is_some_and(|entry| mcp_entry_current(&entry, root))
 }
 
-fn mcp_entry_configured(entry: &Value) -> bool {
+/// True only for an entry that is verifiably current for this repository: its
+/// command resolves to an existing executable named `foremerge`, its last
+/// argument is `mcp`, and any `--cwd` argument canonicalizes to `root`.
+fn mcp_entry_current(entry: &Value, root: &Path) -> bool {
     let Some(command) = entry.get("command").and_then(Value::as_str) else {
         return false;
     };
-    let executable = Path::new(command)
-        .file_name()
-        .and_then(|value| value.to_str());
     let Some(args) = entry.get("args").and_then(Value::as_array) else {
         return false;
     };
-    executable == Some("foremerge")
-        && args.last().and_then(Value::as_str) == Some("mcp")
-        && args.iter().all(Value::is_string)
+    if args.last().and_then(Value::as_str) != Some("mcp") || !args.iter().all(Value::is_string) {
+        return false;
+    }
+    if !command_resolves_to_foremerge(command) {
+        return false;
+    }
+    match args.iter().position(|arg| arg.as_str() == Some("--cwd")) {
+        Some(position) => args
+            .get(position + 1)
+            .and_then(Value::as_str)
+            .is_some_and(|cwd| paths_match(Path::new(cwd), root)),
+        None => true,
+    }
+}
+
+fn command_resolves_to_foremerge(command: &str) -> bool {
+    let path = Path::new(command);
+    if path.file_name().and_then(|value| value.to_str()) != Some("foremerge") {
+        return false;
+    }
+    if path.components().count() > 1 {
+        path.is_file()
+    } else {
+        std::env::var_os("PATH").is_some_and(|paths| {
+            std::env::split_paths(&paths)
+                .any(|dir| !dir.as_os_str().is_empty() && dir.join(command).is_file())
+        })
+    }
+}
+
+fn paths_match(left: &Path, right: &Path) -> bool {
+    let left = left.canonicalize().unwrap_or_else(|_| left.to_path_buf());
+    let right = right.canonicalize().unwrap_or_else(|_| right.to_path_buf());
+    left == right
 }
 
 fn write_managed(path: &Path, content: &[u8], force: bool) -> Result<FileInstall> {
-    if path.exists() {
-        let metadata = fs::symlink_metadata(path)?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            bail!(
-                "INVALID_INPUT: managed integration path must be a regular file: {}",
-                path.display()
-            );
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                bail!(
+                    "INVALID_INPUT: managed integration path must be a regular file: {}",
+                    path.display()
+                );
+            }
+            let existing = fs::read(path)?;
+            if existing == content {
+                return Ok(FileInstall {
+                    path: path.to_string_lossy().into_owned(),
+                    status: "unchanged".to_string(),
+                });
+            }
+            if !force {
+                bail!(
+                    "ALREADY_EXISTS: {} already exists with different content; inspect it or rerun with --force",
+                    path.display()
+                );
+            }
         }
-        let existing = fs::read(path)?;
-        if existing == content {
-            return Ok(FileInstall {
-                path: path.to_string_lossy().into_owned(),
-                status: "unchanged".to_string(),
-            });
-        }
-        if !force {
-            bail!(
-                "ALREADY_EXISTS: {} already exists with different content; inspect it or rerun with --force",
-                path.display()
-            );
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(anyhow::Error::from(error))
+                .with_context(|| format!("inspect {}", path.display()));
         }
     }
     let parent = path.parent().context("integration file parent")?;
@@ -380,9 +612,9 @@ mod tests {
             Path::new("/usr/local/bin/foremerge"),
             false,
             true,
-        )
-        .unwrap();
+        );
         assert_eq!(reports.len(), 2);
+        assert!(reports.iter().all(|report| report.error.is_none()));
         assert_eq!(
             fs::read(temp.path().join(".claude/skills/foremerge/SKILL.md")).unwrap(),
             SKILL_CONTENT.as_bytes()
@@ -400,12 +632,11 @@ mod tests {
             Path::new("/usr/local/bin/foremerge"),
             false,
             true,
-        )
-        .unwrap();
+        );
         assert!(
             second
                 .iter()
-                .all(|report| report.skill.status == "unchanged")
+                .all(|report| report.skill.status == "unchanged" && report.error.is_none())
         );
     }
 
@@ -415,24 +646,28 @@ mod tests {
         let path = temp.path().join(".claude/skills/foremerge/SKILL.md");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "custom instructions").unwrap();
-        assert!(
-            install(
-                temp.path(),
-                &[Client::Claude],
-                Path::new("foremerge"),
-                false,
-                false,
-            )
-            .is_err()
+        let refused = install(
+            temp.path(),
+            &[Client::Claude],
+            Path::new("foremerge"),
+            false,
+            false,
         );
-        install(
+        assert!(
+            refused[0]
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("ALREADY_EXISTS"))
+        );
+        assert_eq!(refused[0].skill.status, "failed");
+        let forced = install(
             temp.path(),
             &[Client::Claude],
             Path::new("foremerge"),
             true,
             false,
-        )
-        .unwrap();
+        );
+        assert!(forced[0].error.is_none());
         assert_eq!(fs::read(path).unwrap(), SKILL_CONTENT.as_bytes());
     }
 }
