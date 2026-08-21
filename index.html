@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Foremerge — catch intent conflicts before code conflicts</title>
+<meta name="description" content="Foremerge is the open-source coordination protocol for coding agents, built above Git. Agents keep isolated worktrees while sharing intent, semantic claims, ChangeSets, and verification.">
+<meta property="og:title" content="Foremerge">
+<meta property="og:description" content="Catch intent conflicts before code conflicts. The open-source coordination protocol for coding agents, built above Git.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://naw103.github.io/foremerge/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M8 4v13c0 4 3 7 8 7h3' fill='none' stroke='%23a489e8' stroke-width='3.2' stroke-linecap='round'/%3E%3Ccircle cx='8' cy='6' r='3.4' fill='%23a489e8'/%3E%3Ccircle cx='8' cy='26' r='3.4' fill='%236fbf87'/%3E%3Ccircle cx='24' cy='24' r='3.4' fill='%23e0756b'/%3E%3Cpath d='M8 10v12' stroke='%236fbf87' stroke-width='3.2' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --ground: #0e1116;
+    --panel: #151a21;
+    --panel-2: #1b212b;
+    --ink: #e8eaee;
+    --muted: #8b93a0;
+    --faint: #5c6470;
+    --line: #262b34;
+    --accent: #a489e8;
+    --red: #e0756b;
+    --green: #6fbf87;
+    --amber: #d9ad54;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover, a:focus-visible { text-decoration: underline; text-underline-offset: 3px; }
+  a:focus-visible, .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  code, pre, .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 1.4rem; }
+
+  nav {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 1.4rem 0 0;
+  }
+  .wordmark {
+    font-family: "IBM Plex Sans Condensed", "Arial Narrow", sans-serif;
+    font-weight: 700; font-size: 1.15rem; letter-spacing: 0.06em;
+    color: var(--ink); text-transform: uppercase;
+  }
+  .wordmark .fore { color: var(--accent); }
+  nav .links { display: flex; gap: 1.4rem; font-size: 0.92rem; }
+  nav .links a { color: var(--muted); }
+  nav .links a:hover { color: var(--ink); }
+
+  header.hero { padding: 5rem 0 3.5rem; }
+  .hero h1 {
+    font-family: "IBM Plex Sans Condensed", "Arial Narrow", sans-serif;
+    font-size: clamp(2.4rem, 6vw, 4rem);
+    font-weight: 700; line-height: 1.05; letter-spacing: -0.01em;
+    margin: 0 0 1.2rem; text-wrap: balance; max-width: 18ch;
+  }
+  .hero h1 .conflict { color: var(--red); }
+  .hero h1 .code { color: var(--green); }
+  .hero p.sub {
+    font-size: 1.15rem; color: var(--muted); max-width: 56ch; margin: 0 0 2rem;
+  }
+  .hero p.sub strong { color: var(--ink); font-weight: 500; }
+  .cta { display: flex; flex-wrap: wrap; gap: 0.8rem; align-items: center; }
+  .btn {
+    display: inline-block; padding: 0.62rem 1.25rem; border-radius: 6px;
+    font-weight: 600; font-size: 0.95rem; border: 1px solid var(--line);
+    color: var(--ink); background: var(--panel);
+  }
+  .btn.primary { background: var(--accent); color: #14101f; border-color: var(--accent); }
+  .btn.primary:hover { text-decoration: none; filter: brightness(1.08); }
+  .btn:hover { text-decoration: none; border-color: var(--faint); }
+  .install {
+    margin-top: 1.6rem; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 0.85rem 1.1rem; font-size: 0.86rem;
+    overflow-x: auto; white-space: nowrap; color: var(--ink);
+  }
+  .install .p { color: var(--faint); user-select: none; }
+
+  .terminal {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    overflow: hidden; margin: 3rem 0 0; box-shadow: 0 24px 60px rgba(0,0,0,0.35);
+  }
+  .terminal .bar {
+    display: flex; align-items: center; gap: 0.45rem;
+    padding: 0.6rem 1rem; border-bottom: 1px solid var(--line); background: var(--panel-2);
+  }
+  .terminal .dot { width: 11px; height: 11px; border-radius: 50%; background: var(--line); }
+  .terminal .bar .title { margin-left: 0.5rem; font-size: 0.75rem; color: var(--faint); }
+  .terminal pre {
+    margin: 0; padding: 1.2rem 1.3rem; font-size: 0.82rem; line-height: 1.65;
+    overflow-x: auto; color: var(--muted);
+  }
+  .t-cmd { color: var(--ink); }
+  .t-prompt { color: var(--faint); }
+  .t-key { color: var(--accent); }
+  .t-high { color: var(--red); font-weight: 500; }
+  .t-str { color: var(--green); }
+  .t-com { color: var(--faint); font-style: italic; }
+
+  section { padding: 4.5rem 0 0; }
+  .eyebrow {
+    font-size: 0.72rem; font-weight: 500; letter-spacing: 0.16em;
+    text-transform: uppercase; color: var(--accent); margin: 0 0 0.6rem;
+  }
+  section h2 {
+    font-family: "IBM Plex Sans Condensed", "Arial Narrow", sans-serif;
+    font-size: clamp(1.6rem, 3.4vw, 2.2rem); font-weight: 700;
+    margin: 0 0 1rem; line-height: 1.15; text-wrap: balance;
+  }
+  section > .wrap > p, .prose p { color: var(--muted); max-width: 62ch; }
+  .prose strong { color: var(--ink); font-weight: 500; }
+
+  .split { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; margin-top: 2rem; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 1.3rem 1.4rem;
+  }
+  .card h3 {
+    font-family: "IBM Plex Sans Condensed", sans-serif; font-size: 1.05rem;
+    font-weight: 600; margin: 0 0 0.5rem;
+  }
+  .card p { font-size: 0.92rem; color: var(--muted); margin: 0; }
+  .card .mono-tag {
+    display: inline-block; font-size: 0.72rem; color: var(--accent);
+    background: rgba(164,137,232,0.08); border: 1px solid rgba(164,137,232,0.25);
+    border-radius: 4px; padding: 0.1em 0.5em; margin-bottom: 0.7rem;
+  }
+
+  .agents { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; margin: 2rem 0; }
+  .agent {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 1.2rem 1.3rem;
+  }
+  .agent .who { font-size: 0.75rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); margin-bottom: 0.5rem; }
+  .agent .intent { font-size: 1rem; color: var(--ink); font-weight: 500; }
+  .agent .scope { margin-top: 0.8rem; font-size: 0.78rem; }
+  .scope-chip {
+    font-family: "IBM Plex Mono", monospace;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px;
+    padding: 0.14em 0.5em; color: var(--ink);
+  }
+  .scope-chip .kind { color: var(--accent); }
+  .finding {
+    border: 1px solid rgba(224,117,107,0.35); background: rgba(224,117,107,0.06);
+    border-radius: 8px; padding: 1.2rem 1.4rem; margin-top: 1rem;
+  }
+  .finding .sev { font-family: "IBM Plex Mono", monospace; font-size: 0.72rem; letter-spacing: 0.08em; color: var(--red); }
+  .finding p { color: var(--muted); font-size: 0.95rem; margin: 0.5rem 0 0; max-width: 70ch; }
+  .finding p strong { color: var(--ink); }
+
+  .lifecycle {
+    display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center;
+    margin-top: 1.8rem; font-family: "IBM Plex Mono", monospace; font-size: 0.78rem;
+  }
+  .stage {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 5px;
+    padding: 0.35em 0.7em; color: var(--ink);
+  }
+  .stage.gate { border-color: rgba(217,173,84,0.5); color: var(--amber); }
+  .lifecycle .arrow { color: var(--faint); }
+
+  .tools { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 0.8rem; margin-top: 2rem; }
+  .tool {
+    display: flex; flex-direction: column; gap: 0.3rem;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 1rem 1.1rem;
+  }
+  .tool .name { font-family: "IBM Plex Mono", monospace; font-size: 0.82rem; color: var(--accent); }
+  .tool .what { font-size: 0.86rem; color: var(--muted); }
+
+  .honest { border-left: 3px solid var(--amber); padding-left: 1.4rem; margin-top: 2rem; }
+  .honest ul { margin: 0.8rem 0 0; padding-left: 1.1rem; color: var(--muted); max-width: 68ch; }
+  .honest li { margin: 0.45rem 0; font-size: 0.95rem; }
+  .honest li::marker { color: var(--amber); }
+
+  footer {
+    margin-top: 5.5rem; border-top: 1px solid var(--line);
+    padding: 2.2rem 0 3rem; font-size: 0.88rem; color: var(--faint);
+  }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 1.6rem; justify-content: space-between; align-items: baseline; }
+  footer .links { display: flex; flex-wrap: wrap; gap: 1.4rem; }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <nav aria-label="Site">
+    <span class="wordmark"><span class="fore">Fore</span>merge</span>
+    <span class="links">
+      <a href="https://github.com/naw103/foremerge#quickstart-first-conflict-in-under-five-minutes">Quickstart</a>
+      <a href="https://github.com/naw103/foremerge/tree/main/docs">Docs</a>
+      <a href="https://github.com/naw103/foremerge">GitHub</a>
+    </span>
+  </nav>
+
+  <header class="hero">
+    <h1>Catch <span class="conflict">intent conflicts</span> before <span class="code">code conflicts</span>.</h1>
+    <p class="sub">Foremerge is the open-source coordination protocol for coding agents, built <strong>above Git</strong>. Agents keep isolated worktrees while sharing intent, semantic claims, dependencies, provisional ChangeSets, decisions, and verification — so plans collide in a queryable store, not in your merge.</p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/naw103/foremerge">View on GitHub</a>
+      <a class="btn" href="https://github.com/naw103/foremerge/blob/main/docs/mcp-setup.md">MCP setup</a>
+    </div>
+    <div class="install mono"><span class="p">$ </span>cargo install --locked --git https://github.com/naw103/foremerge foremerge</div>
+
+    <div class="terminal" role="img" aria-label="Terminal session where two agents publish conflicting intents and Foremerge reports a HIGH replace_vs_extend conflict before any code exists">
+      <div class="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="title mono">two clean worktrees — zero lines changed</span></div>
+<pre><span class="t-com"># Agent A announces its plan</span>
+<span class="t-prompt">$</span> <span class="t-cmd">foremerge --json intent publish --agent "$STRIPE_AGENT" \
+    --summary "Replace PaymentService with StripePaymentService" \
+    --scope symbol:PaymentService</span>
+
+<span class="t-com"># Agent B announces a plan of its own</span>
+<span class="t-prompt">$</span> <span class="t-cmd">foremerge --json intent publish --agent "$PAYPAL_AGENT" \
+    --summary "Add PayPal support to PaymentService" \
+    --scope symbol:PaymentService</span>
+{
+  <span class="t-key">"kind"</span>: <span class="t-str">"replace_vs_extend"</span>,
+  <span class="t-key">"severity"</span>: <span class="t-high">"HIGH"</span>,
+  <span class="t-key">"explanation"</span>: <span class="t-str">"One intent will replace `PaymentService` while the
+                  other will extend it; both rely on exact semantic scope."</span>,
+  <span class="t-key">"suggestion"</span>: <span class="t-str">"Coordinate on a stable `PaymentProvider` contract first,
+                 then implement StripePaymentProvider and PayPalPaymentProvider
+                 behind it and migrate callers deliberately."</span>
+}</pre>
+    </div>
+  </header>
+</div>
+
+<section id="problem">
+  <div class="wrap prose">
+    <p class="eyebrow">The problem</p>
+    <h2>Git sees two clean trees. The plans already collide.</h2>
+    <div class="agents">
+      <div class="agent">
+        <div class="who">Agent A · worktree ../payments-stripe</div>
+        <div class="intent">Replace PaymentService with StripePaymentService</div>
+        <div class="scope"><span class="scope-chip"><span class="kind">symbol:</span>PaymentService</span></div>
+      </div>
+      <div class="agent">
+        <div class="who">Agent B · worktree ../payments-paypal</div>
+        <div class="intent">Add PayPal support to PaymentService</div>
+        <div class="scope"><span class="scope-chip"><span class="kind">symbol:</span>PaymentService</span></div>
+      </div>
+    </div>
+    <div class="finding">
+      <span class="sev">HIGH · replace_vs_extend · rule FM-C001</span>
+      <p>One agent removes the extension point the other depends on. No overlapping lines, no diff, nothing for Git to flag — until both implementations exist and the rework is expensive. Foremerge compares declared scopes and intent language <strong>before implementation</strong> and raises an explainable, advisory finding. No hard locks, no LLM in the detection path.</p>
+    </div>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap prose">
+    <p class="eyebrow">How it fits</p>
+    <h2>A shared awareness layer. Git stays the repository.</h2>
+    <p>Every agent keeps its own isolated worktree. Coordination state lives in one SQLite database under the repository's Git common directory, so linked worktrees share it automatically. Mutations update typed projections, materialize graph edges, and append a hash-chained semantic event in a single transaction.</p>
+    <div class="split">
+      <div class="card">
+        <span class="mono-tag">CLI</span>
+        <h3>One binary</h3>
+        <p>Register agents, publish intents, claim scopes, query who is changing what, and gate ChangeSets — with <code>--json</code> for scripting.</p>
+      </div>
+      <div class="card">
+        <span class="mono-tag">MCP</span>
+        <h3>Seven focused tools</h3>
+        <p><code>register_agent</code>, <code>publish_intent</code>, <code>claim_work</code>, <code>query_work</code>, <code>check_conflicts</code>, <code>publish_changeset</code>, <code>coordinate_with_agent</code> — over stdio, no daemon required.</p>
+      </div>
+      <div class="card">
+        <span class="mono-tag">JSON API</span>
+        <h3>Loopback daemon</h3>
+        <p>An authenticated local HTTP API with an OpenAPI schema, for harnesses that prefer HTTP to stdio.</p>
+      </div>
+    </div>
+    <div class="lifecycle" aria-label="ChangeSet lifecycle">
+      <span class="stage">INTENT</span><span class="arrow">→</span>
+      <span class="stage">CLAIMED</span><span class="arrow">→</span>
+      <span class="stage">IN_PROGRESS</span><span class="arrow">→</span>
+      <span class="stage">PROVISIONAL</span><span class="arrow">→</span>
+      <span class="stage gate">VALIDATED</span><span class="arrow">→</span>
+      <span class="stage gate">ACCEPTED</span><span class="arrow">→</span>
+      <span class="stage">COMMITTED</span>
+    </div>
+    <p style="margin-top:1.2rem">Agent-reported test results are provenance, never proof. Acceptance requires Foremerge-executed validation against the exact Git fingerprint of the candidate — and any change after validation makes that evidence stale.</p>
+  </div>
+</section>
+
+<section id="scopes">
+  <div class="wrap prose">
+    <p class="eyebrow">Semantic scopes</p>
+    <h2>Claims describe concepts, not file paths.</h2>
+    <p>File paths miss API, schema, configuration, infrastructure, and cross-language collisions. Foremerge scopes name the thing that is actually contended:</p>
+    <div class="tools" aria-label="Scope kinds">
+      <div class="tool"><span class="name">symbol:PaymentService</span><span class="what">A class, function, or type</span></div>
+      <div class="tool"><span class="name">api:POST /v1/charges</span><span class="what">An endpoint or interface</span></div>
+      <div class="tool"><span class="name">schema:invoices.total</span><span class="what">A table, column, or document shape</span></div>
+      <div class="tool"><span class="name">migration:2026-08-add-tax</span><span class="what">A one-shot ordered change</span></div>
+      <div class="tool"><span class="name">contract:payment-provider</span><span class="what">A cross-component agreement</span></div>
+      <div class="tool"><span class="name">env:STRIPE_API_KEY</span><span class="what">Configuration and environment</span></div>
+    </div>
+    <p style="margin-top:1.4rem">Claims are leased and advisory — overlap produces a warning and shared context, never a lock. Twelve scope kinds ship in 0.1.0.</p>
+  </div>
+</section>
+
+<section id="honesty">
+  <div class="wrap prose">
+    <p class="eyebrow">What it does not claim</p>
+    <h2>Deliberately small, deliberately honest.</h2>
+    <div class="honest">
+      <ul>
+        <li>Conflict detection is deterministic and explainable — and heuristic. It can miss synonymous concepts and warn on compatible work.</li>
+        <li>Local-first: one machine, one SQLite store shared across worktrees. Multi-machine shared mode is on the roadmap, not in the box.</li>
+        <li>There are benchmark fixtures and a reproducible plan, but no published coordinated-vs-uncoordinated results yet. No performance claims until there are.</li>
+        <li>It does not replace code review, CI, architecture ownership, or Git hosting rules — and passing validation proves only what was actually run.</li>
+      </ul>
+    </div>
+    <p style="margin-top:1.6rem">The full trust model is in <a href="https://github.com/naw103/foremerge/blob/main/docs/limitations.md">docs/limitations.md</a>. Protocol feedback — scope vocabulary, conflict evidence, verification policy — is the contribution we want most: <a href="https://github.com/naw103/foremerge/discussions">start a discussion</a>.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <span>Foremerge · Apache-2.0 · built above Git, not instead of it</span>
+    <span class="links">
+      <a href="https://github.com/naw103/foremerge">GitHub</a>
+      <a href="https://github.com/naw103/foremerge/blob/main/docs/architecture.md">Architecture</a>
+      <a href="https://github.com/naw103/foremerge/blob/main/docs/protocol.md">Protocol</a>
+      <a href="https://github.com/naw103/foremerge/blob/main/CHANGELOG.md">Changelog</a>
+    </span>
+  </div>
+</footer>
+
+</body>
+</html>
