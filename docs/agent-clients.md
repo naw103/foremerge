@@ -23,7 +23,7 @@ foremerge doctor --client all
 
 Setup initializes Foremerge state if needed and reports every file or client
 registration it changed. New MCP entries use an absolute binary and repository
-path; the installer also accepts an existing entry that is verifiably current —
+path; the installer also accepts an existing entry that is verifiably current:
 its command resolves to an existing `foremerge` executable (including the
 portable templates shipped in a source clone) and any `--cwd` argument points
 at this repository. Setup is idempotent when installed content is current.

@@ -51,7 +51,7 @@ This repository ships its own Foremerge client integration: `.mcp.json` (Claude
 Code), `.cursor/mcp.json` (Cursor), and three copies of the agent skill under
 `.codex/`, `.claude/`, and `.cursor/skills/foremerge/SKILL.md`. If you open the
 repository with one of those coding-agent clients, the client will offer to
-enable the Foremerge MCP server and skill — clients prompt before enabling
+enable the Foremerge MCP server and skill; clients prompt before enabling
 project-level configuration, so nothing runs without your consent. The three
 skill files are generated from one source: `src/integrations.rs` embeds
 `.codex/skills/foremerge/SKILL.md` at compile time and `foremerge setup`

@@ -154,7 +154,7 @@ fn keyword_operation(token: &str) -> Option<Operation> {
 
 /// A fallback-extracted subject must look like a code identifier: CamelCase
 /// with at least two humps (PaymentService, CreditLedger), containing `_` or
-/// `::`, or wrapped in backticks in the summary — and never a stoplisted
+/// `::`, or wrapped in backticks in the summary, and never a stoplisted
 /// English sentence-starter such as "No" or "This".
 fn confident_identifier(summary: &str, found: &regex::Match) -> bool {
     let word = found.as_str();

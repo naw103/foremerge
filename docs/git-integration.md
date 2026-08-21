@@ -117,13 +117,13 @@ The candidate commit is the resolved `git_ref` (default: the worktree `HEAD`).
 Its diff base is chosen in this order and recorded as
 `provenance.git.base_resolution`:
 
-1. `caller_supplied` — an explicit `base_ref` (CLI `--base-ref`) for callers
+1. `caller_supplied`: an explicit `base_ref` (CLI `--base-ref`) for callers
    that know their true base, such as the fork point of the agent branch. A
    base that resolves to the candidate itself is rejected as `INVALID_INPUT`.
-2. `first_parent` — the candidate commit's first parent, the default.
-3. `root_commit` — the candidate has no parent; the diff base is the empty
+2. `first_parent`: the candidate commit's first parent, the default.
+3. `root_commit`: the candidate has no parent; the diff base is the empty
    tree.
-4. `unborn_worktree` — the repository has no commits; there is no candidate
+4. `unborn_worktree`: the repository has no commits; there is no candidate
    commit and `diff_hash` falls back to the snapshot's worktree content hash.
 
 `provenance.git.diff_hash` is a SHA-256 over the actual binary patch bytes of

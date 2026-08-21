@@ -116,9 +116,9 @@ This rule returns immediately for the pair because it is the strongest and most
 actionable explanation.
 
 The suggestion is scope-kind-aware. For `schema`, `migration`, and `config`
-scopes, Foremerge suggests agreeing the migration order explicitly — sequencing
+scopes, Foremerge suggests agreeing the migration order explicitly: sequencing
 both changes as one migration plan or rebasing one intent onto the other’s
-outcome — because a provider abstraction is the wrong advice for a schema
+outcome. A provider abstraction is the wrong advice for a schema
 change. For other kinds (such as `symbol`, `contract`, `component`, and `api`)
 it keeps the provider-abstraction suggestion described below. Both are
 heuristic advice, not automatic design decisions.
@@ -244,8 +244,8 @@ The top-level `scope` names the source intent’s best-overlapping scope, but th
 evidence records the canonical best-overlapping scope from **each** side as
 `source_scope` and `target_scope` (or `null` when no scope overlap was
 determinable, as in a purely summary-based duplicate-work finding). When the
-two keys differ — for example a token-based overlap between
-`symbol:CreditLedgerService` and `symbol:CreditLedger` — the explanation names
+two keys differ (for example a token-based overlap between
+`symbol:CreditLedgerService` and `symbol:CreditLedger`), the explanation names
 both, so each agent can match the conflict against a scope it actually
 declared.
 

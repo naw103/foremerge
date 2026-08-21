@@ -289,7 +289,7 @@ moves a persisted `cfl_*` conflict to `RESOLVED`.
   `sequenced: provider abstraction lands first`, `split scopes`, or
   `duplicate: second intent discarded`.
 - `rationale` is required and should reference the coordination that produced
-  the agreement — name the `msg_*` coordination message ids so the decision is
+  the agreement: name the `msg_*` coordination message ids so the decision is
   auditable against the durable message log.
 - Who may resolve: on the trusted CLI and HTTP surfaces, any registered agent
   (typically a human operator or an integrator acting through one). Over MCP,

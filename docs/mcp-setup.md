@@ -318,8 +318,8 @@ The agent then sends only:
 Be honest about a stdio consequence: the MCP server processes one message at a
 time, and `run_verification` runs the named check inline, so the serial stdio
 loop is blocked until the check finishes or its configured timeout (up to 3600
-seconds) expires. Every queued client request — including `ping` liveness
-probes — waits behind it, and clients with their own tool timeouts may report
+seconds) expires. Every queued client request, including `ping` liveness
+probes, waits behind it, and clients with their own tool timeouts may report
 the call failed or kill the server while Foremerge is still recording the
 validation. Mitigations: keep named check commands short, configure realistic
 `timeout_seconds` on the check, and run long validation through the CLI

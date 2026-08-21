@@ -18,9 +18,49 @@ No unreleased changes.
 - Native Foremerge skills and MCP setup for Codex, Claude Code, and Cursor.
 - Safe `foremerge setup codex|claude|cursor|all` installation with explicit
   `--force` replacement and `doctor --client` diagnostics.
-- Repository-private trusted checks configured through `foremerge checks`.
+- Repository-scoped trusted checks configured through `foremerge checks`.
 - Complete 13-tool MCP lifecycle, including start, resolution, named
   verification, acceptance, discard, and integration-commit recording.
+- Read commands `foremerge intent show <ID>` and `foremerge agent list`.
+- `--base-ref` on `changeset publish`; the diff base defaults to the candidate
+  commit's first parent and provenance records a real diff hash and the base
+  resolution mode.
+- `work start` and `changeset publish` responses report `open_conflicts` for
+  the intent, so an earlier publisher learns about conflicts created by later
+  publishes.
+- `coordinate inbox` accepts `--agent` alongside the positional agent id.
+
+### Changed
+
+- Breaking: `work discard` (CLI, HTTP, and MCP) now rejects an empty reason.
+  Migration: pass a non-empty `--reason`/`reason` value.
+- Over MCP, `accept_changeset` no longer accepts HIGH-conflict overrides
+  (overrides are CLI operator actions) and `resolve_conflict` is limited to
+  agents that are parties to the conflict.
+- The trusted-check registry requires a real Git repository and is resolved
+  from the bound repository, never from the MCP server's process working
+  directory or a `.foremerge` fallback directory.
+- ChangeSet `base_ref` records the diff base instead of repeating the
+  candidate ref.
+- `conflicts check --intent` rejects values shaped like intent ids and points
+  the caller at `--intent-id`.
+
+### Fixed
+
+- Conflict explanations no longer extract sentence-starting English words as
+  subjects (previously producing text like "will migrate `No`"); suggestions
+  are scope-kind aware (migration ordering for schema/migration/config scopes,
+  coordination-first wording for duplicate work), and conflict evidence names
+  the overlapping scope from both sides.
+- `setup --force` can repair a stale Foremerge MCP entry, and stale entries
+  are no longer reported as configured by setup or `doctor`.
+- Codex MCP registration is treated as user-global configuration: setting up a
+  second repository now produces an explicit error, or a disclosed repoint
+  with `--force`, instead of a false "configured" report or a silent hijack.
+- `setup all` attempts every requested client and reports each result instead
+  of aborting on the first failure.
+- MCP config merges preserve the order of unrelated entries, dangling
+  symlinks are refused, and client probes are time- and output-bounded.
 
 ## [0.1.0] - 2026-08-20
 

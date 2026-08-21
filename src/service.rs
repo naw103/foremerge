@@ -632,7 +632,7 @@ impl Foremerge {
         // Resolve the candidate commit and its true diff base. Recording the
         // candidate itself as base (the pre-0.2.0 behavior for `--git-ref
         // HEAD` on a clean worktree) produced a self-referential base and the
-        // hash of an empty diff — vacuous provenance.
+        // hash of an empty diff, which is vacuous provenance.
         let candidate = match request.git_ref.as_deref() {
             Some(reference) => Some(git::verify_ref(&worktree, reference)?),
             None => snapshot.head.clone(),
