@@ -2,7 +2,9 @@
 
 CARGO ?= cargo
 
-.PHONY: help fmt fmt-check check clippy test doc build release verify clean
+MSRV ?= 1.85.0
+
+.PHONY: help fmt fmt-check check clippy test doc build release verify msrv clean
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "; printf "Foremerge development targets:\n"} /^[a-zA-Z_-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -30,6 +32,11 @@ build: ## Build debug binaries
 
 release: ## Build an optimized release binary
 	$(CARGO) build --workspace --all-features --release
+
+msrv: ## Run clippy and tests on the pinned MSRV toolchain, as CI does
+	rustup toolchain list | grep -q '^$(MSRV)' || rustup toolchain install $(MSRV) --profile minimal --component clippy,rustfmt
+	rustup run $(MSRV) $(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
+	rustup run $(MSRV) $(CARGO) test --workspace --all-targets --all-features
 
 verify: fmt-check check clippy test doc ## Run the local release gate
 

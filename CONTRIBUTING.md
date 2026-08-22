@@ -80,6 +80,9 @@ accepted or committed state.
 
 - Keep changes small enough to review and explain noteworthy design choices.
 - Run `make verify` from a clean checkout.
+- Run `make msrv` before pushing. CI lints on the pinned minimum supported Rust
+  version as well as stable, and Clippy's lint set differs between them, so a
+  clean `make verify` on a newer toolchain does not guarantee a green CI run.
 - Update `CHANGELOG.md` under `Unreleased` for user-visible behavior.
 - Call out migrations, compatibility implications, and security considerations.
 - Do not rewrite unrelated work or commit generated `.foremerge` state.

@@ -2062,7 +2062,7 @@ impl Foremerge {
                 scope: conflict.scope,
                 source_intent_id: conflict.source_intent_id,
                 source_agent_name: source.as_ref().map(|intent| agent_name(&intent.agent_id)),
-                source_scopes: source.as_ref().map(&scope_strings).unwrap_or_default(),
+                source_scopes: source.as_ref().map(scope_strings).unwrap_or_default(),
                 target_intent_id: conflict.target_intent_id,
                 target_agent_name: agent_name(&target.agent_id),
                 target_scopes: scope_strings(&target),
