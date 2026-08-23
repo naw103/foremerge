@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Foremerge local JSON API
-  version: 0.2.0
+  version: 0.3.0
   description: >-
     Local-first semantic coordination API above Git. Successful responses use
     an ok/data envelope. All versioned routes require bearer authentication when
@@ -15,11 +15,42 @@ paths:
   /healthz:
     get:
       operationId: health
-      summary: Check process, database counts, and event-chain health
+      summary: Check process liveness without touching SQLite or Git
       security: []
       responses:
         "200":
           $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /readyz:
+    get:
+      operationId: readiness
+      summary: Run a bounded, non-waiting coordinator-store reachability check
+      security: []
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "503":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/audit/event-chain:
+    get:
+      operationId: auditEventChain
+      summary: Verify a stable event-log prefix through a paged read-only connection
+      parameters:
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 10000
+            default: 1000
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         default:
           $ref: "#/components/responses/Error"
   /v1/events:
@@ -51,6 +82,17 @@ paths:
     get:
       operationId: getGraph
       summary: Read the materialized semantic graph
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/status:
+    get:
+      operationId: getStatus
+      summary: Read one consistent coordinator status snapshot
       responses:
         "200":
           $ref: "#/components/responses/Success"
@@ -149,6 +191,17 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         default:
           $ref: "#/components/responses/Error"
+  /v1/agents:
+    get:
+      operationId: listAgents
+      summary: List registered coding agents
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/Error"
   /v1/agents/{id}/inbox:
     get:
       operationId: getAgentInbox
@@ -172,6 +225,19 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/PublishIntentRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/intents/{id}:
+    get:
+      operationId: getIntent
+      summary: Read one intent, its agent, and current open conflicts
+      parameters:
+        - $ref: "#/components/parameters/IntentId"
       responses:
         "200":
           $ref: "#/components/responses/Success"
@@ -229,6 +295,19 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         default:
           $ref: "#/components/responses/Error"
+  /v1/conflicts/{id}/detections:
+    get:
+      operationId: listConflictDetections
+      summary: List immutable observations for one stable conflict identity
+      parameters:
+        - $ref: "#/components/parameters/ConflictId"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/Error"
   /v1/conflicts/{id}/resolve:
     post:
       operationId: resolveConflict
@@ -266,6 +345,32 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/PublishChangeSetRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/changesets/{id}:
+    get:
+      operationId: getChangeSet
+      summary: Read one ChangeSet and its Git/provenance state
+      parameters:
+        - $ref: "#/components/parameters/ChangeSetId"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/changesets/{id}/validation-attempts:
+    get:
+      operationId: listValidationAttempts
+      summary: List authoritative and stale immutable validation attempts
+      parameters:
+        - $ref: "#/components/parameters/ChangeSetId"
       responses:
         "200":
           $ref: "#/components/responses/Success"

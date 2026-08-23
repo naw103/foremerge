@@ -40,8 +40,10 @@ corpus covers:
 | Independent documentation and caching work | Negative control; no high-severity warning |
 | Candidate with a failing validation command | Integration remains unchanged |
 
-The fixture is the ground-truth specification, not evidence that a detector
-already meets it. New conflict fixtures must be reviewed by at least two people
+The fixture is the ground-truth specification. The committed scripted harness
+executes all five as correctness cases in CI, but passing that public corpus is
+not evidence of general detector accuracy or productivity impact. New conflict
+fixtures must be reviewed by at least two people
 without knowing which detector output they are labeling. Disagreements are
 recorded rather than silently resolved.
 
@@ -166,6 +168,12 @@ model-driven.
 
 ## Reproduction status
 
-The JSON scenarios currently define the initial corpus. Until a versioned runner
-and raw result directory are committed, the repository has a benchmark plan but
-no comparative benchmark result. Launch material must preserve that distinction.
+`cargo test --test benchmark_scenarios` executes the five JSON fixtures against
+the actual detector and validation gate. `cargo run --release --example
+query_benchmark -- 500 5000 20000` emits reproducible local query timings at
+declared scales. CI runs a smoke scale and the full correctness corpus.
+
+These are scripted correctness and microbenchmark harnesses, not the paired
+model-driven runner described above. Until paired raw result directories and an
+analysis script are published, the repository has no comparative productivity
+result. Launch material must preserve that distinction.

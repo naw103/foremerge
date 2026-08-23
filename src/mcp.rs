@@ -123,6 +123,11 @@ struct RecordCommitToolRequest {
     git_ref: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct IdToolRequest {
+    id: String,
+}
+
 /// Resolve a named check from the registry of the repository this service's
 /// store is bound to. MCP callers never influence which registry is trusted:
 /// neither the server's spawn directory nor tool arguments select it.
@@ -145,96 +150,210 @@ async fn call_tool(service: &Foremerge, params: Value) -> Result<Value, (i64, St
         .cloned()
         .unwrap_or_else(|| json!({}));
     let outcome: anyhow::Result<Value> = match name {
-        "register_agent" => parse::<RegisterAgentRequest>(arguments)
-            .and_then(|request| service.register_agent(request))
-            .and_then(to_value),
-        "publish_intent" => parse::<PublishIntentRequest>(arguments)
-            .and_then(|request| service.publish_intent(request))
-            .and_then(to_value),
-        "claim_work" => parse::<ClaimWorkRequest>(arguments)
-            .and_then(|request| service.claim_work(request))
-            .and_then(to_value),
-        "query_work" => parse::<WorkQuery>(arguments)
-            .and_then(|request| service.query_work(request))
-            .and_then(to_value),
-        "check_conflicts" => parse::<ConflictCheckRequest>(arguments)
-            .and_then(|request| service.check_conflicts(request))
-            .and_then(to_value),
-        "publish_changeset" => parse::<PublishChangeSetRequest>(arguments)
-            .and_then(|request| service.publish_changeset(request))
-            .and_then(to_value),
-        "coordinate_with_agent" => parse::<CoordinateRequest>(arguments)
-            .and_then(|request| service.coordinate_with_agent(request))
-            .and_then(to_value),
-        "start_work" => parse::<StartWorkToolRequest>(arguments)
-            .and_then(|request| service.start_work(&request.agent_id, &request.intent_id))
-            .and_then(to_value),
+        "register_agent" => {
+            let service = service.clone();
+            mcp_blocking(move || {
+                parse::<RegisterAgentRequest>(arguments)
+                    .and_then(|request| service.register_agent(request))
+                    .and_then(to_value)
+            })
+            .await
+        }
+        "publish_intent" => {
+            let service = service.clone();
+            mcp_blocking(move || {
+                parse::<PublishIntentRequest>(arguments)
+                    .and_then(|request| service.publish_intent(request))
+                    .and_then(to_value)
+            })
+            .await
+        }
+        "claim_work" => {
+            let service = service.clone();
+            mcp_blocking(move || {
+                parse::<ClaimWorkRequest>(arguments)
+                    .and_then(|request| service.claim_work(request))
+                    .and_then(to_value)
+            })
+            .await
+        }
+        "query_work" => {
+            let service = service.clone();
+            mcp_blocking(move || {
+                parse::<WorkQuery>(arguments)
+                    .and_then(|request| service.query_work(request))
+                    .and_then(to_value)
+            })
+            .await
+        }
+        "check_conflicts" => {
+            let service = service.clone();
+            mcp_blocking(move || {
+                parse::<ConflictCheckRequest>(arguments)
+                    .and_then(|request| service.check_conflicts(request))
+                    .and_then(to_value)
+            })
+            .await
+        }
+        "publish_changeset" => {
+            let service = service.clone();
+            mcp_blocking(move || {
+                parse::<PublishChangeSetRequest>(arguments)
+                    .and_then(|request| service.publish_changeset(request))
+                    .and_then(to_value)
+            })
+            .await
+        }
+        "coordinate_with_agent" => {
+            let service = service.clone();
+            mcp_blocking(move || {
+                parse::<CoordinateRequest>(arguments)
+                    .and_then(|request| service.coordinate_with_agent(request))
+                    .and_then(to_value)
+            })
+            .await
+        }
+        "start_work" => {
+            let service = service.clone();
+            mcp_blocking(move || {
+                parse::<StartWorkToolRequest>(arguments)
+                    .and_then(|request| service.start_work(&request.agent_id, &request.intent_id))
+                    .and_then(to_value)
+            })
+            .await
+        }
         "run_verification" => match parse::<RunVerificationToolRequest>(arguments) {
-            Ok(request) => match trusted_check(service, &request.check) {
-                Ok(check) => service
-                    .validate_changeset(
-                        &request.changeset_id,
-                        ValidationRequest {
-                            command: check.command,
-                            worktree: None,
-                            timeout_seconds: check.timeout_seconds,
-                        },
-                    )
-                    .await
-                    .and_then(to_value),
-                Err(error) => Err(error),
-            },
+            Ok(request) => {
+                let check_service = service.clone();
+                let check_name = request.check.clone();
+                match mcp_blocking(move || trusted_check(&check_service, &check_name)).await {
+                    Ok(check) => service
+                        .validate_changeset(
+                            &request.changeset_id,
+                            ValidationRequest {
+                                command: check.command,
+                                worktree: None,
+                                timeout_seconds: check.timeout_seconds,
+                            },
+                        )
+                        .await
+                        .and_then(to_value),
+                    Err(error) => Err(error),
+                }
+            }
             Err(error) => Err(error),
         },
-        "resolve_conflict" => parse::<ResolveConflictToolRequest>(arguments)
-            .and_then(|request| {
-                let parties = service.conflict_party_agents(&request.conflict_id)?;
-                if !parties.iter().any(|party| party == &request.agent_id) {
-                    anyhow::bail!(
-                        "FORBIDDEN: over MCP a conflict may be resolved only by an agent whose intent is a party to it, after real agreement; coordinate with the parties via coordinate_with_agent or ask a human operator to resolve it from the CLI"
-                    );
-                }
-                service.resolve_conflict(
-                    &request.conflict_id,
-                    ResolveConflictRequest {
-                        agent_id: request.agent_id,
-                        resolution: request.resolution,
-                        rationale: request.rationale,
-                    },
-                )
+        "resolve_conflict" => {
+            let service = service.clone();
+            mcp_blocking(move || {
+                parse::<ResolveConflictToolRequest>(arguments)
+                    .and_then(|request| {
+                        let parties = service.conflict_party_agents(&request.conflict_id)?;
+                        if !parties.iter().any(|party| party == &request.agent_id) {
+                            anyhow::bail!(
+                                "FORBIDDEN: over MCP a conflict may be resolved only by an agent whose intent is a party to it, after real agreement; coordinate with the parties via coordinate_with_agent or ask a human operator to resolve it from the CLI"
+                            );
+                        }
+                        service.resolve_conflict(
+                            &request.conflict_id,
+                            ResolveConflictRequest {
+                                agent_id: request.agent_id,
+                                resolution: request.resolution,
+                                rationale: request.rationale,
+                            },
+                        )
+                    })
+                    .and_then(to_value)
             })
-            .and_then(to_value),
-        "accept_changeset" => parse::<AcceptChangeSetToolRequest>(arguments)
-            .and_then(|request| {
-                if request.allow_high_conflicts || request.override_reason.is_some() {
-                    anyhow::bail!(
-                        "FORBIDDEN: explicit HIGH-conflict overrides are CLI-only operator actions and are not accepted over MCP; ask a human operator to review the conflict and run the override from the CLI"
-                    );
-                }
-                service.accept_changeset(
-                    &request.changeset_id,
-                    AcceptRequest {
-                        git_ref: request.git_ref,
-                        allow_high_conflicts: false,
-                        override_reason: None,
-                    },
-                )
+            .await
+        }
+        "accept_changeset" => {
+            let service = service.clone();
+            mcp_blocking(move || {
+                parse::<AcceptChangeSetToolRequest>(arguments)
+                    .and_then(|request| {
+                        if request.allow_high_conflicts || request.override_reason.is_some() {
+                            anyhow::bail!(
+                                "FORBIDDEN: explicit HIGH-conflict overrides are CLI-only operator actions and are not accepted over MCP; ask a human operator to review the conflict and run the override from the CLI"
+                            );
+                        }
+                        service.accept_changeset(
+                            &request.changeset_id,
+                            AcceptRequest {
+                                git_ref: request.git_ref,
+                                allow_high_conflicts: false,
+                                override_reason: None,
+                            },
+                        )
+                    })
+                    .and_then(to_value)
             })
-            .and_then(to_value),
-        "discard_work" => parse::<DiscardWorkToolRequest>(arguments)
-            .and_then(|request| {
-                service.discard_work(&request.agent_id, &request.intent_id, &request.reason)
+            .await
+        }
+        "discard_work" => {
+            let service = service.clone();
+            mcp_blocking(move || {
+                parse::<DiscardWorkToolRequest>(arguments)
+                    .and_then(|request| {
+                        service.discard_work(&request.agent_id, &request.intent_id, &request.reason)
+                    })
+                    .and_then(to_value)
             })
-            .and_then(to_value),
-        "record_commit" => parse::<RecordCommitToolRequest>(arguments)
-            .and_then(|request| service.record_commit(&request.changeset_id, &request.git_ref))
-            .and_then(to_value),
+            .await
+        }
+        "record_commit" => {
+            let service = service.clone();
+            mcp_blocking(move || {
+                parse::<RecordCommitToolRequest>(arguments)
+                    .and_then(|request| {
+                        service.record_commit(&request.changeset_id, &request.git_ref)
+                    })
+                    .and_then(to_value)
+            })
+            .await
+        }
+        "list_agents" => {
+            let service = service.clone();
+            mcp_blocking(move || service.list_agents().and_then(to_value)).await
+        }
+        "get_intent" => {
+            let service = service.clone();
+            mcp_blocking(move || {
+                parse::<IdToolRequest>(arguments)
+                    .and_then(|request| service.show_intent(&request.id))
+                    .and_then(to_value)
+            })
+            .await
+        }
+        "get_changeset" => {
+            let service = service.clone();
+            mcp_blocking(move || {
+                parse::<IdToolRequest>(arguments)
+                    .and_then(|request| service.get_changeset(&request.id))
+                    .and_then(to_value)
+            })
+            .await
+        }
+        "status" => {
+            let service = service.clone();
+            mcp_blocking(move || service.status().and_then(to_value)).await
+        }
         _ => return Err((-32602, format!("unknown tool: {name}"))),
     };
     match outcome {
         Ok(value) => Ok(tool_result(value, false)),
         Err(error) => Ok(tool_result(json!({ "error": format!("{error:#}") }), true)),
     }
+}
+
+async fn mcp_blocking<T, F>(operation: F) -> anyhow::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|error| anyhow::anyhow!("blocking coordinator operation failed: {error}"))?
 }
 
 fn parse<T: serde::de::DeserializeOwned>(value: Value) -> anyhow::Result<T> {
@@ -401,6 +520,33 @@ pub fn tool_catalog() -> Vec<Value> {
             false,
         )),
         tool(
+            "get_changeset",
+            "Get a ChangeSet",
+            "Read one ChangeSet, including immutable accepted and integration commit provenance.",
+            json!({ "id": { "type": "string", "minLength": 1 } }),
+            &["id"],
+            true,
+            true,
+        ),
+        tool(
+            "get_intent",
+            "Get an intent",
+            "Read one intent with its agent and current open-conflict snapshot.",
+            json!({ "id": { "type": "string", "minLength": 1 } }),
+            &["id"],
+            true,
+            true,
+        ),
+        tool(
+            "list_agents",
+            "List coding agents",
+            "Read every registered coding agent in deterministic registration order.",
+            json!({}),
+            &[],
+            true,
+            true,
+        ),
+        tool(
             "publish_changeset",
             "Publish a provisional ChangeSet",
             "Capture implementation summary, affected files/symbols/contracts, dependencies, tests, decisions, provenance, and Git state.",
@@ -557,6 +703,15 @@ pub fn tool_catalog() -> Vec<Value> {
             false,
             false,
         ),
+        tool(
+            "status",
+            "Read coordinator status",
+            "Read one consistent snapshot of active agents, lifecycle groups, claims, conflicts, and ChangeSets.",
+            json!({}),
+            &[],
+            true,
+            true,
+        ),
     ]
 }
 
@@ -587,6 +742,9 @@ mod tests {
                 "claim_work",
                 "coordinate_with_agent",
                 "discard_work",
+                "get_changeset",
+                "get_intent",
+                "list_agents",
                 "publish_changeset",
                 "publish_intent",
                 "query_work",
@@ -595,37 +753,64 @@ mod tests {
                 "resolve_conflict",
                 "run_verification",
                 "start_work",
+                "status",
             ]
         );
+        let named = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("missing tool {name}"))
+        };
         assert!(tools.iter().all(|tool| tool.get("outputSchema").is_none()));
-        assert_eq!(tools[1]["annotations"]["readOnlyHint"], true);
-        assert_eq!(tools[1]["annotations"]["idempotentHint"], false);
         assert_eq!(
-            tools[1]["inputSchema"]["anyOf"].as_array().unwrap().len(),
+            named("check_conflicts")["annotations"]["readOnlyHint"],
+            true
+        );
+        assert_eq!(
+            named("check_conflicts")["annotations"]["idempotentHint"],
+            false
+        );
+        assert_eq!(
+            named("check_conflicts")["inputSchema"]["anyOf"]
+                .as_array()
+                .unwrap()
+                .len(),
             2
         );
         assert_eq!(
-            tools[5]["inputSchema"]["properties"]["tests"]["items"]["required"],
+            named("publish_changeset")["inputSchema"]["properties"]["tests"]["items"]["required"],
             json!(["command", "status"])
         );
         assert_eq!(
-            tools[5]["inputSchema"]["properties"]["decisions"]["items"]["required"],
+            named("publish_changeset")["inputSchema"]["properties"]["decisions"]["items"]["required"],
             json!(["title", "rationale"])
         );
-        assert_eq!(tools[4]["annotations"]["destructiveHint"], true);
-        assert_eq!(tools[7]["annotations"]["readOnlyHint"], true);
-        assert_eq!(tools[7]["annotations"]["idempotentHint"], true);
+        assert_eq!(
+            named("discard_work")["annotations"]["destructiveHint"],
+            true
+        );
+        for name in [
+            "get_changeset",
+            "get_intent",
+            "list_agents",
+            "query_work",
+            "status",
+        ] {
+            assert_eq!(named(name)["annotations"]["readOnlyHint"], true);
+            assert_eq!(named(name)["annotations"]["idempotentHint"], true);
+        }
         assert!(
-            tools[11]["inputSchema"]["properties"]
+            named("run_verification")["inputSchema"]["properties"]
                 .get("command")
                 .is_none()
         );
         assert_eq!(
-            tools[11]["inputSchema"]["properties"]["check"]["type"],
+            named("run_verification")["inputSchema"]["properties"]["check"]["type"],
             "string"
         );
         assert_eq!(
-            tools[11]["inputSchema"]["properties"]["check"]["pattern"],
+            named("run_verification")["inputSchema"]["properties"]["check"]["pattern"],
             "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
         );
     }

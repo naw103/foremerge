@@ -159,7 +159,9 @@ fn data_string<'a>(value: &'a Value, field: &str) -> &'a str {
 }
 
 fn database_from_doctor(cwd: &Path) -> PathBuf {
+    cli_success(cwd, None, ["init"]);
     let doctor = cli_success(cwd, None, ["doctor"]);
+    assert_eq!(doctor["data"]["database_ok"], true);
     PathBuf::from(data_string(&doctor, "database"))
 }
 
@@ -706,6 +708,246 @@ fn failed_validation_cannot_accept_or_change_the_git_target() {
 }
 
 #[test]
+fn stale_validation_attempt_is_retained_and_exclusion_rules_enable_a_safe_revision() {
+    let repo = create_repo();
+    let (agent_id, intent_id) =
+        create_active_test_work(&repo.root, "artifact-agent", "validation-artifact");
+    let first_changeset = publish_test_revision(
+        &repo.root,
+        &agent_id,
+        &intent_id,
+        "Candidate before artifact policy",
+    );
+
+    let stale = cli_failure(
+        &repo.root,
+        None,
+        vec![
+            "changeset".to_string(),
+            "validate".to_string(),
+            first_changeset.clone(),
+            "--timeout-seconds".to_string(),
+            "5".to_string(),
+            "--".to_string(),
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf coverage > coverage.log".to_string(),
+        ],
+    );
+    assert_eq!(stale["error"]["code"], "STALE_CHANGESET");
+    assert!(
+        stale["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("coverage.log")),
+        "stale diagnostic must name the generated path: {stale}"
+    );
+    assert!(
+        !stale["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("exclusion rules changed")
+    );
+    let attempts = cli_success(
+        &repo.root,
+        None,
+        ["changeset", "attempts", &first_changeset],
+    );
+    assert_eq!(attempts["data"].as_array().map(Vec::len), Some(1));
+    assert_eq!(attempts["data"][0]["passed"], true);
+    assert_eq!(attempts["data"][0]["authoritative"], false);
+    assert_eq!(
+        attempts["data"][0]["changed_files"],
+        json!(["coverage.log"])
+    );
+    assert!(
+        attempts["data"][0]["stale_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("fingerprint changed"))
+    );
+    let database = database_from_doctor(&repo.root);
+    let connection = Connection::open(database).expect("open coordination database");
+    let attempt_counts: (i64, i64, i64) = connection
+        .query_row(
+            "SELECT
+             (SELECT COUNT(*) FROM validation_attempts WHERE changeset_id = ?1),
+             (SELECT COUNT(*) FROM validation_attempts WHERE changeset_id = ?1 AND authoritative = 1),
+             (SELECT COUNT(*) FROM validations WHERE changeset_id = ?1)",
+            [&first_changeset],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("inspect validation projections");
+    assert_eq!(attempt_counts, (1, 0, 0));
+    let attempt_id = attempts["data"][0]["id"]
+        .as_str()
+        .expect("validation attempt id");
+    assert!(
+        connection
+            .execute(
+                "UPDATE validation_attempts SET authoritative = 1 WHERE id = ?1",
+                [attempt_id],
+            )
+            .is_err(),
+        "validation attempt rows must be immutable"
+    );
+    let rejected = cli_failure(&repo.root, None, ["changeset", "accept", &first_changeset]);
+    assert_ne!(rejected["error"]["code"], "INTERNAL_ERROR");
+
+    let policy = cli_success(
+        &repo.root,
+        None,
+        ["validation-exclusions", "set", "--path", "coverage.log"],
+    );
+    assert_eq!(policy["data"]["ruleset"]["paths"], json!(["coverage.log"]));
+    assert_eq!(policy["data"]["mcp_mutation_allowed"], false);
+    let second_changeset = publish_test_revision(
+        &repo.root,
+        &agent_id,
+        &intent_id,
+        "Candidate with digest-bound artifact policy",
+    );
+    let validation = cli_success(
+        &repo.root,
+        None,
+        vec![
+            "changeset".to_string(),
+            "validate".to_string(),
+            second_changeset.clone(),
+            "--timeout-seconds".to_string(),
+            "5".to_string(),
+            "--".to_string(),
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf newer-coverage > coverage.log".to_string(),
+        ],
+    );
+    assert_eq!(validation["data"]["passed"], true);
+    let authoritative = cli_success(
+        &repo.root,
+        None,
+        ["changeset", "attempts", &second_changeset],
+    );
+    assert_eq!(authoritative["data"][0]["authoritative"], true);
+    assert_eq!(
+        authoritative["data"][0]["excluded_paths"],
+        json!(["coverage.log"])
+    );
+    assert!(
+        authoritative["data"][0]["exclusion_ruleset_digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:"))
+    );
+
+    fs::remove_file(repo.root.join("coverage.log")).expect("remove generated artifact");
+    let accepted = cli_success(&repo.root, None, ["changeset", "accept", &second_changeset]);
+    assert_eq!(accepted["data"]["status"], "ACCEPTED");
+}
+
+#[cfg(unix)]
+#[test]
+fn final_validation_snapshot_does_not_hold_the_coordination_write_lock() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = create_repo();
+    let (agent_id, intent_id) =
+        create_active_test_work(&repo.root, "snapshot-lock-agent", "snapshot-lock");
+    let changeset_id = publish_test_revision(
+        &repo.root,
+        &agent_id,
+        &intent_id,
+        "Candidate whose final snapshot is deliberately paused",
+    );
+
+    let started = repo.temp.path().join("final-snapshot-started");
+    let release = repo.temp.path().join("final-snapshot-release");
+    let fsmonitor_hook = repo.temp.path().join("paused-fsmonitor-hook.sh");
+    fs::write(
+        &fsmonitor_hook,
+        format!(
+            "#!/bin/sh\nprintf started > '{}'\nwhile [ ! -f '{}' ]; do sleep 0.01; done\nexit 1\n",
+            started.display(),
+            release.display()
+        ),
+    )
+    .expect("write paused fsmonitor hook");
+    let mut permissions = fs::metadata(&fsmonitor_hook)
+        .expect("read fsmonitor hook permissions")
+        .permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&fsmonitor_hook, permissions).expect("make fsmonitor hook executable");
+
+    let mut validation = cli_command(&repo.root, None);
+    validation
+        .args(["changeset", "validate"])
+        .arg(&changeset_id)
+        .args(["--timeout-seconds", "20", "--", "sh", "-c"])
+        .arg("git config core.fsmonitor \"$1\"; printf changed >> README.md")
+        .arg("foremerge-final-snapshot")
+        .arg(&fsmonitor_hook)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let validation = validation.spawn().expect("spawn paused validation");
+    wait_for_sentinel(&started);
+
+    let mut registration = cli_command(&repo.root, None);
+    registration
+        .args(["agent", "register", "--name", "snapshot-concurrent-agent"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut registration = registration.spawn().expect("spawn concurrent registration");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if registration
+            .try_wait()
+            .expect("inspect concurrent registration")
+            .is_some()
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            fs::write(&release, b"release").expect("release final snapshot after failure");
+            let _ = registration.kill();
+            let _ = registration.wait();
+            let _ = validation.wait_with_output();
+            panic!("concurrent mutation was blocked while the final Git snapshot was running");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let registration_output = registration
+        .wait_with_output()
+        .expect("collect concurrent registration");
+    assert!(
+        registration_output.status.success(),
+        "concurrent registration failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&registration_output.stdout),
+        String::from_utf8_lossy(&registration_output.stderr)
+    );
+
+    fs::write(&release, b"release").expect("release final snapshot");
+    let validation_output = validation
+        .wait_with_output()
+        .expect("collect paused validation");
+    assert!(!validation_output.status.success());
+    assert_eq!(
+        parse_cli_json(&validation_output)["error"]["code"],
+        "STALE_CHANGESET"
+    );
+}
+
+#[test]
+fn doctor_outside_initialized_state_is_strictly_read_only() {
+    let repo = create_repo();
+    let runtime = repo.root.join(".git").join("foremerge");
+    assert!(!runtime.exists());
+
+    let doctor = cli_success(&repo.root, None, ["doctor"]);
+    assert_eq!(doctor["data"]["database_ok"], false);
+    assert_eq!(doctor["data"]["event_chain_ok"], Value::Null);
+    assert_eq!(doctor["data"]["events_verified"], 0);
+    assert_eq!(doctor["data"]["next_step"], "foremerge init");
+    assert!(!runtime.exists(), "doctor must not create runtime state");
+}
+
+#[test]
 fn publishing_from_claimed_implicitly_enters_provisional_without_panicking() {
     let repo = create_repo();
     let agent = cli_success(
@@ -1022,6 +1264,9 @@ fn real_mcp_stdio_initializes_lists_tools_and_calls_one() {
             "claim_work",
             "coordinate_with_agent",
             "discard_work",
+            "get_changeset",
+            "get_intent",
+            "list_agents",
             "publish_changeset",
             "publish_intent",
             "query_work",
@@ -1030,6 +1275,7 @@ fn real_mcp_stdio_initializes_lists_tools_and_calls_one() {
             "resolve_conflict",
             "run_verification",
             "start_work",
+            "status",
         ]
     );
     assert_eq!(responses[2]["id"], 3);
@@ -1356,6 +1602,17 @@ async fn mcp_exposes_the_complete_work_lifecycle_with_named_verification() {
     .await;
     assert_eq!(discarded["status"], "DISCARDED");
     assert_ne!(replacement_id, extension_id);
+
+    let agents = mcp_tool_call(&service, 18, "list_agents", json!({})).await;
+    assert_eq!(agents.as_array().map(Vec::len), Some(2));
+    let shown_intent =
+        mcp_tool_call(&service, 19, "get_intent", json!({ "id": extension_id })).await;
+    assert_eq!(shown_intent["intent"]["id"], extension_id);
+    let shown_changeset =
+        mcp_tool_call(&service, 20, "get_changeset", json!({ "id": changeset_id })).await;
+    assert_eq!(shown_changeset["status"], "COMMITTED");
+    let status = mcp_tool_call(&service, 21, "status", json!({})).await;
+    assert_eq!(status["agents"].as_array().map(Vec::len), Some(2));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1369,8 +1626,17 @@ async fn live_authenticated_json_api_persists_state_across_daemon_restart() {
     let first_daemon = spawn_daemon(temp.path(), &database, first_address);
     let initial_health = wait_for_health(&client, &first_url).await;
     assert_eq!(initial_health["ok"], true);
-    assert_eq!(initial_health["data"]["status"], "ok");
-    assert_eq!(initial_health["data"]["counts"]["agents"], 0);
+    assert_eq!(initial_health["data"]["status"], "alive");
+    assert!(initial_health["data"].get("counts").is_none());
+    let readiness: Value = client
+        .get(format!("{first_url}/readyz"))
+        .send()
+        .await
+        .expect("send readiness request")
+        .json()
+        .await
+        .expect("decode readiness response");
+    assert_eq!(readiness["data"]["status"], "ready");
 
     let unauthorized = client
         .post(format!("{first_url}/v1/agents/register"))
@@ -1410,8 +1676,32 @@ async fn live_authenticated_json_api_persists_state_across_daemon_restart() {
     let second_url = format!("http://{second_address}");
     let second_daemon = spawn_daemon(temp.path(), &database, second_address);
     let restarted_health = wait_for_health(&client, &second_url).await;
-    assert_eq!(restarted_health["data"]["counts"]["agents"], 1);
-    assert_eq!(restarted_health["data"]["event_chain_ok"], true);
+    assert_eq!(restarted_health["data"]["status"], "alive");
+    let agents: Value = client
+        .get(format!("{second_url}/v1/agents"))
+        .bearer_auth(token.trim())
+        .send()
+        .await
+        .expect("list agents after restart")
+        .error_for_status()
+        .expect("agent list status")
+        .json()
+        .await
+        .expect("agent list JSON");
+    assert_eq!(agents["data"].as_array().map(Vec::len), Some(1));
+    assert_eq!(agents["data"][0]["id"], agent_id);
+    let audit: Value = client
+        .get(format!("{second_url}/v1/audit/event-chain?page_size=1"))
+        .bearer_auth(token.trim())
+        .send()
+        .await
+        .expect("audit event chain after restart")
+        .error_for_status()
+        .expect("audit status")
+        .json()
+        .await
+        .expect("audit JSON");
+    assert_eq!(audit["data"]["valid"], true);
 
     let graph: Value = client
         .get(format!("{second_url}/v1/graph"))
@@ -1434,6 +1724,77 @@ async fn live_authenticated_json_api_persists_state_across_daemon_restart() {
         "restarted daemon must expose the agent persisted by the first process"
     );
     second_daemon.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_exposes_core_read_parity_with_cli_and_mcp() {
+    let repo = create_repo();
+    let database = database_from_doctor(&repo.root);
+    let (agent_id, intent_id) =
+        create_active_test_work(&repo.root, "http-read-agent", "http-read-parity");
+    let changeset_id = publish_test_revision(
+        &repo.root,
+        &agent_id,
+        &intent_id,
+        "HTTP read parity candidate",
+    );
+    let token =
+        fs::read_to_string(repo.root.join(".git/foremerge/token")).expect("read initialized token");
+    let address = unused_loopback_address();
+    let base_url = format!("http://{address}");
+    let daemon = spawn_daemon(&repo.root, &database, address);
+    let client = reqwest::Client::new();
+    wait_for_health(&client, &base_url).await;
+
+    let agents: Value = client
+        .get(format!("{base_url}/v1/agents"))
+        .bearer_auth(token.trim())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(agents["data"][0]["id"], agent_id);
+    let intent: Value = client
+        .get(format!("{base_url}/v1/intents/{intent_id}"))
+        .bearer_auth(token.trim())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(intent["data"]["intent"]["id"], intent_id);
+    let changeset: Value = client
+        .get(format!("{base_url}/v1/changesets/{changeset_id}"))
+        .bearer_auth(token.trim())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(changeset["data"]["id"], changeset_id);
+    let status: Value = client
+        .get(format!("{base_url}/v1/status"))
+        .bearer_auth(token.trim())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["data"]["agents"][0]["id"], agent_id);
+    daemon.stop();
 }
 
 #[test]
@@ -2924,6 +3285,63 @@ fn validation_timeout_kills_descendants_in_the_validation_process_group() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn validation_timeout_kills_direct_child_on_windows() {
+    let repo = create_repo();
+    let (agent_id, intent_id) =
+        create_active_test_work(&repo.root, "windows-timeout-agent", "windows-timeout");
+    let changeset_id = publish_test_revision(
+        &repo.root,
+        &agent_id,
+        &intent_id,
+        "Validation with a long-lived Windows child",
+    );
+    let pid_file = repo.temp.path().join("validation-child.pid");
+    let validation = cli_success(
+        &repo.root,
+        None,
+        vec![
+            "changeset".to_string(),
+            "validate".to_string(),
+            changeset_id,
+            "--timeout-seconds".to_string(),
+            "1".to_string(),
+            "--".to_string(),
+            "powershell.exe".to_string(),
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            "$PID | Set-Content -NoNewline -LiteralPath $args[0]; Start-Sleep -Seconds 60"
+                .to_string(),
+            pid_file.to_string_lossy().into_owned(),
+        ],
+    );
+    assert_eq!(validation["data"]["passed"], false);
+    assert!(
+        validation["data"]["stderr"]
+            .as_str()
+            .expect("validation stderr")
+            .contains("timed out after 1 seconds")
+    );
+    let pid = fs::read_to_string(&pid_file).expect("validation child recorded its pid");
+    let output = Command::new("tasklist")
+        .args([
+            "/FI",
+            &format!("PID eq {}", pid.trim()),
+            "/FO",
+            "CSV",
+            "/NH",
+        ])
+        .output()
+        .expect("query Windows process list");
+    assert!(output.status.success());
+    let listing = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        listing.contains("No tasks are running") || !listing.contains(pid.trim()),
+        "validation child survived timeout: {listing}"
+    );
+}
+
 #[test]
 fn validation_output_is_bounded_to_the_latest_sixteen_kibibytes_per_stream() {
     let repo = create_repo();
@@ -3855,13 +4273,10 @@ fn doctor_gates_readiness_on_unconfigured_clients_and_keeps_a_typed_envelope() {
     assert_eq!(gated["data"]["clients"][0]["skill_installed"], false);
     assert_eq!(gated["data"]["clients"][0]["skill_current"], false);
     assert_eq!(gated["data"]["clients"][0]["ready"], false);
-    let client_next_step = gated["data"]["clients"][0]["next_step"]
-        .as_str()
-        .expect("not-ready client publishes a next step");
     assert_eq!(
         gated["data"]["next_step"].as_str(),
-        Some(client_next_step),
-        "the client remediation must override the generic next step: {gated}"
+        Some("foremerge init"),
+        "store initialization must precede client remediation: {gated}"
     );
 }
 

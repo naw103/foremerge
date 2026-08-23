@@ -11,8 +11,44 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  test:
+    name: Test ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Select stable Rust
+        run: rustup override set stable
+
+      - name: Test portable library and binaries
+        run: cargo test --workspace --lib --bins --all-features
+
+      - name: Execute benchmark corpus
+        run: cargo test --test benchmark_scenarios -- --nocapture
+
+      - name: Test complete integration suite on Unix
+        if: runner.os != 'Windows'
+        run: cargo test --test e2e
+
+      - name: Test Windows validation timeout cleanup
+        if: runner.os == 'Windows'
+        run: cargo test --test e2e validation_timeout_kills_direct_child_on_windows -- --exact --nocapture
+
   build:
     name: Build ${{ matrix.target }}
+    needs: test
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:

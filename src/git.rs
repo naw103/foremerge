@@ -1,3 +1,4 @@
+use crate::exclusions;
 use anyhow::{Context, Result, bail};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -35,8 +36,18 @@ pub struct GitSnapshot {
     pub tree: Option<String>,
     pub dirty: bool,
     pub changed_files: Vec<String>,
+    pub excluded_paths: Vec<String>,
+    pub exclusion_ruleset_digest: String,
     pub diff_hash: String,
     pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymbolInference {
+    pub symbols: Vec<String>,
+    pub truncated: bool,
+    pub captured_bytes: usize,
+    pub total_bytes: u64,
 }
 
 pub fn available() -> bool {
@@ -89,6 +100,7 @@ fn absolutize(base: &Path, path: &Path) -> PathBuf {
 pub fn snapshot(worktree: impl AsRef<Path>) -> Result<GitSnapshot> {
     let worktree = worktree.as_ref();
     let repo = discover(worktree)?;
+    let exclusions = exclusions::load_at(&exclusions::config_path(&repo.common_dir))?;
     let status = git_output_bytes(
         worktree,
         &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
@@ -99,6 +111,7 @@ pub fn snapshot(worktree: impl AsRef<Path>) -> Result<GitSnapshot> {
         .collect::<Vec<_>>();
     let mut changed_files = BTreeSet::new();
     let mut untracked_files = BTreeSet::new();
+    let mut excluded_paths = BTreeSet::new();
     let mut index = 0;
     while index < fields.len() {
         let entry = fields[index];
@@ -108,7 +121,9 @@ pub fn snapshot(worktree: impl AsRef<Path>) -> Result<GitSnapshot> {
         }
         let status_code = &entry[..2];
         let path = String::from_utf8_lossy(&entry[3..]).into_owned();
-        if !path.is_empty() {
+        if !path.is_empty() && status_code == b"??" && exclusions.excludes(&path) {
+            excluded_paths.insert(path);
+        } else if !path.is_empty() {
             changed_files.insert(path.clone());
             if status_code == b"??" {
                 untracked_files.insert(path);
@@ -181,13 +196,14 @@ pub fn snapshot(worktree: impl AsRef<Path>) -> Result<GitSnapshot> {
     let diff_hash = format!("{:x}", digest.finalize());
     let tree = git_output(worktree, &["rev-parse", "HEAD^{tree}"]).ok();
     let fingerprint_material = format!(
-        "{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}",
         repo.common_dir.display(),
         repo.root.display(),
         repo.head.as_deref().unwrap_or("UNBORN"),
         tree.as_deref().unwrap_or("NO_TREE"),
         diff_hash,
-        changed_files.iter().cloned().collect::<Vec<_>>().join("\0")
+        changed_files.iter().cloned().collect::<Vec<_>>().join("\0"),
+        exclusions.digest,
     );
     let fingerprint = format!(
         "sha256:{:x}",
@@ -199,8 +215,10 @@ pub fn snapshot(worktree: impl AsRef<Path>) -> Result<GitSnapshot> {
         branch: repo.branch,
         head: repo.head,
         tree,
-        dirty: !fields.is_empty(),
+        dirty: !changed_files.is_empty(),
         changed_files: changed_files.into_iter().collect(),
+        excluded_paths: excluded_paths.into_iter().collect(),
+        exclusion_ruleset_digest: exclusions.digest,
         diff_hash,
         fingerprint,
     })
@@ -303,9 +321,18 @@ fn open_untracked_file(path: &Path) -> Result<File> {
 }
 
 pub fn infer_symbols(worktree: impl AsRef<Path>) -> Result<Vec<String>> {
+    Ok(infer_symbols_report(worktree)?.symbols)
+}
+
+pub fn infer_symbols_report(worktree: impl AsRef<Path>) -> Result<SymbolInference> {
     let worktree = worktree.as_ref();
     if discover(worktree)?.head.is_none() {
-        return Ok(Vec::new());
+        return Ok(SymbolInference {
+            symbols: Vec::new(),
+            truncated: false,
+            captured_bytes: 0,
+            total_bytes: 0,
+        });
     }
     let diff = git_output_bytes_limited(
         worktree,
@@ -317,9 +344,9 @@ pub fn infer_symbols(worktree: impl AsRef<Path>) -> Result<Vec<String>> {
             "HEAD",
         ],
     )?;
-    let diff = String::from_utf8_lossy(&diff);
+    let diff_text = String::from_utf8_lossy(&diff.bytes);
     let mut symbols = BTreeSet::new();
-    for line in diff.lines() {
+    for line in diff_text.lines() {
         if !(line.starts_with('+') || line.starts_with('-'))
             || line.starts_with("+++")
             || line.starts_with("---")
@@ -332,7 +359,12 @@ pub fn infer_symbols(worktree: impl AsRef<Path>) -> Result<Vec<String>> {
             }
         }
     }
-    Ok(symbols.into_iter().collect())
+    Ok(SymbolInference {
+        symbols: symbols.into_iter().collect(),
+        truncated: diff.truncated,
+        captured_bytes: diff.bytes.len(),
+        total_bytes: diff.total_bytes,
+    })
 }
 
 pub fn verify_ref(worktree: impl AsRef<Path>, git_ref: &str) -> Result<String> {
@@ -496,7 +528,13 @@ fn hash_git_output(
     }
 }
 
-fn git_output_bytes_limited(cwd: &Path, args: &[&str]) -> Result<Vec<u8>> {
+struct LimitedOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+    total_bytes: u64,
+}
+
+fn git_output_bytes_limited(cwd: &Path, args: &[&str]) -> Result<LimitedOutput> {
     const MAX_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
     let mut child = Command::new("git")
         .arg("-C")
@@ -511,6 +549,7 @@ fn git_output_bytes_limited(cwd: &Path, args: &[&str]) -> Result<Vec<u8>> {
         .take()
         .ok_or_else(|| anyhow::anyhow!("capture git stdout"))?;
     let mut captured = Vec::new();
+    let mut total_bytes = 0_u64;
     let mut buffer = [0_u8; 64 * 1024];
     loop {
         let read = stdout
@@ -519,6 +558,7 @@ fn git_output_bytes_limited(cwd: &Path, args: &[&str]) -> Result<Vec<u8>> {
         if read == 0 {
             break;
         }
+        total_bytes = total_bytes.saturating_add(read as u64);
         let remaining = MAX_CAPTURE_BYTES.saturating_sub(captured.len());
         captured.extend_from_slice(&buffer[..read.min(remaining)]);
     }
@@ -526,7 +566,11 @@ fn git_output_bytes_limited(cwd: &Path, args: &[&str]) -> Result<Vec<u8>> {
         .wait()
         .with_context(|| format!("wait for git {}", args.join(" ")))?;
     if status.success() {
-        Ok(captured)
+        Ok(LimitedOutput {
+            truncated: total_bytes > captured.len() as u64,
+            total_bytes,
+            bytes: captured,
+        })
     } else {
         bail!("git {} failed with status {status}", args.join(" "));
     }
@@ -621,5 +665,59 @@ mod tests {
 
         let error = snapshot(repo.path()).unwrap_err();
         assert!(format!("{error:#}").starts_with("RESOURCE_LIMIT:"));
+    }
+
+    #[test]
+    fn validation_exclusions_apply_only_to_untracked_paths_and_bind_the_digest() {
+        let repo = TempDir::new().unwrap();
+        git(repo.path(), &["init", "-q"]);
+        git(repo.path(), &["config", "user.email", "test@example.com"]);
+        git(repo.path(), &["config", "user.name", "Test"]);
+        fs::write(repo.path().join("tracked.txt"), "one\n").unwrap();
+        git(repo.path(), &["add", "tracked.txt"]);
+        git(repo.path(), &["commit", "-qm", "initial"]);
+
+        crate::exclusions::replace(repo.path(), vec!["generated/".into()]).unwrap();
+        let clean_with_rules = snapshot(repo.path()).unwrap();
+        fs::create_dir(repo.path().join("generated")).unwrap();
+        fs::write(repo.path().join("generated/coverage.log"), "first\n").unwrap();
+        let excluded = snapshot(repo.path()).unwrap();
+        assert_eq!(clean_with_rules.fingerprint, excluded.fingerprint);
+        assert!(!excluded.dirty);
+        assert_eq!(excluded.excluded_paths, vec!["generated/coverage.log"]);
+        fs::write(repo.path().join("generated/coverage.log"), "second\n").unwrap();
+        assert_eq!(
+            excluded.fingerprint,
+            snapshot(repo.path()).unwrap().fingerprint
+        );
+
+        fs::write(repo.path().join("tracked.txt"), "changed\n").unwrap();
+        let tracked = snapshot(repo.path()).unwrap();
+        assert!(tracked.dirty);
+        assert!(tracked.changed_files.contains(&"tracked.txt".to_string()));
+        assert_ne!(tracked.fingerprint, excluded.fingerprint);
+
+        fs::write(repo.path().join("tracked.txt"), "one\n").unwrap();
+        crate::exclusions::replace(repo.path(), vec!["other-generated/".into()]).unwrap();
+        fs::remove_dir_all(repo.path().join("generated")).unwrap();
+        let different_rules = snapshot(repo.path()).unwrap();
+        assert_ne!(clean_with_rules.fingerprint, different_rules.fingerprint);
+    }
+
+    #[test]
+    fn symbol_inference_reports_truncation() {
+        let repo = TempDir::new().unwrap();
+        git(repo.path(), &["init", "-q"]);
+        git(repo.path(), &["config", "user.email", "test@example.com"]);
+        git(repo.path(), &["config", "user.name", "Test"]);
+        git(repo.path(), &["commit", "--allow-empty", "-qm", "initial"]);
+        let large = format!("fn CapturedSymbol() {{}}\n{}", "x".repeat(5 * 1024 * 1024));
+        fs::write(repo.path().join("large.rs"), large).unwrap();
+        git(repo.path(), &["add", "large.rs"]);
+
+        let report = infer_symbols_report(repo.path()).unwrap();
+        assert!(report.truncated);
+        assert!(report.total_bytes > report.captured_bytes as u64);
+        assert!(report.symbols.contains(&"CapturedSymbol".to_string()));
     }
 }

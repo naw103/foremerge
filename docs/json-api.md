@@ -42,8 +42,9 @@ responses.
 
 The daemon is local-first, not a hardened public multi-tenant service; the CLI
 refuses non-loopback bind addresses. When a daemon token is configured, every
-`/v1` route requires `Authorization: Bearer <token>`; `/healthz` remains public.
-There is no application-level rate limiter.
+`/v1` route requires `Authorization: Bearer <token>`; `/healthz` and `/readyz`
+remain public and expose no coordination data. Bearer credentials are compared
+through fixed-length digests. There is no application-level rate limiter.
 
 ## Route summary
 
@@ -53,10 +54,18 @@ The machine-readable form of this contract is
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/healthz` | Process health and version |
+| `GET` | `/readyz` | Bounded, non-waiting store readiness |
+| `GET` | `/v1/audit/event-chain` | Paged verification of a stable event-log prefix |
 | `GET` | `/v1/events` | Read append-only events |
 | `GET` | `/v1/graph` | Read the semantic graph snapshot |
+| `GET` | `/v1/status` | Read one consistent coordinator status snapshot |
 | `GET` | `/v1/work` | Query intents with agents, claims, and conflicts |
+| `GET` | `/v1/agents` | List registered agents |
+| `GET` | `/v1/intents/{id}` | Read one intent with agent and conflicts |
 | `GET` | `/v1/conflicts` | List persisted conflicts |
+| `GET` | `/v1/conflicts/{id}/detections` | Read immutable detection occurrences |
+| `GET` | `/v1/changesets/{id}` | Read one ChangeSet |
+| `GET` | `/v1/changesets/{id}/validation-attempts` | Read all validation attempts |
 | `GET` | `/v1/agents/{id}/inbox` | Read coordination messages for an agent |
 | `POST` | `/v1/agents/register` | Register an agent session |
 | `POST` | `/v1/intents` | Publish an intent and detect conflicts |
@@ -77,9 +86,27 @@ The machine-readable form of this contract is
 fm_curl "$FOREMERGE_URL/healthz" | jq .
 ```
 
-Health confirms that the HTTP process is serving. Use `foremerge doctor` for a
-broader local check of Git, database opening, and transport configuration.
-`/healthz` is the current surface that verifies the retained event hash chain.
+Health confirms only that the HTTP process is serving and deliberately performs
+no SQLite, filesystem, Git, count, or event-chain work. Readiness is a separate
+non-waiting store probe:
+
+```bash
+fm_curl "$FOREMERGE_URL/readyz" | jq .
+```
+
+A busy store returns `503 NOT_READY` immediately instead of making a monitoring
+request queue behind coordination work. Full event-chain verification is an
+authenticated audit operation. It fixes a stable maximum sequence, opens a
+separate read-only SQLite connection, and verifies in bounded pages:
+
+```bash
+fm_curl --get "$FOREMERGE_URL/v1/audit/event-chain" \
+  --data-urlencode 'page_size=1000' | jq .
+```
+
+The response reports `valid`, `events_verified`, `last_seq`, and `head_hash`.
+`foremerge events audit` provides the same operator surface, while `foremerge
+doctor` includes the audit in its broader read-only Git/database/client report.
 
 ## Register an agent
 
@@ -177,6 +204,16 @@ All filters are optional. The default limit is 50 and the service clamps it to
 claims, latest ChangeSet ID and object, reverse dependent intent IDs, and number
 of open or coordinating conflicts.
 
+Core reads are intentionally available over HTTP, MCP, and CLI with the same
+domain shapes:
+
+```bash
+fm_curl "$FOREMERGE_URL/v1/agents" | jq .
+fm_curl "$FOREMERGE_URL/v1/intents/int_REPLACE_ME" | jq .
+fm_curl "$FOREMERGE_URL/v1/changesets/chg_REPLACE_ME" | jq .
+fm_curl "$FOREMERGE_URL/v1/status" | jq .
+```
+
 ## Check conflicts
 
 Check an existing intent:
@@ -218,6 +255,18 @@ fm_curl "$FOREMERGE_URL/v1/conflicts" | jq .
 Use `?status=OPEN`, `COORDINATING`, `RESOLVED`, `OVERRIDDEN`, or `DISMISSED` to
 filter the list. `DISMISSED` means one of the linked intents was explicitly
 discarded; the original evidence and event history remain.
+
+A `cfl_*` row is a stable lifecycle identity. Each observation is retained
+separately, so redetection cannot rewrite evidence attached to a resolution or
+silently reopen `RESOLVED`, `OVERRIDDEN`, or `DISMISSED` work:
+
+```bash
+fm_curl "$FOREMERGE_URL/v1/conflicts/cfl_REPLACE_ME/detections" | jq .
+```
+
+The first observation emits `conflict.detected`; later observations emit
+`conflict.redetected` and return `previously_settled: true` when the identity is
+already terminal.
 
 Resolve a conflict by recording both the agreed outcome and its rationale:
 
@@ -313,9 +362,28 @@ fm_curl \
   }')" | jq .
 ```
 
-The result includes pass/fail, exit code, stdout, stderr, duration, fingerprint,
-and run time. Stdout and stderr are each limited to their final 16 KiB. Treat
-captured output as potentially sensitive.
+The immediate result includes pass/fail, exit code, stdout, stderr, duration,
+fingerprint, and run time. Stdout and stderr are each limited to their final
+16 KiB. Treat captured output as potentially sensitive.
+
+Every completed command is immutable audit evidence, including a passing run
+whose final snapshot became stale before it could update lifecycle state:
+
+```bash
+fm_curl \
+  "$FOREMERGE_URL/v1/changesets/chg_REPLACE_ME/validation-attempts" | jq .
+```
+
+An attempt records `authoritative`, `stale_reason`, expected and observed
+fingerprints, changed paths, excluded untracked paths, and the exclusion-ruleset
+digest. Acceptance consults only an authoritative passing validation for the
+current fingerprint. A stale error names newly changed and removed paths.
+
+Checks that intentionally create generated output can use operator-owned,
+digest-bound exclusions configured only through `foremerge
+validation-exclusions`. See [ADR 0001](adr/0001-validation-exclusion-rules.md).
+Excluded paths are untracked-only and must still be removed before acceptance's
+strict clean-worktree check.
 
 ## Accept a ChangeSet
 
@@ -422,6 +490,7 @@ The current status mapping is:
 | `NOT_FOUND` | `404` |
 | `METHOD_NOT_ALLOWED` | `405` |
 | `STATE_RACE` | `409` |
+| `NOT_READY` | `503` |
 | `INVALID_TRANSITION`, `CHECK_FAILED`, `STALE_CHANGESET`, `BLOCKING_CONFLICT`, `UNSATISFIED_DEPENDENCY`, `TARGET_DIVERGED` | `422` |
 | unclassified failure | `500` |
 
@@ -429,3 +498,7 @@ Before retrying a mutation after a transport failure, query current state. The
 MVP API does not promise general HTTP idempotency keys. Generated IDs and the
 append-only event log make duplicate semantic actions visible, but clients
 should not assume a repeated POST is deduplicated.
+
+On SIGINT or SIGTERM the daemon stops accepting new connections and gives
+in-flight operations, including validation, up to 30 seconds to finish. After
+that bound it terminates remaining requests and their validation process trees.

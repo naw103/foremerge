@@ -11,7 +11,7 @@ above Git. Agents keep isolated worktrees while sharing intent, semantic
 claims, dependencies, provisional ChangeSets, decisions, validation, and
 provenance.
 
-> **Status:** Foremerge `0.2.0` is a pre-1.0, local-first MVP. The CLI, JSON API,
+> **Status:** Foremerge `0.3.0` is a pre-1.0, local-first MVP. The CLI, JSON API,
 > MCP server, SQLite store, deterministic conflict detector, and
 > verification-gated lifecycle are implemented. Public schemas may still
 > change. Shared multi-machine mode and published benchmark results do not yet
@@ -302,7 +302,22 @@ foremerge changeset commit "$CHANGESET_ID" --git-ref main
 Agent-reported `--reported-test COMMAND=STATUS` values are provenance only.
 They do not satisfy acceptance. Foremerge-owned validation records the command
 argument vector, exit status, output, duration, and candidate fingerprint. Any
-detected change after validation makes that evidence stale.
+detected change after validation makes that attempt non-authoritative, but its
+output and changed-path diagnostic remain queryable with `changeset attempts`.
+
+For trusted checks that generate disposable untracked output, an operator may
+set exact or directory-prefix rules without changing tracked files:
+
+```sh
+foremerge validation-exclusions set \
+  --path coverage.log \
+  --path target/validation-reports/
+```
+
+The normalized policy digest is part of the candidate fingerprint, tracked
+changes are never excludable, MCP cannot change the policy, and generated files
+must still be removed before acceptance. See
+[ADR 0001](docs/adr/0001-validation-exclusion-rules.md).
 
 Acceptance also requires a clean worktree and no unresolved `HIGH` conflict,
 unless the caller deliberately uses the visible `--allow-high-conflicts`
@@ -333,6 +348,10 @@ adapters over the same database.
 | `accept_changeset` | Apply final conflict, dependency, validation, and Git gates |
 | `record_commit` | Record the actual Git integration commit |
 | `discard_work` | Preserve abandoned work while releasing claims and blockers |
+| `list_agents` | Read registered agent provenance |
+| `get_intent` | Read one intent and current conflict snapshot |
+| `get_changeset` | Read one ChangeSet and Git/provenance state |
+| `status` | Read one consistent coordinator status snapshot |
 
 Start from the valid minimal config in
 [`examples/mcp-config.json`](examples/mcp-config.json). It assumes the client
@@ -378,10 +397,11 @@ curl --fail --silent --show-error \
   jq .
 ```
 
-Do not print, commit, or share the token. `/healthz` is public; every `/v1`
-route requires the token unless the daemon was deliberately started with
-`--no-auth` for a trusted local test. The MVP refuses non-loopback binds and is
-not a hardened multi-tenant service.
+Do not print, commit, or share the token. `/healthz` is database-free process
+liveness and `/readyz` is a bounded non-waiting store probe; both are public.
+Every `/v1` route—including paged event-chain audit—requires the token unless
+the daemon was deliberately started with `--no-auth` for a trusted local test.
+The MVP refuses non-loopback binds and is not a hardened multi-tenant service.
 
 The CLI escape hatch `foremerge request` reads local auth automatically. A
 runnable curl walkthrough is in
@@ -401,7 +421,8 @@ reference is [JSON API](docs/json-api.md).
   signature, remote attestation, or external checkpoint.
 - Local SQLite is not shared-mode consensus, and the loopback bearer token is
   not a public deployment security model.
-- There are benchmark fixtures and a benchmark plan, but no published
+- There are executable benchmark fixtures, a reproducible query harness, and a
+  benchmark plan, but no published
   coordinated-vs-uncoordinated performance results yet.
 - Foremerge does not replace code review, architecture ownership, CI, security
   scanning, Git hosting rules, or backups.
@@ -419,10 +440,11 @@ using Foremerge as an integration gate.
 | [Conflict detection](docs/conflict-detection.md) | Which deterministic rules produce findings and suggestions? |
 | [Git integration](docs/git-integration.md) | How do fingerprints, worktrees, and accepted refs behave? |
 | [Agent clients](docs/agent-clients.md) | How do Codex, Claude Code, and Cursor discover the skill and MCP server? |
-| [MCP setup](docs/mcp-setup.md) | How do clients configure and call the 13 lifecycle tools? |
+| [MCP setup](docs/mcp-setup.md) | How do clients configure and call the 17 lifecycle/read tools? |
 | [JSON API](docs/json-api.md) | Which routes, request bodies, auth, and errors are shipped? |
 | [OpenAPI schema](docs/openapi.yaml) | What is the machine-readable HTTP contract? |
 | [Benchmark plan](docs/benchmark-plan.md) | How will coordinated and uncoordinated runs be compared? |
+| [Validation exclusion ADR](docs/adr/0001-validation-exclusion-rules.md) | Which generated paths may validation ignore, and why? |
 | [Roadmap](docs/roadmap.md) | What is current, next, later, or a non-goal? |
 | [Limitations](docs/limitations.md) | What does the MVP not guarantee? |
 

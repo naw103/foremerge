@@ -218,6 +218,26 @@ pub struct Conflict {
     pub evidence: Value,
     pub status: String,
     pub detected_at: String,
+    /// True when this response came from a new detection of an identity whose
+    /// lifecycle was already settled. Redetection never silently reopens a
+    /// resolved, dismissed, or operator-overridden conflict.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub previously_settled: bool,
+}
+
+/// One immutable observation of a stable conflict identity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConflictDetection {
+    pub id: String,
+    pub conflict_id: String,
+    pub severity: String,
+    pub score: f64,
+    pub scope: Option<Scope>,
+    pub explanation: String,
+    pub suggestion: String,
+    pub evidence: Value,
+    pub previously_settled: bool,
+    pub detected_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -341,6 +361,37 @@ pub struct Validation {
     pub run_at: String,
 }
 
+/// Every Foremerge-executed validation is retained, including results that
+/// could not authoritatively update lifecycle state because the candidate or
+/// worktree changed while the command ran.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationAttempt {
+    pub id: String,
+    pub changeset_id: String,
+    pub command: Vec<String>,
+    pub passed: bool,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub duration_ms: u128,
+    pub expected_fingerprint: String,
+    pub observed_fingerprint: String,
+    pub authoritative: bool,
+    pub stale_reason: Option<String>,
+    pub changed_files: Vec<String>,
+    pub excluded_paths: Vec<String>,
+    pub exclusion_ruleset_digest: String,
+    pub run_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventChainAudit {
+    pub valid: bool,
+    pub events_verified: usize,
+    pub last_seq: Option<i64>,
+    pub head_hash: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcceptRequest {
     #[serde(default)]
@@ -405,6 +456,8 @@ pub struct DoctorReport {
     pub version: String,
     pub database: String,
     pub database_ok: bool,
+    pub event_chain_ok: Option<bool>,
+    pub events_verified: usize,
     pub git_available: bool,
     pub git_repository: bool,
     pub git_root: Option<String>,

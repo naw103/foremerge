@@ -43,6 +43,7 @@ src/
   service.rs   coordination use cases and lifecycle gates
   conflict.rs  deterministic intent analysis and conflict rules
   git.rs       repository discovery, snapshots, and command execution
+  exclusions.rs operator-owned validation exclusion policy
   checks.rs    private named-verification registry
   integrations.rs safe Codex, Claude Code, and Cursor installation/diagnostics
   api.rs       Axum JSON API
@@ -69,7 +70,8 @@ The database uses:
 - a full-mutex SQLite connection shared by the application service.
 
 This is intended for low-volume local semantic events, not high-rate telemetry.
-Its multi-agent scale has not yet been benchmarked. There is no cache, broker,
+A committed query microbenchmark makes scaling measurements reproducible, but
+no deployment-scale performance claim is implied. There is no broker,
 background queue, or separate graph database in the MVP.
 
 ## Persistence model
@@ -78,9 +80,13 @@ SQLite contains three complementary forms of state.
 
 ### Domain projections
 
-`agents`, `tasks`, `intents`, `claims`, `changesets`, `validations`, `decisions`,
-`conflicts`, and `coordination_messages` provide direct queries for current
-coordination state.
+`agents`, `tasks`, `intents`, `intent_scopes`, `claims`, `changesets`,
+`validations`, `validation_attempts`, `decisions`, `conflicts`,
+`conflict_detections`, and `coordination_messages` provide direct queries for
+current coordination state and immutable observations. Order-compatible intent
+indexes and the normalized `intent_scopes` projection keep work filters
+sargable; reverse dependencies are scanned once per query rather than once per
+returned intent.
 
 ### Semantic graph
 
@@ -124,6 +130,11 @@ Foremerge therefore records the exact Git fingerprint associated with a
 validation and checks it again at acceptance. A changed worktree or ref makes
 old evidence stale rather than silently applying it to new code.
 
+Validation uses an explicit split phase: load state, snapshot, and run the
+process without a write transaction; capture the final snapshot; then open one
+short immediate transaction to reload lifecycle state, append the immutable
+attempt, and apply an authoritative result only if every check still matches.
+
 ## Component responsibilities
 
 ### Application service
@@ -156,6 +167,13 @@ Neither transport contains an independent coordination implementation.
 MCP verification resolves a trusted check name through repository-private
 configuration before calling the same validation service used by other
 frontends; raw validation argv is not accepted from MCP.
+
+Axum liveness performs no I/O, readiness uses a non-waiting store probe, and
+full event-chain audit is authenticated and paged through a separate read-only
+connection. Synchronous SQLite and Git service calls are dispatched with
+`spawn_blocking` so they do not occupy Tokio worker threads. SIGINT/SIGTERM stop
+new HTTP work and bound in-flight draining to 30 seconds; validation cancellation
+terminates the subprocess tree.
 
 ## Trust and safety boundaries
 

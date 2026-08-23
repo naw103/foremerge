@@ -60,8 +60,10 @@ registry or remove worktrees.
 
 Foremerge snapshots a worktree using:
 
-1. `git status --porcelain=v1 -z` for dirty state and changed paths;
-2. `git diff --binary HEAD` for tracked staged and unstaged changes;
+1. `git status --porcelain=v1 -z --untracked-files=all` for dirty state and
+   changed paths;
+2. `git diff --no-ext-diff --no-textconv --binary HEAD` for tracked staged and
+   unstaged changes;
 3. direct content hashing for all individually reported untracked regular
    files (`--untracked-files=all`);
 4. `git rev-parse HEAD^{tree}` for the committed tree when available.
@@ -80,13 +82,17 @@ HEAD commit or UNBORN
 tree ID or NO_TREE
 diff digest
 ordered changed paths
+normalized validation-exclusion ruleset digest
 ```
 
 Fingerprints are stored with a `sha256:` prefix.
 
 Including untracked contents matters: changing an untracked regular file changes
 the fingerprint even though ordinary `git diff HEAD` omits it. Ignored files are
-outside the snapshot.
+outside the snapshot. An operator may explicitly exclude exact or prefix-matched
+untracked generated paths through [ADR 0001](adr/0001-validation-exclusion-rules.md).
+Tracked content is never excludable, and changing the normalized policy digest
+changes the fingerprint.
 
 ## Symbol hints
 
@@ -153,9 +159,13 @@ worktree. Its command is an argument vector:
 
 Foremerge records exit status, standard output, standard error, duration, and
 the ChangeSet fingerprint associated with the run. A zero exit status is a
-pass. The final 16 KiB of each output stream is retained. Test evidence reported
-inside `publish_changeset` is provenance only; it is not equivalent to a
-Foremerge-executed validation.
+pass. The final 16 KiB of each output stream is retained. The final Git snapshot
+is captured before the short SQLite write transaction. Every completed command
+is retained as an immutable attempt; only a result whose revision, lifecycle,
+and final fingerprint still match becomes authoritative. Stale diagnostics name
+changed paths and preserve the output without allowing acceptance. Test evidence
+reported inside `publish_changeset` is provenance only; it is not equivalent to
+a Foremerge-executed validation.
 
 Before acceptance, Foremerge compares the current snapshot with the validated
 fingerprint. Code that changed after the test must be tested again.
@@ -240,7 +250,9 @@ rebasing, conflict resolution, target-branch updates, or GitHub operations.
   512 MiB aggregate content budget; oversized snapshots fail closed.
 - Validation retains only the latest 16 KiB from each output stream in SQLite,
   but that tail may still be sensitive.
-- Lightweight declaration inference is not AST analysis.
+- Lightweight declaration inference is not AST analysis. Diff capture is
+  bounded at 4 MiB and provenance explicitly reports truncation, captured
+  bytes, and total bytes.
 - Ignored files do not contribute content to the fingerprint.
 - NUL-delimited rename/copy records retain both old and new paths, but the
   changed-path list does not expose Git's similarity score.

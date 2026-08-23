@@ -3,7 +3,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use foremerge::api::{self, ApiState};
 use foremerge::git;
 use foremerge::model::*;
-use foremerge::{Foremerge, Store, checks, integrations, mcp};
+use foremerge::{Foremerge, Store, checks, exclusions, integrations, mcp};
 use serde_json::{Value, json};
 use std::io::{self, Write};
 use std::net::SocketAddr;
@@ -97,6 +97,9 @@ enum Commands {
     /// Configure trusted named verification commands available to MCP agents.
     #[command(subcommand)]
     Checks(CheckCommand),
+    /// Configure digest-bound exclusions for generated, untracked validation output.
+    #[command(subcommand)]
+    ValidationExclusions(ValidationExclusionCommand),
     /// Create an isolated Git worktree.
     #[command(subcommand)]
     Worktree(WorktreeCommand),
@@ -150,6 +153,18 @@ enum CheckCommand {
     List,
     /// Remove a trusted verification check.
     Remove { name: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum ValidationExclusionCommand {
+    /// Show the normalized ruleset, digest, and repository-private path.
+    Show,
+    /// Replace all exact-path and directory-prefix rules atomically.
+    Set {
+        /// Exact repository-relative path, or a directory prefix ending in '/'.
+        #[arg(long = "path")]
+        paths: Vec<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -269,6 +284,8 @@ enum ConflictCommand {
         #[arg(long)]
         status: Option<String>,
     },
+    /// List immutable detection occurrences for one durable conflict identity.
+    Detections { conflict_id: String },
     /// Record a decision and resolve a persisted conflict.
     #[command(long_about = "Record a decision and resolve a persisted conflict.\n\n\
             On this trusted CLI surface any registered agent (or a human operator acting as one) \
@@ -330,6 +347,8 @@ enum ChangeSetCommand {
     },
     /// Show one ChangeSet including provenance and Git fingerprint.
     Show { changeset_id: String },
+    /// List every validation attempt, including stale non-authoritative runs.
+    Attempts { changeset_id: String },
     /// Run a Foremerge-owned argv validation against the exact ChangeSet fingerprint.
     Validate {
         changeset_id: String,
@@ -392,6 +411,11 @@ enum EventCommand {
         after_seq: i64,
         #[arg(long, default_value_t = 100)]
         limit: usize,
+    },
+    /// Verify the append-only event chain through a separate paged reader.
+    Audit {
+        #[arg(long, default_value_t = 1000)]
+        page_size: usize,
     },
 }
 
@@ -543,7 +567,16 @@ async fn execute(cli: Cli) -> Result<()> {
             }
         }
         Commands::Doctor { client } => {
-            let store = Store::open(&database);
+            // Diagnostics are observational: do not create the runtime
+            // directory/database or run migrations merely by inspecting it.
+            let (database_ok, event_chain_ok, events_verified) =
+                match Store::open_existing_read_only(&database) {
+                    Ok(store) => match store.audit_event_chain(1000) {
+                        Ok(audit) => (true, Some(audit.valid), audit.events_verified),
+                        Err(_) => (true, Some(false), 0),
+                    },
+                    Err(_) => (false, None, 0),
+                };
             let repo = git::discover(&cwd).ok();
             let token_path = git::runtime_dir(&cwd).join("token");
             let client_diagnostics = client.map(|value| {
@@ -562,7 +595,9 @@ async fn execute(cli: Cli) -> Result<()> {
             let report = DoctorReport {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 database: database.to_string_lossy().into_owned(),
-                database_ok: store.is_ok(),
+                database_ok,
+                event_chain_ok,
+                events_verified,
                 git_available: git::available(),
                 git_repository: repo.is_some(),
                 git_root: repo
@@ -575,8 +610,13 @@ async fn execute(cli: Cli) -> Result<()> {
                 api_bind: DEFAULT_BIND.to_string(),
                 token_configured: token_path.is_file(),
                 mcp_transport: "stdio (newline-delimited JSON-RPC; MCP 2026-07-28 with 2025-11-25 initialize compatibility)".to_string(),
-                ready: store.is_ok() && git::available() && clients_ready,
-                next_step: if let Some(next_step) = next_client_step {
+                ready: database_ok
+                    && event_chain_ok == Some(true)
+                    && git::available()
+                    && clients_ready,
+                next_step: if !database_ok {
+                    "foremerge init".to_string()
+                } else if let Some(next_step) = next_client_step {
                     next_step
                 } else if repo.is_some() {
                     "foremerge --json agent register --name agent-1 --model your-model".to_string()
@@ -636,6 +676,25 @@ async fn execute(cli: Cli) -> Result<()> {
             emit(
                 cli.json,
                 json!({ "path": registry_path, "registry": registry }),
+            )?;
+        }
+        Commands::ValidationExclusions(command) => {
+            let repo = git::discover(&cwd).context(
+                "INVALID_INPUT: validation exclusions must be configured inside a Git repository",
+            )?;
+            let path = exclusions::config_path(&repo.common_dir);
+            let loaded = match command {
+                ValidationExclusionCommand::Show => exclusions::load_at(&path)?,
+                ValidationExclusionCommand::Set { paths } => exclusions::replace(&cwd, paths)?,
+            };
+            emit(
+                cli.json,
+                json!({
+                    "path": path,
+                    "ruleset": loaded.rules,
+                    "digest": loaded.digest,
+                    "mcp_mutation_allowed": false,
+                }),
             )?;
         }
         Commands::Request(request) => run_raw_request(&cwd, request, cli.json).await?,
@@ -789,6 +848,9 @@ async fn execute_service(
         Commands::Conflicts(ConflictCommand::List { status }) => {
             serde_json::to_value(service.list_conflicts(status.as_deref())?)?
         }
+        Commands::Conflicts(ConflictCommand::Detections { conflict_id }) => {
+            serde_json::to_value(service.conflict_detections(&conflict_id)?)?
+        }
         Commands::Conflicts(ConflictCommand::Resolve {
             conflict_id,
             agent_id,
@@ -859,6 +921,9 @@ async fn execute_service(
         Commands::Changeset(ChangeSetCommand::Show { changeset_id }) => {
             serde_json::to_value(service.get_changeset(&changeset_id)?)?
         }
+        Commands::Changeset(ChangeSetCommand::Attempts { changeset_id }) => {
+            serde_json::to_value(service.validation_attempts(&changeset_id)?)?
+        }
         Commands::Changeset(ChangeSetCommand::Validate {
             changeset_id,
             worktree,
@@ -921,6 +986,9 @@ async fn execute_service(
         }
         Commands::Events(EventCommand::List { after_seq, limit }) => {
             serde_json::to_value(service.events(after_seq, limit)?)?
+        }
+        Commands::Events(EventCommand::Audit { page_size }) => {
+            serde_json::to_value(service.store().audit_event_chain(page_size)?)?
         }
         Commands::Graph => service.graph()?,
         Commands::Status => {

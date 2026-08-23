@@ -11,7 +11,13 @@ use axum::routing::{get, post};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::future::IntoFuture;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -144,25 +150,36 @@ fn success<T: Serialize>(data: T) -> Json<Success<T>> {
 pub fn router(state: ApiState) -> Router {
     let protected = Router::new()
         .route("/v1/agents/register", post(register_agent))
+        .route("/v1/agents", get(list_agents))
         .route("/v1/agents/{id}/inbox", get(inbox))
         .route("/v1/intents", post(publish_intent))
+        .route("/v1/intents/{id}", get(get_intent))
         .route("/v1/claims", post(claim_work))
         .route("/v1/work", get(query_work))
         .route("/v1/work/{id}/start", post(start_work))
         .route("/v1/work/{id}/discard", post(discard_work))
         .route("/v1/conflicts", get(list_conflicts))
         .route("/v1/conflicts/check", post(check_conflicts))
+        .route("/v1/conflicts/{id}/detections", get(conflict_detections))
         .route("/v1/conflicts/{id}/resolve", post(resolve_conflict))
         .route("/v1/changesets", post(publish_changeset))
+        .route("/v1/changesets/{id}", get(get_changeset))
+        .route(
+            "/v1/changesets/{id}/validation-attempts",
+            get(validation_attempts),
+        )
         .route("/v1/changesets/{id}/validate", post(validate_changeset))
         .route("/v1/changesets/{id}/accept", post(accept_changeset))
         .route("/v1/changesets/{id}/commit", post(record_commit))
         .route("/v1/coordinate", post(coordinate))
         .route("/v1/events", get(events))
+        .route("/v1/audit/event-chain", get(audit_event_chain))
         .route("/v1/graph", get(graph))
+        .route("/v1/status", get(status))
         .route_layer(middleware::from_fn_with_state(state.clone(), authenticate));
     Router::new()
         .route("/healthz", get(health))
+        .route("/readyz", get(ready))
         .merge(protected)
         .fallback(route_not_found)
         .method_not_allowed_fallback(method_not_allowed)
@@ -197,24 +214,105 @@ async fn authenticate(
 pub async fn serve(state: ApiState, bind: SocketAddr) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(%bind, "Foremerge API listening");
-    axum::serve(listener, router(state)).await?;
+    let draining = Arc::new(tokio::sync::Notify::new());
+    let server = axum::serve(listener, router(state))
+        .with_graceful_shutdown(shutdown_signal(draining.clone()))
+        .into_future();
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => result?,
+        () = draining.notified() => {
+            match tokio::time::timeout(SHUTDOWN_GRACE, &mut server).await {
+                Ok(result) => result?,
+                Err(_) => tracing::warn!(
+                    grace_seconds = SHUTDOWN_GRACE.as_secs(),
+                    "shutdown grace expired; terminating remaining in-flight requests"
+                ),
+            }
+        }
+    }
     Ok(())
 }
 
-async fn health(State(state): State<ApiState>) -> ApiResult<Value> {
-    let counts = state.service.store().counts().map_err(ApiError::from)?;
-    let event_chain_ok = state
-        .service
-        .store()
-        .verify_event_chain()
-        .map_err(ApiError::from)?;
+async fn shutdown_signal(draining: Arc<tokio::sync::Notify>) {
+    let ctrl_c = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(%error, "install Ctrl-C handler");
+        }
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => tracing::error!(%error, "install SIGTERM handler"),
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        () = ctrl_c => {},
+        () = terminate => {},
+    }
+    tracing::info!("shutdown requested; draining in-flight requests");
+    draining.notify_one();
+}
+
+async fn health() -> ApiResult<Value> {
     Ok(success(json!({
         "name": "foremerge",
         "version": env!("CARGO_PKG_VERSION"),
-        "status": if event_chain_ok { "ok" } else { "degraded" },
-        "event_chain_ok": event_chain_ok,
-        "counts": counts,
+        "status": "alive",
     })))
+}
+
+async fn ready(State(state): State<ApiState>) -> ApiResult<Value> {
+    let service = state.service;
+    let ready = api_blocking(move || service.store().readiness()).await?;
+    if !ready {
+        return Err(ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "NOT_READY".to_string(),
+            message: "coordinator store is busy".to_string(),
+        });
+    }
+    Ok(success(json!({ "status": "ready" })))
+}
+
+#[derive(Debug, Deserialize)]
+struct AuditParams {
+    page_size: Option<usize>,
+}
+
+async fn audit_event_chain(
+    State(state): State<ApiState>,
+    ApiQuery(params): ApiQuery<AuditParams>,
+) -> ApiResult<EventChainAudit> {
+    let service = state.service;
+    Ok(success(
+        api_blocking(move || {
+            service
+                .store()
+                .audit_event_chain(params.page_size.unwrap_or(1000))
+        })
+        .await?,
+    ))
+}
+
+async fn api_blocking<T, F>(operation: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|error| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "INTERNAL_ERROR".to_string(),
+            message: format!("blocking coordinator operation failed: {error}"),
+        })?
+        .map_err(ApiError::from)
 }
 
 async fn register_agent(
@@ -223,12 +321,16 @@ async fn register_agent(
     ApiJson(request): ApiJson<RegisterAgentRequest>,
 ) -> ApiResult<Agent> {
     authorize(&state, &headers)?;
+    let service = state.service;
     Ok(success(
-        state
-            .service
-            .register_agent(request)
-            .map_err(ApiError::from)?,
+        api_blocking(move || service.register_agent(request)).await?,
     ))
+}
+
+async fn list_agents(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult<Vec<Agent>> {
+    authorize(&state, &headers)?;
+    let service = state.service;
+    Ok(success(api_blocking(move || service.list_agents()).await?))
 }
 
 async fn publish_intent(
@@ -237,11 +339,21 @@ async fn publish_intent(
     ApiJson(request): ApiJson<PublishIntentRequest>,
 ) -> ApiResult<PublishIntentOutcome> {
     authorize(&state, &headers)?;
+    let service = state.service;
     Ok(success(
-        state
-            .service
-            .publish_intent(request)
-            .map_err(ApiError::from)?,
+        api_blocking(move || service.publish_intent(request)).await?,
+    ))
+}
+
+async fn get_intent(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<IntentDetail> {
+    authorize(&state, &headers)?;
+    let service = state.service;
+    Ok(success(
+        api_blocking(move || service.show_intent(&id)).await?,
     ))
 }
 
@@ -251,8 +363,9 @@ async fn claim_work(
     ApiJson(request): ApiJson<ClaimWorkRequest>,
 ) -> ApiResult<ClaimOutcome> {
     authorize(&state, &headers)?;
+    let service = state.service;
     Ok(success(
-        state.service.claim_work(request).map_err(ApiError::from)?,
+        api_blocking(move || service.claim_work(request)).await?,
     ))
 }
 
@@ -276,16 +389,17 @@ async fn query_work(
         .map(Scope::parse)
         .transpose()
         .map_err(ApiError::from)?;
+    let service = state.service;
     Ok(success(
-        state
-            .service
-            .query_work(WorkQuery {
+        api_blocking(move || {
+            service.query_work(WorkQuery {
                 agent_id: params.agent_id,
                 status: params.status,
                 scope,
                 limit: params.limit.unwrap_or(50),
             })
-            .map_err(ApiError::from)?,
+        })
+        .await?,
     ))
 }
 
@@ -301,11 +415,9 @@ async fn start_work(
     ApiJson(request): ApiJson<AgentAction>,
 ) -> ApiResult<Intent> {
     authorize(&state, &headers)?;
+    let service = state.service;
     Ok(success(
-        state
-            .service
-            .start_work(&request.agent_id, &id)
-            .map_err(ApiError::from)?,
+        api_blocking(move || service.start_work(&request.agent_id, &id)).await?,
     ))
 }
 
@@ -322,11 +434,9 @@ async fn discard_work(
     ApiJson(request): ApiJson<DiscardAction>,
 ) -> ApiResult<Intent> {
     authorize(&state, &headers)?;
+    let service = state.service;
     Ok(success(
-        state
-            .service
-            .discard_work(&request.agent_id, &id, &request.reason)
-            .map_err(ApiError::from)?,
+        api_blocking(move || service.discard_work(&request.agent_id, &id, &request.reason)).await?,
     ))
 }
 
@@ -336,11 +446,9 @@ async fn check_conflicts(
     ApiJson(request): ApiJson<ConflictCheckRequest>,
 ) -> ApiResult<ConflictReport> {
     authorize(&state, &headers)?;
+    let service = state.service;
     Ok(success(
-        state
-            .service
-            .check_conflicts(request)
-            .map_err(ApiError::from)?,
+        api_blocking(move || service.check_conflicts(request)).await?,
     ))
 }
 
@@ -355,11 +463,21 @@ async fn list_conflicts(
     ApiQuery(params): ApiQuery<ConflictParams>,
 ) -> ApiResult<Vec<Conflict>> {
     authorize(&state, &headers)?;
+    let service = state.service;
     Ok(success(
-        state
-            .service
-            .list_conflicts(params.status.as_deref())
-            .map_err(ApiError::from)?,
+        api_blocking(move || service.list_conflicts(params.status.as_deref())).await?,
+    ))
+}
+
+async fn conflict_detections(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Vec<ConflictDetection>> {
+    authorize(&state, &headers)?;
+    let service = state.service;
+    Ok(success(
+        api_blocking(move || service.conflict_detections(&id)).await?,
     ))
 }
 
@@ -370,11 +488,9 @@ async fn resolve_conflict(
     ApiJson(request): ApiJson<ResolveConflictRequest>,
 ) -> ApiResult<Conflict> {
     authorize(&state, &headers)?;
+    let service = state.service;
     Ok(success(
-        state
-            .service
-            .resolve_conflict(&id, request)
-            .map_err(ApiError::from)?,
+        api_blocking(move || service.resolve_conflict(&id, request)).await?,
     ))
 }
 
@@ -384,11 +500,33 @@ async fn publish_changeset(
     ApiJson(request): ApiJson<PublishChangeSetRequest>,
 ) -> ApiResult<ChangeSet> {
     authorize(&state, &headers)?;
+    let service = state.service;
     Ok(success(
-        state
-            .service
-            .publish_changeset(request)
-            .map_err(ApiError::from)?,
+        api_blocking(move || service.publish_changeset(request)).await?,
+    ))
+}
+
+async fn get_changeset(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<ChangeSet> {
+    authorize(&state, &headers)?;
+    let service = state.service;
+    Ok(success(
+        api_blocking(move || service.get_changeset(&id)).await?,
+    ))
+}
+
+async fn validation_attempts(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Vec<ValidationAttempt>> {
+    authorize(&state, &headers)?;
+    let service = state.service;
+    Ok(success(
+        api_blocking(move || service.validation_attempts(&id)).await?,
     ))
 }
 
@@ -415,11 +553,9 @@ async fn accept_changeset(
     ApiJson(request): ApiJson<AcceptRequest>,
 ) -> ApiResult<ChangeSet> {
     authorize(&state, &headers)?;
+    let service = state.service;
     Ok(success(
-        state
-            .service
-            .accept_changeset(&id, request)
-            .map_err(ApiError::from)?,
+        api_blocking(move || service.accept_changeset(&id, request)).await?,
     ))
 }
 
@@ -430,11 +566,9 @@ async fn record_commit(
     ApiJson(request): ApiJson<RecordCommitRequest>,
 ) -> ApiResult<ChangeSet> {
     authorize(&state, &headers)?;
+    let service = state.service;
     Ok(success(
-        state
-            .service
-            .record_commit(&id, &request.git_ref)
-            .map_err(ApiError::from)?,
+        api_blocking(move || service.record_commit(&id, &request.git_ref)).await?,
     ))
 }
 
@@ -444,11 +578,9 @@ async fn coordinate(
     ApiJson(request): ApiJson<CoordinateRequest>,
 ) -> ApiResult<CoordinationMessage> {
     authorize(&state, &headers)?;
+    let service = state.service;
     Ok(success(
-        state
-            .service
-            .coordinate_with_agent(request)
-            .map_err(ApiError::from)?,
+        api_blocking(move || service.coordinate_with_agent(request)).await?,
     ))
 }
 
@@ -458,7 +590,8 @@ async fn inbox(
     Path(id): Path<String>,
 ) -> ApiResult<Vec<CoordinationMessage>> {
     authorize(&state, &headers)?;
-    Ok(success(state.service.inbox(&id).map_err(ApiError::from)?))
+    let service = state.service;
+    Ok(success(api_blocking(move || service.inbox(&id)).await?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -473,17 +606,25 @@ async fn events(
     ApiQuery(params): ApiQuery<EventParams>,
 ) -> ApiResult<Vec<Event>> {
     authorize(&state, &headers)?;
+    let service = state.service;
     Ok(success(
-        state
-            .service
-            .events(params.after_seq.unwrap_or(0), params.limit.unwrap_or(100))
-            .map_err(ApiError::from)?,
+        api_blocking(move || {
+            service.events(params.after_seq.unwrap_or(0), params.limit.unwrap_or(100))
+        })
+        .await?,
     ))
 }
 
 async fn graph(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult<Value> {
     authorize(&state, &headers)?;
-    Ok(success(state.service.graph().map_err(ApiError::from)?))
+    let service = state.service;
+    Ok(success(api_blocking(move || service.graph()).await?))
+}
+
+async fn status(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult<StatusReport> {
+    authorize(&state, &headers)?;
+    let service = state.service;
+    Ok(success(api_blocking(move || service.status()).await?))
 }
 
 fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<(), ApiError> {
@@ -499,7 +640,7 @@ fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<(), ApiError> {
             (scheme.eq_ignore_ascii_case("bearer") && !credentials.is_empty())
                 .then_some(credentials)
         });
-    if supplied == Some(expected) {
+    if supplied.is_some_and(|supplied| constant_time_token_eq(supplied, expected)) {
         Ok(())
     } else {
         Err(ApiError {
@@ -508,6 +649,18 @@ fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<(), ApiError> {
             message: "missing or invalid bearer token".to_string(),
         })
     }
+}
+
+fn constant_time_token_eq(supplied: &str, expected: &str) -> bool {
+    let supplied = Sha256::digest(supplied.as_bytes());
+    let expected = Sha256::digest(expected.as_bytes());
+    supplied
+        .iter()
+        .zip(expected.iter())
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
 }
 
 #[cfg(test)]
@@ -521,24 +674,89 @@ mod tests {
 
     #[tokio::test]
     async fn health_is_live_json_and_does_not_require_token() {
+        let store = Store::in_memory().unwrap();
+        let service = Foremerge::new(store.clone());
+        // If liveness accidentally touches SQLite this held mutex makes the
+        // request hang, while readiness must fail fast instead of queueing.
+        let (locked_sender, locked_receiver) = std::sync::mpsc::sync_channel(0);
+        let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(0);
+        let lock_store = store.clone();
+        let lock_thread = std::thread::spawn(move || {
+            let _guard = lock_store.lock().unwrap();
+            locked_sender.send(()).unwrap();
+            release_receiver.recv().unwrap();
+        });
+        locked_receiver.recv().unwrap();
         let app = router(ApiState {
-            service: Foremerge::new(Store::in_memory().unwrap()),
+            service: service.clone(),
             token: Some("secret".to_string()),
         });
-        let response = app
-            .oneshot(
+        let response = tokio::time::timeout(
+            Duration::from_millis(250),
+            app.oneshot(
                 Request::builder()
                     .uri("/healthz")
                     .body(Body::empty())
                     .unwrap(),
-            )
-            .await
-            .unwrap();
+            ),
+        )
+        .await
+        .expect("liveness must not wait for the store")
+        .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["ok"], true);
         assert_eq!(body["data"]["name"], "foremerge");
+
+        let ready = router(ApiState {
+            service,
+            token: Some("secret".to_string()),
+        })
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ready.status(), StatusCode::SERVICE_UNAVAILABLE);
+        release_sender.send(()).unwrap();
+        lock_thread.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn event_chain_audit_is_authenticated() {
+        let state = ApiState {
+            service: Foremerge::new(Store::in_memory().unwrap()),
+            token: Some("secret".to_string()),
+        };
+        let unauthorized = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/audit/event-chain?page_size=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let authorized = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/audit/event-chain?page_size=1")
+                    .header("authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authorized.status(), StatusCode::OK);
+        let body = authorized.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["data"]["valid"], true);
     }
 
     #[tokio::test]

@@ -8,6 +8,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -237,6 +238,13 @@ impl Foremerge {
                 intent.updated_at,
             ],
         )?;
+        for scope in &intent.scopes {
+            tx.execute(
+                "INSERT INTO intent_scopes(intent_id, scope_kind, scope_key, canonical_scope)
+                 VALUES(?1, ?2, ?3, ?4)",
+                params![intent.id, scope.kind, scope.key, scope.canonical()],
+            )?;
+        }
 
         let agent_node = Store::upsert_node(&tx, "Agent", &agent.id, &agent.name, &json!({}))?;
         let task_node = Store::upsert_node(
@@ -436,71 +444,93 @@ impl Foremerge {
     pub fn query_work(&self, mut query: WorkQuery) -> Result<Vec<WorkItem>> {
         query.scope = query.scope.map(|scope| scope.normalized()).transpose()?;
         let conn = self.store.lock()?;
-        let mut statement = conn.prepare(
-            "SELECT i.id FROM intents i
-             WHERE (?1 IS NULL OR i.agent_id = ?1)
-             AND (?2 IS NULL OR i.status = ?2)
-             ORDER BY i.created_at DESC",
-        )?;
+        let limit = query.limit.clamp(1, 500);
+        let mut sql = "SELECT i.id FROM intents i WHERE 1 = 1".to_string();
+        let mut bindings = Vec::<rusqlite::types::Value>::new();
+        if let Some(agent_id) = query.agent_id {
+            bindings.push(agent_id.into());
+            sql.push_str(&format!(" AND i.agent_id = ?{}", bindings.len()));
+        }
+        if let Some(status) = query.status {
+            bindings.push(status.to_uppercase().into());
+            sql.push_str(&format!(" AND i.status = ?{}", bindings.len()));
+        }
+        if let Some(scope) = query.scope {
+            bindings.push(scope.canonical().into());
+            let parameter = bindings.len();
+            sql.push_str(&format!(
+                " AND i.id IN (
+                   SELECT s.intent_id FROM intent_scopes s
+                   WHERE s.canonical_scope = ?{parameter}
+                   UNION
+                   SELECT c.intent_id FROM claims c
+                   WHERE c.canonical_scope = ?{parameter}
+                 )"
+            ));
+        }
+        bindings.push((limit as i64).into());
+        sql.push_str(&format!(
+            " ORDER BY i.created_at DESC, i.id DESC LIMIT ?{}",
+            bindings.len()
+        ));
+        let mut statement = conn.prepare_cached(&sql)?;
         let ids = statement
-            .query_map(
-                params![
-                    query.agent_id,
-                    query.status.map(|value| value.to_uppercase())
-                ],
-                |row| row.get::<_, String>(0),
-            )?
+            .query_map(rusqlite::params_from_iter(bindings.iter()), |row| {
+                row.get::<_, String>(0)
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(statement);
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let selected_ids = ids.iter().map(String::as_str).collect::<HashSet<_>>();
+        let mut reverse_dependencies = HashMap::<String, Vec<String>>::new();
+        let mut dependents_statement =
+            conn.prepare_cached("SELECT id, depends_on_json FROM intents ORDER BY created_at, id")?;
+        let dependent_rows = dependents_statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in dependent_rows {
+            let (candidate_id, dependencies) = row?;
+            let dependencies: Vec<String> = serde_json::from_str(&dependencies)
+                .context("CORRUPT_STORE: invalid intent dependency JSON")?;
+            for dependency in dependencies {
+                if selected_ids.contains(dependency.as_str()) {
+                    reverse_dependencies
+                        .entry(dependency)
+                        .or_default()
+                        .push(candidate_id.clone());
+                }
+            }
+        }
+        drop(dependents_statement);
+
         let mut items = Vec::new();
         for intent_id in ids {
             let intent = intent_by_id(&conn, &intent_id)?;
             let claims = claims_for_intent(&conn, &intent_id)?;
-            if let Some(scope) = &query.scope {
-                let matches_intent = intent
-                    .scopes
-                    .iter()
-                    .any(|candidate| candidate.canonical() == scope.canonical());
-                let matches_claim = claims
-                    .iter()
-                    .any(|claim| claim.scope.canonical() == scope.canonical());
-                if !matches_intent && !matches_claim {
-                    continue;
-                }
-            }
-            let latest_changeset_id: Option<String> = conn
-                .query_row(
+            let latest_changeset_id: Option<String> = {
+                let mut latest = conn.prepare_cached(
                     "SELECT id FROM changesets WHERE intent_id = ?1 AND status <> 'SUPERSEDED'
                      ORDER BY created_at DESC, id DESC LIMIT 1",
-                    [&intent_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
+                )?;
+                latest
+                    .query_row([&intent_id], |row| row.get(0))
+                    .optional()?
+            };
             let latest_changeset = latest_changeset_id
                 .as_deref()
                 .map(|id| changeset_by_id(&conn, id))
                 .transpose()?;
-            let mut dependents_statement =
-                conn.prepare("SELECT id, depends_on_json FROM intents")?;
-            let dependent_rows = dependents_statement
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let mut dependents = Vec::new();
-            for (candidate_id, dependencies) in dependent_rows {
-                let dependencies: Vec<String> = serde_json::from_str(&dependencies)
-                    .context("CORRUPT_STORE: invalid intent dependency JSON")?;
-                if dependencies.contains(&intent_id) {
-                    dependents.push(candidate_id);
-                }
-            }
-            let open_conflicts: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM conflicts WHERE status IN ('OPEN', 'COORDINATING')
-                 AND (source_intent_id = ?1 OR target_intent_id = ?1)",
-                [&intent_id],
-                |row| row.get(0),
-            )?;
+            let dependents = reverse_dependencies.remove(&intent_id).unwrap_or_default();
+            let open_conflicts: i64 = {
+                let mut conflicts = conn.prepare_cached(
+                    "SELECT COUNT(*) FROM conflicts WHERE status IN ('OPEN', 'COORDINATING')
+                     AND (source_intent_id = ?1 OR target_intent_id = ?1)",
+                )?;
+                conflicts.query_row([&intent_id], |row| row.get(0))?
+            };
             items.push(WorkItem {
                 agent: agent_by_id(&conn, &intent.agent_id)?,
                 intent,
@@ -510,9 +540,6 @@ impl Foremerge {
                 dependents,
                 open_conflicts: open_conflicts as usize,
             });
-            if items.len() >= query.limit.clamp(1, 500) {
-                break;
-            }
         }
         Ok(items)
     }
@@ -648,9 +675,26 @@ impl Foremerge {
         if request.files.is_empty() {
             request.files = snapshot.changed_files.clone();
         }
-        if request.symbols.is_empty() {
-            request.symbols = git::infer_symbols(&worktree).unwrap_or_default();
-        }
+        let symbol_inference = if request.symbols.is_empty() {
+            match git::infer_symbols_report(&worktree) {
+                Ok(report) => {
+                    request.symbols = report.symbols.clone();
+                    json!({
+                        "source": "git_diff",
+                        "truncated": report.truncated,
+                        "captured_bytes": report.captured_bytes,
+                        "total_bytes": report.total_bytes,
+                    })
+                }
+                Err(error) => json!({
+                    "source": "git_diff",
+                    "error": format!("{error:#}"),
+                    "truncated": false,
+                }),
+            }
+        } else {
+            json!({ "source": "caller", "truncated": false })
+        };
         // Resolve the candidate commit and its true diff base. Recording the
         // candidate itself as base (the pre-0.2.0 behavior for `--git-ref
         // HEAD` on a clean worktree) produced a self-referential base and the
@@ -726,6 +770,10 @@ impl Foremerge {
                 "base_resolution": base_resolution,
                 "diff_hash": diff_hash,
                 "dirty": snapshot.dirty,
+                "changed_files": snapshot.changed_files,
+                "excluded_paths": snapshot.excluded_paths,
+                "exclusion_ruleset_digest": snapshot.exclusion_ruleset_digest,
+                "symbol_inference": symbol_inference,
             },
             "declared": request.provenance,
             "captured_at": now,
@@ -949,39 +997,49 @@ impl Foremerge {
         if request.command.is_empty() || request.command[0].trim().is_empty() {
             bail!("INVALID_INPUT: validation command must be a non-empty argv array");
         }
-        let changeset;
-        let recorded_worktree;
-        {
-            let conn = self.store.lock()?;
-            changeset = changeset_by_id(&conn, changeset_id)?;
-            recorded_worktree = conn.query_row(
+        let service = self.clone();
+        let changeset_id_owned = changeset_id.to_string();
+        let load_service = service.clone();
+        let (changeset, recorded_worktree) = blocking(move || {
+            let conn = load_service.store.lock()?;
+            let changeset = changeset_by_id(&conn, &changeset_id_owned)?;
+            let recorded_worktree = conn.query_row(
                 "SELECT worktree FROM changesets WHERE id = ?1",
-                [changeset_id],
+                [&changeset_id_owned],
                 |row| row.get::<_, Option<String>>(0),
             )?;
-        }
+            Ok((changeset, recorded_worktree))
+        })
+        .await?;
         require_state(&changeset.status, &["PROVISIONAL", "VALIDATED"], "validate")?;
         let worktree = request
             .worktree
             .or_else(|| recorded_worktree.clone())
             .map(PathBuf::from)
             .ok_or_else(|| anyhow::anyhow!("INVALID_INPUT: validation requires a worktree"))?;
-        let current = git::snapshot(&worktree)?;
-        if let Some(recorded_worktree) = recorded_worktree.as_deref() {
-            let recorded_repo = git::discover(recorded_worktree)?;
-            if canonical_path(&recorded_repo.common_dir) != canonical_path(&current.common_dir) {
-                bail!(
-                    "INVALID_INPUT: validation worktree must belong to the ChangeSet's Git repository"
-                );
+        let snapshot_worktree = worktree.clone();
+        let repository_service = service.clone();
+        let current = blocking(move || {
+            let current = git::snapshot(&snapshot_worktree)?;
+            if let Some(recorded_worktree) = recorded_worktree.as_deref() {
+                let recorded_repo = git::discover(recorded_worktree)?;
+                if canonical_path(&recorded_repo.common_dir)
+                    != canonical_path(&current.common_dir)
+                {
+                    bail!(
+                        "INVALID_INPUT: validation worktree must belong to the ChangeSet's Git repository"
+                    );
+                }
             }
-        }
-        {
-            let conn = self.store.lock()?;
+            let conn = repository_service.store.lock()?;
             ensure_repository_matches(&conn, &current.common_dir)?;
-        }
+            Ok(current)
+        })
+        .await?;
         if current.fingerprint != changeset.fingerprint {
             bail!(
-                "STALE_CHANGESET: worktree fingerprint changed after ChangeSet publication; publish a new ChangeSet"
+                "STALE_CHANGESET: worktree fingerprint changed after ChangeSet publication{}; publish a new ChangeSet",
+                fingerprint_diagnostic(&changeset, &current)
             );
         }
 
@@ -1000,6 +1058,8 @@ impl Foremerge {
             Ok(mut child) => {
                 #[cfg(unix)]
                 let child_pid = child.id();
+                #[cfg(any(unix, windows))]
+                let mut process_guard = child.id().map(ValidationProcessGuard::new);
                 let child_stdout = child
                     .stdout
                     .take()
@@ -1017,12 +1077,18 @@ impl Foremerge {
                     Ok::<_, std::io::Error>((stdout, stderr, status))
                 };
                 match tokio::time::timeout(timeout, execution).await {
-                    Ok(Ok((stdout, stderr, status))) => (
-                        status.success(),
-                        status.code(),
-                        String::from_utf8_lossy(&stdout).into_owned(),
-                        String::from_utf8_lossy(&stderr).into_owned(),
-                    ),
+                    Ok(Ok((stdout, stderr, status))) => {
+                        #[cfg(any(unix, windows))]
+                        if let Some(guard) = process_guard.as_mut() {
+                            guard.disarm();
+                        }
+                        (
+                            status.success(),
+                            status.code(),
+                            String::from_utf8_lossy(&stdout).into_owned(),
+                            String::from_utf8_lossy(&stderr).into_owned(),
+                        )
+                    }
                     Ok(Err(error)) => (
                         false,
                         None,
@@ -1037,8 +1103,19 @@ impl Foremerge {
                                 .status()
                                 .await;
                         }
+                        #[cfg(windows)]
+                        if let Some(pid) = child.id() {
+                            let _ = Command::new("taskkill")
+                                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                                .status()
+                                .await;
+                        }
                         let _ = child.kill().await;
                         let _ = child.wait().await;
+                        #[cfg(any(unix, windows))]
+                        if let Some(guard) = process_guard.as_mut() {
+                            guard.disarm();
+                        }
                         (
                             false,
                             None,
@@ -1070,8 +1147,94 @@ impl Foremerge {
             fingerprint: changeset.fingerprint.clone(),
             run_at: Utc::now().to_rfc3339(),
         };
+        let final_worktree = worktree.clone();
+        let final_snapshot = blocking(move || git::snapshot(&final_worktree)).await;
+        let final_snapshot = match final_snapshot {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let attempt = ValidationAttempt {
+                    id: validation.id.clone(),
+                    changeset_id: validation.changeset_id.clone(),
+                    command: validation.command.clone(),
+                    passed: validation.passed,
+                    exit_code: validation.exit_code,
+                    stdout: validation.stdout.clone(),
+                    stderr: validation.stderr.clone(),
+                    duration_ms: validation.duration_ms,
+                    expected_fingerprint: changeset.fingerprint.clone(),
+                    observed_fingerprint: "unavailable".to_string(),
+                    authoritative: false,
+                    stale_reason: Some(format!("final snapshot failed: {error:#}")),
+                    changed_files: current.changed_files.clone(),
+                    excluded_paths: current.excluded_paths.clone(),
+                    exclusion_ruleset_digest: current.exclusion_ruleset_digest.clone(),
+                    run_at: validation.run_at.clone(),
+                };
+                let record_service = service.clone();
+                let agent_id = changeset.agent_id.clone();
+                blocking(move || {
+                    record_service.record_unapplied_validation_attempt(&attempt, &agent_id)
+                })
+                .await?;
+                bail!(
+                    "STALE_CHANGESET: validation command finished but the final worktree snapshot failed; the non-authoritative attempt was retained: {error:#}"
+                );
+            }
+        };
+        let attempt = ValidationAttempt {
+            id: validation.id.clone(),
+            changeset_id: validation.changeset_id.clone(),
+            command: validation.command.clone(),
+            passed: validation.passed,
+            exit_code: validation.exit_code,
+            stdout: validation.stdout.clone(),
+            stderr: validation.stderr.clone(),
+            duration_ms: validation.duration_ms,
+            expected_fingerprint: changeset.fingerprint.clone(),
+            observed_fingerprint: final_snapshot.fingerprint.clone(),
+            authoritative: false,
+            stale_reason: None,
+            changed_files: final_snapshot.changed_files.clone(),
+            excluded_paths: final_snapshot.excluded_paths.clone(),
+            exclusion_ruleset_digest: final_snapshot.exclusion_ruleset_digest.clone(),
+            run_at: validation.run_at.clone(),
+        };
+        blocking(move || {
+            service.apply_validation_attempt(changeset, validation, attempt, final_snapshot)
+        })
+        .await
+    }
+
+    fn record_unapplied_validation_attempt(
+        &self,
+        attempt: &ValidationAttempt,
+        agent_id: &str,
+    ) -> Result<()> {
         let mut conn = self.store.lock()?;
         let tx = Store::immediate_tx(&mut conn)?;
+        insert_validation_attempt(&tx, attempt)?;
+        Store::append_event(
+            &tx,
+            "validation.stale",
+            "Result",
+            &attempt.id,
+            Some(agent_id),
+            &validation_attempt_event(attempt),
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn apply_validation_attempt(
+        &self,
+        changeset: ChangeSet,
+        validation: Validation,
+        mut attempt: ValidationAttempt,
+        final_snapshot: git::GitSnapshot,
+    ) -> Result<Validation> {
+        let mut conn = self.store.lock()?;
+        let tx = Store::immediate_tx(&mut conn)?;
+        let changeset_id = changeset.id.as_str();
         let fresh_changeset = changeset_by_id(&tx, changeset_id)?;
         let fresh_intent = intent_by_id(&tx, &changeset.intent_id)?;
         let latest_changeset_id: Option<String> = tx
@@ -1097,46 +1260,38 @@ impl Foremerge {
             None
         };
         if let Some(reason) = state_race {
+            attempt.stale_reason = Some(reason.to_string());
+            insert_validation_attempt(&tx, &attempt)?;
             Store::append_event(
                 &tx,
                 "validation.stale",
                 "Result",
                 &validation.id,
                 Some(&changeset.agent_id),
-                &json!({
-                    "changeset_id": changeset.id,
-                    "passed": validation.passed,
-                    "fingerprint": validation.fingerprint,
-                    "reason": reason,
-                    "stdout_sha256": digest(&validation.stdout),
-                    "stderr_sha256": digest(&validation.stderr),
-                }),
+                &validation_attempt_event(&attempt),
             )?;
             tx.commit()?;
             bail!("STATE_RACE: validation result was not applied because {reason}");
         }
-        let final_snapshot = git::snapshot(&worktree)?;
         if final_snapshot.fingerprint != changeset.fingerprint {
+            attempt.stale_reason = Some("worktree fingerprint changed while validation ran".into());
+            insert_validation_attempt(&tx, &attempt)?;
             Store::append_event(
                 &tx,
                 "validation.stale",
                 "Result",
                 &validation.id,
                 Some(&changeset.agent_id),
-                &json!({
-                    "changeset_id": changeset.id,
-                    "passed": validation.passed,
-                    "fingerprint": validation.fingerprint,
-                    "reason": "worktree fingerprint changed while validation ran",
-                    "stdout_sha256": digest(&validation.stdout),
-                    "stderr_sha256": digest(&validation.stderr),
-                }),
+                &validation_attempt_event(&attempt),
             )?;
             tx.commit()?;
             bail!(
-                "STALE_CHANGESET: worktree fingerprint changed while validation ran; publish a new ChangeSet"
+                "STALE_CHANGESET: worktree fingerprint changed while validation ran{}; the non-authoritative attempt was retained; clean generated artifacts or publish a new ChangeSet",
+                fingerprint_diagnostic(&changeset, &final_snapshot)
             );
         }
+        attempt.authoritative = true;
+        insert_validation_attempt(&tx, &attempt)?;
         tx.execute(
             "INSERT INTO validations(id, changeset_id, command_json, passed, exit_code, stdout,
              stderr, duration_ms, fingerprint, run_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -1890,6 +2045,43 @@ impl Foremerge {
         changeset_by_id(&conn, changeset_id)
     }
 
+    /// Every validation command invocation for a ChangeSet, including stale
+    /// results which were retained as non-authoritative audit evidence.
+    pub fn validation_attempts(&self, changeset_id: &str) -> Result<Vec<ValidationAttempt>> {
+        let conn = self.store.lock()?;
+        changeset_by_id(&conn, changeset_id)?;
+        let mut statement = conn.prepare_cached(
+            "SELECT id, changeset_id, command_json, passed, exit_code, stdout, stderr,
+             duration_ms, expected_fingerprint, observed_fingerprint, authoritative,
+             stale_reason, changed_files_json, excluded_paths_json,
+             exclusion_ruleset_digest, run_at
+             FROM validation_attempts WHERE changeset_id = ?1
+             ORDER BY run_at DESC, id DESC",
+        )?;
+        Ok(statement
+            .query_map([changeset_id], |row| {
+                Ok(ValidationAttempt {
+                    id: row.get(0)?,
+                    changeset_id: row.get(1)?,
+                    command: from_json(row.get::<_, String>(2)?)?,
+                    passed: row.get(3)?,
+                    exit_code: row.get(4)?,
+                    stdout: row.get(5)?,
+                    stderr: row.get(6)?,
+                    duration_ms: row.get::<_, i64>(7)? as u128,
+                    expected_fingerprint: row.get(8)?,
+                    observed_fingerprint: row.get(9)?,
+                    authoritative: row.get(10)?,
+                    stale_reason: row.get(11)?,
+                    changed_files: from_json(row.get::<_, String>(12)?)?,
+                    excluded_paths: from_json(row.get::<_, String>(13)?)?,
+                    exclusion_ruleset_digest: row.get(14)?,
+                    run_at: row.get(15)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn graph(&self) -> Result<Value> {
         let mut graph = self.store.graph_snapshot()?;
         let now = Utc::now().to_rfc3339();
@@ -1931,6 +2123,33 @@ impl Foremerge {
         ids.iter()
             .map(|value| conflict_by_id(&conn, value))
             .collect()
+    }
+
+    /// Immutable observations for one durable conflict identity, oldest first.
+    pub fn conflict_detections(&self, conflict_id: &str) -> Result<Vec<ConflictDetection>> {
+        let conn = self.store.lock()?;
+        conflict_by_id(&conn, conflict_id)?;
+        let mut statement = conn.prepare_cached(
+            "SELECT id, conflict_id, severity, score, scope_json, explanation, suggestion,
+             evidence_json, previously_settled, detected_at
+             FROM conflict_detections WHERE conflict_id = ?1 ORDER BY detected_at, id",
+        )?;
+        Ok(statement
+            .query_map([conflict_id], |row| {
+                Ok(ConflictDetection {
+                    id: row.get(0)?,
+                    conflict_id: row.get(1)?,
+                    severity: row.get(2)?,
+                    score: row.get(3)?,
+                    scope: from_json(row.get::<_, String>(4)?)?,
+                    explanation: row.get(5)?,
+                    suggestion: row.get(6)?,
+                    evidence: from_json(row.get::<_, String>(7)?)?,
+                    previously_settled: row.get(8)?,
+                    detected_at: row.get(9)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// One consistent snapshot answering "what are my agents doing right now":
@@ -2119,6 +2338,154 @@ impl Foremerge {
     }
 }
 
+/// Run synchronous SQLite, filesystem, or Git work away from Tokio's async
+/// worker threads. Foremerge keeps these closures bounded and does not use
+/// this helper for the long-running validation subprocess itself.
+async fn blocking<T, F>(operation: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .context("blocking Foremerge operation panicked or was cancelled")?
+}
+
+/// Synchronous drop guard for validation cancellation. Axum gives in-flight
+/// validations a bounded grace period; if the request future is then dropped,
+/// this guard terminates the subprocess tree rather than leaking descendants.
+#[cfg(any(unix, windows))]
+struct ValidationProcessGuard {
+    pid: u32,
+    armed: bool,
+}
+
+#[cfg(any(unix, windows))]
+impl ValidationProcessGuard {
+    fn new(pid: u32) -> Self {
+        Self { pid, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ValidationProcessGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::process::Command::new("/bin/kill")
+                .args(["-KILL", "--", &format!("-{}", self.pid)])
+                .status();
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ValidationProcessGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &self.pid.to_string(), "/T", "/F"])
+                .status();
+        }
+    }
+}
+
+fn insert_validation_attempt(tx: &Transaction<'_>, attempt: &ValidationAttempt) -> Result<()> {
+    tx.execute(
+        "INSERT INTO validation_attempts(
+         id, changeset_id, command_json, passed, exit_code, stdout, stderr, duration_ms,
+         expected_fingerprint, observed_fingerprint, authoritative, stale_reason,
+         changed_files_json, excluded_paths_json, exclusion_ruleset_digest, run_at)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        params![
+            attempt.id,
+            attempt.changeset_id,
+            to_json(&attempt.command)?,
+            attempt.passed,
+            attempt.exit_code,
+            attempt.stdout,
+            attempt.stderr,
+            attempt.duration_ms as i64,
+            attempt.expected_fingerprint,
+            attempt.observed_fingerprint,
+            attempt.authoritative,
+            attempt.stale_reason,
+            to_json(&attempt.changed_files)?,
+            to_json(&attempt.excluded_paths)?,
+            attempt.exclusion_ruleset_digest,
+            attempt.run_at,
+        ],
+    )?;
+    Ok(())
+}
+
+fn validation_attempt_event(attempt: &ValidationAttempt) -> Value {
+    json!({
+        "changeset_id": attempt.changeset_id,
+        "passed": attempt.passed,
+        "exit_code": attempt.exit_code,
+        "duration_ms": attempt.duration_ms,
+        "expected_fingerprint": attempt.expected_fingerprint,
+        "observed_fingerprint": attempt.observed_fingerprint,
+        "authoritative": attempt.authoritative,
+        "stale_reason": attempt.stale_reason,
+        "changed_files": attempt.changed_files,
+        "excluded_paths": attempt.excluded_paths,
+        "exclusion_ruleset_digest": attempt.exclusion_ruleset_digest,
+        "stdout_sha256": digest(&attempt.stdout),
+        "stderr_sha256": digest(&attempt.stderr),
+    })
+}
+
+fn fingerprint_diagnostic(changeset: &ChangeSet, snapshot: &git::GitSnapshot) -> String {
+    let expected: BTreeSet<String> = changeset
+        .provenance
+        .get("git")
+        .and_then(|snapshot| snapshot.get("changed_files"))
+        .and_then(Value::as_array)
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_else(|| changeset.files.iter().cloned().collect());
+    let observed: BTreeSet<String> = snapshot.changed_files.iter().cloned().collect();
+    let added = observed.difference(&expected).cloned().collect::<Vec<_>>();
+    let removed = expected.difference(&observed).cloned().collect::<Vec<_>>();
+    let mut parts = vec![format!(
+        "; expected fingerprint {}, observed {}",
+        changeset.fingerprint, snapshot.fingerprint
+    )];
+    if !added.is_empty() {
+        parts.push(format!("; newly changed paths: {}", added.join(", ")));
+    }
+    if !removed.is_empty() {
+        parts.push(format!("; no longer changed paths: {}", removed.join(", ")));
+    }
+    if snapshot.exclusion_ruleset_digest
+        != changeset
+            .provenance
+            .get("git")
+            .and_then(|snapshot| snapshot.get("exclusion_ruleset_digest"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    {
+        parts.push("; validation exclusion rules changed".to_string());
+    }
+    if !snapshot.excluded_paths.is_empty() {
+        parts.push(format!(
+            "; currently excluded untracked paths: {}",
+            snapshot.excluded_paths.join(", ")
+        ));
+    }
+    parts.concat()
+}
+
 /// True for a string with exactly the shape of a generated intent id:
 /// `int_` followed by 32 hexadecimal characters.
 fn looks_like_intent_id(value: &str) -> bool {
@@ -2192,15 +2559,15 @@ fn persist_conflict(
         .as_ref()
         .map(Scope::canonical)
         .unwrap_or_else(|| "<none>".to_string());
-    let canonical_id: String = tx.query_row(
+    // The conflict row is a stable lifecycle identity. A fresh observation of
+    // the same identity must never rewrite its original evidence or silently
+    // reopen a settled decision; observations are appended separately below.
+    let inserted = tx.execute(
         "INSERT INTO conflicts(id, kind, severity, score, source_intent_id, target_intent_id,
          scope_json, scope_identity, explanation, suggestion, evidence_json, status, detected_at)
          VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          ON CONFLICT(source_intent_id, target_intent_id, kind, scope_identity)
-         DO UPDATE SET score = excluded.score, explanation = excluded.explanation,
-         suggestion = excluded.suggestion, evidence_json = excluded.evidence_json,
-         detected_at = excluded.detected_at
-         RETURNING id",
+         DO NOTHING",
         params![
             normalized.id,
             normalized.kind,
@@ -2216,15 +2583,77 @@ fn persist_conflict(
             normalized.status,
             normalized.detected_at,
         ],
-        |row| row.get(0),
     )?;
-    let canonical = conflict_by_id(tx, &canonical_id)?;
+    let canonical_id = if inserted == 1 {
+        normalized.id.clone()
+    } else {
+        tx.query_row(
+            "SELECT id FROM conflicts
+             WHERE source_intent_id IS ?1 AND target_intent_id = ?2
+             AND kind = ?3 AND scope_identity = ?4",
+            params![
+                normalized.source_intent_id,
+                normalized.target_intent_id,
+                normalized.kind,
+                scope_identity,
+            ],
+            |row| row.get::<_, String>(0),
+        )?
+    };
+    let mut canonical = conflict_by_id(tx, &canonical_id)?;
+    let previously_settled = !matches!(canonical.status.as_str(), "OPEN" | "COORDINATING");
+    canonical.previously_settled = previously_settled;
+    let detection = ConflictDetection {
+        id: id("dtn"),
+        conflict_id: canonical.id.clone(),
+        severity: normalized.severity.clone(),
+        score: normalized.score,
+        scope: normalized.scope.clone(),
+        explanation: normalized.explanation.clone(),
+        suggestion: normalized.suggestion.clone(),
+        evidence: normalized.evidence.clone(),
+        previously_settled,
+        detected_at: normalized.detected_at.clone(),
+    };
+    tx.execute(
+        "INSERT INTO conflict_detections(id, conflict_id, severity, score, scope_json,
+         explanation, suggestion, evidence_json, previously_settled, detected_at)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            detection.id,
+            detection.conflict_id,
+            detection.severity,
+            detection.score,
+            to_json(&detection.scope)?,
+            detection.explanation,
+            detection.suggestion,
+            to_json(&detection.evidence)?,
+            detection.previously_settled,
+            detection.detected_at,
+        ],
+    )?;
+    let mut graph_conflict = canonical.clone();
+    graph_conflict.previously_settled = false;
     let conflict_node = Store::upsert_node(
         tx,
         "Conflict",
         &canonical.id,
         &canonical.explanation,
-        &serde_json::to_value(&canonical)?,
+        &serde_json::to_value(&graph_conflict)?,
+    )?;
+    let detection_node = Store::upsert_node(
+        tx,
+        "ConflictDetection",
+        &detection.id,
+        &detection.explanation,
+        &serde_json::to_value(&detection)?,
+    )?;
+    Store::link_nodes(
+        tx,
+        &detection_node,
+        &conflict_node,
+        "OCCURRENCE_OF",
+        &json!({}),
     )?;
     if let Some(source_intent_id) = canonical.source_intent_id.as_deref() {
         let source_node =
@@ -2247,11 +2676,18 @@ fn persist_conflict(
     )?;
     Store::append_event(
         tx,
-        "conflict.detected",
+        if inserted == 1 {
+            "conflict.detected"
+        } else {
+            "conflict.redetected"
+        },
         "Conflict",
         &canonical.id,
         agent_id,
-        &serde_json::to_value(&canonical)?,
+        &json!({
+            "conflict": canonical,
+            "detection": detection,
+        }),
     )?;
     Ok(canonical)
 }
@@ -2538,6 +2974,7 @@ fn conflict_by_id(conn: &Connection, id: &str) -> Result<Conflict> {
                 evidence: from_json(row.get::<_, String>(9)?)?,
                 status: row.get(10)?,
                 detected_at: row.get(11)?,
+                previously_settled: false,
             })
         },
     )
@@ -2827,6 +3264,127 @@ mod tests {
     }
 
     #[test]
+    fn conflict_redetection_preserves_resolution_and_original_evidence() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let register = |name: &str| {
+            service
+                .register_agent(RegisterAgentRequest {
+                    name: name.into(),
+                    model: None,
+                    capabilities: vec![],
+                    worktree: None,
+                })
+                .unwrap()
+        };
+        let first = register("occurrence-a");
+        let second = register("occurrence-b");
+        let publish = |agent: &Agent, scope: Scope| {
+            service
+                .publish_intent(PublishIntentRequest {
+                    agent_id: agent.id.clone(),
+                    task: format!("{} task", agent.name),
+                    summary: format!("{} intent", agent.name),
+                    rationale: None,
+                    scopes: vec![scope],
+                    depends_on: vec![],
+                    metadata: json!({}),
+                })
+                .unwrap()
+                .intent
+        };
+        let first_intent = publish(&first, Scope::new("symbol", "PaymentService"));
+        let second_intent = publish(&second, Scope::new("symbol", "paymentservice"));
+        let claim = |agent: &Agent, intent: &Intent, scope: Scope| {
+            service
+                .claim_work(ClaimWorkRequest {
+                    agent_id: agent.id.clone(),
+                    intent_id: intent.id.clone(),
+                    scopes: vec![scope],
+                    reason: None,
+                    lease_seconds: 3600,
+                })
+                .unwrap()
+        };
+
+        claim(
+            &first,
+            &first_intent,
+            Scope::new("symbol", "PaymentService"),
+        );
+        let initial = claim(
+            &second,
+            &second_intent,
+            Scope::new("symbol", "paymentservice"),
+        )
+        .warnings
+        .remove(0);
+        service
+            .resolve_conflict(
+                &initial.id,
+                ResolveConflictRequest {
+                    agent_id: second.id.clone(),
+                    resolution: "share the semantic scope".into(),
+                    rationale: "agents agreed to sequence edits".into(),
+                },
+            )
+            .unwrap();
+
+        let redetected = claim(
+            &first,
+            &first_intent,
+            Scope::new("symbol", "PAYMENTSERVICE"),
+        )
+        .warnings
+        .remove(0);
+        assert_eq!(redetected.id, initial.id);
+        assert_eq!(redetected.status, "RESOLVED");
+        assert!(redetected.previously_settled);
+        assert_eq!(redetected.scope, initial.scope);
+        assert_eq!(redetected.evidence, initial.evidence);
+        assert_eq!(redetected.detected_at, initial.detected_at);
+
+        let occurrences = service.conflict_detections(&initial.id).unwrap();
+        assert_eq!(occurrences.len(), 2);
+        assert!(!occurrences[0].previously_settled);
+        assert!(occurrences[1].previously_settled);
+        assert_eq!(
+            occurrences[1].scope,
+            Some(Scope::new("symbol", "PAYMENTSERVICE"))
+        );
+        assert!(
+            service
+                .store
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE conflict_detections SET explanation = 'rewritten' WHERE id = ?1",
+                    [&occurrences[0].id],
+                )
+                .is_err(),
+            "conflict occurrence rows must be immutable"
+        );
+        let events = service.events(0, 1000).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    event.event_type == "conflict.detected" && event.entity_id == initial.id
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    event.event_type == "conflict.redetected" && event.entity_id == initial.id
+                })
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn scoped_query_applies_limit_after_semantic_filtering() {
         let service = Foremerge::new(Store::in_memory().unwrap());
         let agent = service
@@ -2869,5 +3427,43 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].intent.id, target.id);
+    }
+
+    #[test]
+    fn query_work_plans_use_filter_and_scope_indexes() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let conn = service.store.lock().unwrap();
+        let plan = |sql: &str, parameters: &[&dyn rusqlite::ToSql]| {
+            let mut statement = conn.prepare(sql).unwrap();
+            statement
+                .query_map(parameters, |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+                .join("\n")
+        };
+        let filtered = plan(
+            "EXPLAIN QUERY PLAN
+             SELECT i.id FROM intents i
+             WHERE i.agent_id = ?1 AND i.status = ?2
+             ORDER BY i.created_at DESC, i.id DESC LIMIT ?3",
+            &[&"agt_example", &"IN_PROGRESS", &50_i64],
+        );
+        assert!(
+            filtered.contains("idx_intents_agent_status_created"),
+            "{filtered}"
+        );
+
+        let scoped = plan(
+            "EXPLAIN QUERY PLAN
+             SELECT i.id FROM intents i WHERE i.id IN (
+               SELECT s.intent_id FROM intent_scopes s WHERE s.canonical_scope = ?1
+               UNION
+               SELECT c.intent_id FROM claims c WHERE c.canonical_scope = ?1
+             ) ORDER BY i.created_at DESC, i.id DESC LIMIT ?2",
+            &[&"symbol:paymentservice", &50_i64],
+        );
+        assert!(scoped.contains("idx_intent_scopes_canonical"), "{scoped}");
+        assert!(scoped.contains("idx_claims_scope"), "{scoped}");
     }
 }

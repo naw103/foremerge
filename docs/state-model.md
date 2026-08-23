@@ -156,9 +156,18 @@ Foremerge-executed validation.
 - The recorded validation fingerprint must equal the current ChangeSet
   fingerprint.
 
-A later code or Git change detected by Foremerge's fingerprint makes the
-validation stale. Ignored files remain a documented limitation in
-[Git integration](git-integration.md).
+The final Git snapshot is captured outside the SQLite write transaction. The
+short final transaction then reloads the ChangeSet and intent, verifies the
+current revision/state, compares the captured fingerprint, appends the attempt,
+and applies lifecycle state only when the result remains authoritative.
+
+Every completed command is retained in immutable `validation_attempts`, even if
+a concurrent revision, acceptance, or worktree mutation makes it stale. Such an
+attempt records `authoritative: false`, a reason, expected and observed
+fingerprints, changed paths, excluded paths, and the exclusion-policy digest;
+it never enters the authoritative `validations` projection and cannot gate
+acceptance. Generated untracked output can be covered by the digest-bound rules
+in [ADR 0001](adr/0001-validation-exclusion-rules.md).
 
 A failed validation leaves, or returns, both the current ChangeSet and intent to
 `PROVISIONAL`. When it invalidates an earlier `VALIDATED` state, Foremerge emits
@@ -211,9 +220,9 @@ Conceptually, a validation key is:
 (changeset_id, changeset_fingerprint)
 ```
 
-Acceptance selects the latest validation and requires it to be passing with the
-same fingerprint. A pass for an older fingerprint remains useful provenance but
-cannot gate changed work.
+Acceptance selects the latest authoritative validation projection and requires
+it to be passing with the same fingerprint. A stale pass remains queryable in
+the immutable attempt history but cannot gate changed work.
 
 ## Conflict gating
 
@@ -228,6 +237,13 @@ Conflict discovery and lifecycle state are related but separate:
 - resolving an agreement marks the finding `RESOLVED`; and
 - discarding linked work marks its open findings `DISMISSED`, preserving the
   original evidence while removing the acceptance gate.
+
+Conflict lifecycle identity and observations are separate. First detection
+creates the stable `cfl_*` row and a `conflict.detected` event. Every later
+observation appends an immutable detection row and `conflict.redetected` event;
+it does not overwrite original evidence or reopen `RESOLVED`, `OVERRIDDEN`, or
+`DISMISSED` state. Redetection of a terminal identity is returned with
+`previously_settled: true`.
 
 This preserves cheap speculation while making risky integration deliberate.
 

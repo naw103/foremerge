@@ -4,10 +4,9 @@ Foremerge is building the smallest credible coordination layer above Git. The
 roadmap is ordered by evidence and interoperability, not dates. Items are plans,
 not promises, unless a release note marks them shipped.
 
-## Current focus: local proof
+## Shipped local proof (through 0.3.0)
 
-The first release is intended to establish the core thesis on one developer
-machine:
+The current local release establishes the core thesis on one developer machine:
 
 - a local Rust daemon backed by SQLite;
 - one coordination database shared across isolated Git worktrees;
@@ -17,8 +16,13 @@ machine:
 - advisory semantic claims rather than hard locks;
 - deterministic intent-conflict and duplicate-work warnings;
 - MCP, CLI, and versioned JSON API access to the same service;
-- verification-gated ChangeSet acceptance; and
-- a reproducible two-agent demo and benchmark specification.
+- verification-gated ChangeSet acceptance;
+- a reproducible two-agent demo and benchmark specification;
+- split process liveness, bounded readiness, and authenticated paged audit;
+- immutable validation attempts and conflict-detection occurrences;
+- digest-bound validation exclusions for generated untracked output;
+- sargable indexed work queries with a reproducible timing harness; and
+- Linux, macOS, and Windows portability gates before binary release.
 
 Exit criteria are behavioral: real MCP and HTTP clients must exercise the
 interfaces, two independent processes must share state from different worktrees,
@@ -27,7 +31,7 @@ validation must leave the target Git ref unchanged.
 
 ## Next: protocol fidelity and integrations
 
-- Publish versioned JSON Schemas for events, entities, and all 13 MCP
+- Publish versioned JSON Schemas for events, entities, and all 17 MCP
   tools.
 - Add export/import and migration tooling for local provenance.
 - Add language adapters for symbols and references while retaining manual scopes
@@ -40,8 +44,10 @@ validation must leave the target Git ref unchanged.
 - Continue compatibility testing across releases of Codex, Claude Code, and
   Cursor; native skills, project templates, setup, and diagnostics shipped in
   0.2.0.
-- Build the paired benchmark runner described in `benchmark-plan.md` and publish
-  raw pilot results before making quantitative claims.
+- Build the paired model-driven benchmark runner described in
+  `benchmark-plan.md` and publish raw pilot results before making quantitative
+  claims. The scripted five-scenario correctness runner and query microbenchmark
+  are already committed.
 
 ## Later: optional shared coordination
 

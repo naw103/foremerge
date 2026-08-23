@@ -652,6 +652,7 @@ fn make_conflict(
         evidence,
         status: "OPEN".to_string(),
         detected_at: Utc::now().to_rfc3339(),
+        previously_settled: false,
     }
 }
 

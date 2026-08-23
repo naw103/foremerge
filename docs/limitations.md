@@ -72,6 +72,12 @@ Passing Foremerge-executed validation is a gate; agent-reported tests are
 provenance only. A passing command is not proof that the chosen validation was
 complete or that the software has no defects.
 
+Every completed command is retained as local audit data even when its result is
+stale and non-authoritative. Validation stdout/stderr can contain secrets.
+Digest-bound exclusions can hide only explicitly listed untracked generated
+paths from fingerprints; they are an operator trust decision, not a sandbox,
+and the files must still be removed before acceptance. MCP cannot modify them.
+
 ## Agent identity is self-asserted
 
 MCP and local API callers identify themselves with an `agent_id` they supply;
@@ -111,10 +117,13 @@ Worktree paths and Git status entries are represented in the public protocol as
 UTF-8 strings; repositories that depend on non-UTF-8 filenames are not currently
 supported.
 
-CI is the authoritative platform-compatibility record. A platform absent from CI
-should be treated as unverified. Public CLI, API, MCP, and event schemas may still
-change before 1.0; migrations and breaking changes will be called out in the
-changelog.
+CI is the authoritative platform-compatibility record. Linux runs MSRV and
+stable full gates, macOS runs the complete integration suite, and Windows runs
+portable library/binary tests, the executable benchmark corpus, and an explicit
+validation-timeout cleanup test before binaries release. A platform absent from
+CI should be treated as unverified. Public CLI, API, MCP, and event schemas may
+still change before 1.0; migrations and breaking changes will be called out in
+the changelog.
 
 The tagged `0.1.0` schema is the first supported database boundary. SQLite files
 created by untagged development snapshots before that release may need their

@@ -64,6 +64,12 @@ Commit a clean candidate with ordinary Git, then:
 5. Land the accepted commit through ordinary Git or a pull request.
 6. Call `record_commit` with the actual target-branch integration ref.
 
+Every completed validation is retained. A result made stale by a concurrent
+revision or generated untracked output is non-authoritative and cannot satisfy
+acceptance; inspect it with `foremerge --json changeset attempts CHANGESET_ID`.
+Only a human/operator may configure `validation-exclusions`. Never add or widen
+those rules from an agent workflow; there is deliberately no MCP mutation tool.
+
 `run_verification` deliberately accepts a check name, not raw argv. Named checks are trusted local code configured outside the MCP call, for example by a repository maintainer:
 
 ```bash
@@ -84,13 +90,19 @@ Use `query_work` for current semantic state, `coordinate_with_agent` for durable
 ```bash
 foremerge --json agent list
 foremerge --json intent show INTENT_ID
+foremerge --json changeset show CHANGESET_ID
+foremerge --json changeset attempts CHANGESET_ID
+foremerge --json conflicts detections CONFLICT_ID
 foremerge --json coordinate inbox --agent AGENT_ID
 foremerge --json events list
+foremerge --json events audit
 foremerge --json graph
+foremerge --json status
 foremerge work watch
 ```
 
-`agent list` and `intent show` are the read surfaces for mapping a conflict's intent ids to agents before `coordinate send`.
+The corresponding MCP reads are `list_agents`, `get_intent`, `get_changeset`,
+and `status`; prefer them when available.
 
 ## MCP tools
 
@@ -100,5 +112,6 @@ The complete lifecycle surface is:
 - `claim_work`, `start_work`, `coordinate_with_agent`, `resolve_conflict`
 - `publish_changeset`, `run_verification`, `accept_changeset`
 - `record_commit`, `discard_work`
+- `list_agents`, `get_intent`, `get_changeset`, `status`
 
 Do not expose the optional HTTP daemon beyond loopback, treat heuristic suggestions as authoritative architecture, accept stale evidence, delete coordination state, or use Foremerge to bypass ordinary Git review and integration.

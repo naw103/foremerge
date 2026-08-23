@@ -126,12 +126,20 @@ The complete MVP MCP tool surface is:
 | `accept_changeset` | Apply the final conflict, dependency, validation, and Git gates |
 | `record_commit` | Record the actual post-integration Git commit |
 | `discard_work` | Preserve abandoned work while releasing claims and linked blockers |
+| `list_agents` | Read registered agent provenance |
+| `get_intent` | Read one intent, its agent, and current conflicts |
+| `get_changeset` | Read one ChangeSet and its commit/provenance state |
+| `status` | Read one consistent current coordinator snapshot |
 
 Tool names are stable protocol identifiers; CLI command spelling is allowed to
 differ. Direct arbitrary validation argv remains a CLI/JSON API operation;
 MCP verification is deliberately limited to configured check names, and the
 check registry is resolved from the repository the coordination store is bound
 to, never from the MCP server process's working directory.
+
+There is intentionally no MCP tool for changing validation exclusions. That
+digest-bound trust policy is operator-owned and CLI-only; see
+[ADR 0001](adr/0001-validation-exclusion-rules.md).
 
 Two further operations are deliberately narrower over MCP than over the trusted
 CLI and HTTP operator surfaces:
@@ -234,6 +242,16 @@ Do not call tools for every keystroke. Foremerge events are semantic boundaries.
   "limit": 50
 }
 ```
+
+### Core reads
+
+```json
+{"id":"int_..."}
+```
+
+`get_intent` and `get_changeset` both accept the relevant domain `id`.
+`list_agents` and `status` accept `{}`. All four are marked read-only and
+idempotent in MCP annotations and return the same domain shapes as HTTP/CLI.
 
 ### `check_conflicts`
 

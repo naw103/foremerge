@@ -42,13 +42,16 @@ integrate with ordinary Git or a pull request
 record the integration commit
 ```
 
-The complete lifecycle is available through 13 MCP tools:
+The complete lifecycle and core read parity are available through 17 MCP tools:
 
 - `accept_changeset`
 - `check_conflicts`
 - `claim_work`
 - `coordinate_with_agent`
 - `discard_work`
+- `get_changeset`
+- `get_intent`
+- `list_agents`
 - `publish_changeset`
 - `publish_intent`
 - `query_work`
@@ -57,6 +60,7 @@ The complete lifecycle is available through 13 MCP tools:
 - `resolve_conflict`
 - `run_verification`
 - `start_work`
+- `status`
 
 `run_verification` accepts only a trusted check name from repository-private
 Foremerge configuration. The CLI and HTTP API retain their direct argv
@@ -76,13 +80,14 @@ foremerge doctor [--client codex|claude|cursor|all]
 foremerge daemon [--bind <address>] [--no-auth]
 foremerge mcp
 foremerge checks set|list|remove
+foremerge validation-exclusions show|set
 foremerge agent register|list
 foremerge intent publish|show
 foremerge work claim|query|start|watch|discard
-foremerge conflicts check|list|resolve
-foremerge changeset publish|show|validate|accept|commit
+foremerge conflicts check|list|detections|resolve
+foremerge changeset publish|show|attempts|validate|accept|commit
 foremerge coordinate send|inbox
-foremerge events list
+foremerge events list|audit
 foremerge graph
 foremerge status
 foremerge worktree create
@@ -96,12 +101,11 @@ actor flags use `--agent` in the domain CLI, while HTTP/MCP JSON uses
 event query; it is not a streaming transport. `request` is an authenticated
 local HTTP escape hatch, not another implementation of the service.
 
-`agent list` and `intent show <INTENT_ID>` are CLI-only read conveniences: they
-let an agent map a conflict's intent ids to registered agents without scraping
-`events list` or `graph` output. They are not exposed by the daemon or MCP
-surfaces.
+`agent list`, `intent show <INTENT_ID>`, `changeset show <CHANGESET_ID>`, and
+`status` have read-only HTTP and MCP equivalents. This keeps agents from
+scraping events or graph output merely to recover typed current state.
 
-`status` is the CLI-only human overview: one screen listing active agents,
+`status` is also the human overview: one screen listing active agents,
 intents grouped by lifecycle status, unexpired claims, OPEN or COORDINATING
 conflicts with both parties named, and ChangeSets grouped by status with ids
 for the non-terminal ones. All sections come from a single read transaction,
@@ -249,6 +253,18 @@ Foremerge resolves Git context where possible and stores a fingerprint. The
 `tests` array is agent-reported history. An executed validation is a separate
 record and is the evidence used by the acceptance gate.
 
+Every completed command also creates an immutable validation-attempt record.
+The attempt is marked `authoritative` only when the same ChangeSet revision is
+still current, its lifecycle remains validation-eligible, and the post-command
+snapshot has the expected fingerprint. Stale attempts retain output, observed
+fingerprint, changed-path diagnostics, and policy digest but cannot gate
+acceptance. List them with `changeset attempts` or the matching HTTP read.
+
+Generated untracked validation output may be excluded only by an operator-owned
+ruleset under Git's common directory. Its normalized digest is part of the
+fingerprint, exclusions never apply to tracked changes, and MCP has no mutation
+surface. See [ADR 0001](adr/0001-validation-exclusion-rules.md).
+
 The stored `base_ref` is the commit the candidate is diffed against, and
 `provenance.git.diff_hash` is a SHA-256 over the actual `git diff <base>
 <candidate>` patch bytes. When the caller omits `base_ref` the base is derived
@@ -313,6 +329,12 @@ moves a persisted `cfl_*` conflict to `RESOLVED`.
 
 Resolving is a statement that the parties agreed how the work coexists, not a
 merge operation; it unblocks the acceptance gate for both intents.
+
+The `cfl_*` row is a stable lifecycle identity. Every observation is appended
+as an immutable detection occurrence. The first emits `conflict.detected`;
+later observations emit `conflict.redetected`. Redetection preserves original
+evidence and never auto-reopens a settled decision; responses identify that case
+with `previously_settled: true`.
 
 ## Event envelope
 

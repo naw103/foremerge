@@ -4,7 +4,7 @@ CARGO ?= cargo
 
 MSRV ?= 1.85.0
 
-.PHONY: help fmt fmt-check check clippy test doc build release verify msrv clean
+.PHONY: help fmt fmt-check check clippy test benchmarks query-benchmark doc build release verify msrv clean
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "; printf "Foremerge development targets:\n"} /^[a-zA-Z_-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -23,6 +23,12 @@ clippy: ## Run Clippy and fail on warnings
 
 test: ## Run all tests
 	$(CARGO) test --workspace --all-targets --all-features
+
+benchmarks: ## Execute all five committed benchmark scenarios
+	$(CARGO) test --test benchmark_scenarios -- --nocapture
+
+query-benchmark: ## Run the optimized query harness at documented scales
+	$(CARGO) run --release --example query_benchmark -- 500 5000 20000
 
 doc: ## Build documentation and fail on warnings
 	RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --all-features --no-deps

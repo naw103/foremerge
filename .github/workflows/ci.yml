@@ -50,6 +50,14 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-targets --all-features
 
+      - name: Execute committed benchmark scenarios
+        if: matrix.rust == 'stable'
+        run: cargo test --test benchmark_scenarios -- --nocapture
+
+      - name: Smoke-test query benchmark harness
+        if: matrix.rust == 'stable'
+        run: cargo run --quiet --example query_benchmark -- 200
+
       - name: Build documentation
         env:
           RUSTDOCFLAGS: -D warnings
@@ -58,3 +66,41 @@ jobs:
       - name: Build release binary
         if: matrix.rust == 'stable'
         run: cargo build --workspace --all-features --release
+
+  platform:
+    name: ${{ matrix.os }} portability
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+
+      - name: Select stable Rust
+        run: rustup override set stable
+
+      - name: Check all portable targets
+        run: cargo check --workspace --all-targets --all-features
+
+      - name: Test library and binaries
+        run: cargo test --workspace --lib --bins --all-features
+
+      - name: Execute benchmark corpus
+        run: cargo test --test benchmark_scenarios -- --nocapture
+
+      - name: Test complete integration suite on macOS
+        if: runner.os == 'macOS'
+        run: cargo test --test e2e
+
+      - name: Test Windows validation timeout cleanup
+        if: runner.os == 'Windows'
+        run: cargo test --test e2e validation_timeout_kills_direct_child_on_windows -- --exact --nocapture

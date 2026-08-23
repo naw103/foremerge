@@ -1,5 +1,5 @@
-use crate::model::{Event, Scope};
-use anyhow::{Context, Result};
+use crate::model::{Event, EventChainAudit, Scope};
+use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params, types::Type,
@@ -7,11 +7,15 @@ use rusqlite::{
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::Duration;
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 1;
+const DATABASE_SCHEMA_VERSION: i64 = 2;
+// Event hashing is versioned independently from the mutable SQLite projection
+// schema. A database migration must not silently change the hash material for
+// otherwise identical events.
+const EVENT_SCHEMA_VERSION: i64 = 1;
 
 #[derive(Clone)]
 pub struct Store {
@@ -82,6 +86,30 @@ impl Store {
         })
     }
 
+    /// Open an existing store without creating files or running migrations.
+    /// Diagnostics use this path so observation can never initialize or alter
+    /// the system it is inspecting.
+    pub fn open_existing_read_only(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let metadata = std::fs::symlink_metadata(&path).with_context(|| {
+            format!(
+                "NOT_INITIALIZED: database does not exist: {}",
+                path.display()
+            )
+        })?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            bail!(
+                "INVALID_INPUT: database path must be an existing regular file: {}",
+                path.display()
+            );
+        }
+        let conn = Self::open_read_only_connection(&path)?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+            path: Arc::new(path),
+        })
+    }
+
     pub fn in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         Self::configure(&conn)?;
@@ -100,6 +128,31 @@ impl Store {
              PRAGMA synchronous = NORMAL;",
         )?;
         Ok(())
+    }
+
+    fn open_read_only_connection(path: &Path) -> Result<Connection> {
+        // Resolve only parent aliases (not the final database component) so
+        // macOS's `/var` -> `/private/var` alias works while SQLite NOFOLLOW
+        // still rejects replacement of the database itself with a symlink.
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("database path has no parent: {}", path.display()))?;
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("database path has no file name: {}", path.display()))?;
+        let resolved = std::fs::canonicalize(parent)
+            .with_context(|| format!("resolve SQLite database parent {}", parent.display()))?
+            .join(file_name);
+        let conn = Connection::open_with_flags(
+            &resolved,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .with_context(|| format!("open SQLite database read-only {}", resolved.display()))?;
+        conn.busy_timeout(Duration::from_millis(500))?;
+        conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA query_only = ON;")?;
+        Ok(conn)
     }
 
     fn migrate(conn: &Connection) -> Result<()> {
@@ -145,6 +198,23 @@ impl Store {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS idx_intents_created ON intents(created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_intents_agent_created
+              ON intents(agent_id, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_intents_status_created
+              ON intents(status, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_intents_agent_status_created
+              ON intents(agent_id, status, created_at DESC, id DESC);
+
+            CREATE TABLE IF NOT EXISTS intent_scopes (
+                intent_id TEXT NOT NULL REFERENCES intents(id),
+                scope_kind TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                canonical_scope TEXT NOT NULL,
+                PRIMARY KEY(intent_id, canonical_scope)
+            );
+            CREATE INDEX IF NOT EXISTS idx_intent_scopes_canonical
+              ON intent_scopes(canonical_scope, intent_id);
 
             CREATE TABLE IF NOT EXISTS claims (
                 id TEXT PRIMARY KEY,
@@ -204,6 +274,35 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_validations_changeset ON validations(changeset_id, run_at);
 
+            CREATE TABLE IF NOT EXISTS validation_attempts (
+                id TEXT PRIMARY KEY,
+                changeset_id TEXT NOT NULL REFERENCES changesets(id),
+                command_json TEXT NOT NULL,
+                passed INTEGER NOT NULL,
+                exit_code INTEGER,
+                stdout TEXT NOT NULL,
+                stderr TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                expected_fingerprint TEXT NOT NULL,
+                observed_fingerprint TEXT NOT NULL,
+                authoritative INTEGER NOT NULL,
+                stale_reason TEXT,
+                changed_files_json TEXT NOT NULL,
+                excluded_paths_json TEXT NOT NULL,
+                exclusion_ruleset_digest TEXT NOT NULL,
+                run_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_validation_attempts_changeset
+              ON validation_attempts(changeset_id, run_at DESC, id DESC);
+
+            CREATE TRIGGER IF NOT EXISTS validation_attempts_no_update
+            BEFORE UPDATE ON validation_attempts
+            BEGIN SELECT RAISE(ABORT, 'validation attempts are immutable'); END;
+
+            CREATE TRIGGER IF NOT EXISTS validation_attempts_no_delete
+            BEFORE DELETE ON validation_attempts
+            BEGIN SELECT RAISE(ABORT, 'validation attempts are immutable'); END;
+
             CREATE TABLE IF NOT EXISTS decisions (
                 id TEXT PRIMARY KEY,
                 changeset_id TEXT REFERENCES changesets(id),
@@ -229,10 +328,36 @@ impl Store {
                 evidence_json TEXT NOT NULL,
                 status TEXT NOT NULL,
                 detected_at TEXT NOT NULL,
+                -- Legacy display-JSON uniqueness retained to avoid a
+                -- destructive table rebuild. idx_conflicts_identity below is
+                -- the authoritative canonical identity constraint.
                 UNIQUE(source_intent_id, target_intent_id, kind, scope_json)
             );
             CREATE INDEX IF NOT EXISTS idx_conflicts_source ON conflicts(source_intent_id, status);
             CREATE INDEX IF NOT EXISTS idx_conflicts_target ON conflicts(target_intent_id, status);
+
+            CREATE TABLE IF NOT EXISTS conflict_detections (
+                id TEXT PRIMARY KEY,
+                conflict_id TEXT NOT NULL REFERENCES conflicts(id),
+                severity TEXT NOT NULL,
+                score REAL NOT NULL,
+                scope_json TEXT,
+                explanation TEXT NOT NULL,
+                suggestion TEXT NOT NULL,
+                evidence_json TEXT NOT NULL,
+                previously_settled INTEGER NOT NULL,
+                detected_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_conflict_detections_conflict
+              ON conflict_detections(conflict_id, detected_at, id);
+
+            CREATE TRIGGER IF NOT EXISTS conflict_detections_no_update
+            BEFORE UPDATE ON conflict_detections
+            BEGIN SELECT RAISE(ABORT, 'conflict detections are immutable'); END;
+
+            CREATE TRIGGER IF NOT EXISTS conflict_detections_no_delete
+            BEFORE DELETE ON conflict_detections
+            BEGIN SELECT RAISE(ABORT, 'conflict detections are immutable'); END;
 
             CREATE TABLE IF NOT EXISTS coordination_messages (
                 id TEXT PRIMARY KEY,
@@ -331,6 +456,38 @@ impl Store {
              WHERE integration_commit IS NULL AND status = 'COMMITTED'",
             [],
         )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO validation_attempts(
+               id, changeset_id, command_json, passed, exit_code, stdout, stderr, duration_ms,
+               expected_fingerprint, observed_fingerprint, authoritative, stale_reason,
+               changed_files_json, excluded_paths_json, exclusion_ruleset_digest, run_at
+             )
+             SELECT id, changeset_id, command_json, passed, exit_code, stdout, stderr, duration_ms,
+                    fingerprint, fingerprint, 1, NULL, '[]', '[]', 'legacy', run_at
+             FROM validations",
+            [],
+        )?;
+        let mut statement = conn.prepare(
+            "SELECT id, scopes_json FROM intents
+             WHERE NOT EXISTS(SELECT 1 FROM intent_scopes s WHERE s.intent_id = intents.id)",
+        )?;
+        let intent_scopes = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        for (intent_id, scopes_json) in intent_scopes {
+            let scopes: Vec<Scope> = serde_json::from_str(&scopes_json)
+                .with_context(|| format!("decode scopes for intent {intent_id}"))?;
+            for scope in scopes {
+                conn.execute(
+                    "INSERT OR IGNORE INTO intent_scopes(
+                     intent_id, scope_kind, scope_key, canonical_scope) VALUES(?1, ?2, ?3, ?4)",
+                    params![intent_id, scope.kind, scope.key, scope.canonical()],
+                )?;
+            }
+        }
         let has_scope_identity: bool = conn.query_row(
             "SELECT EXISTS(
                SELECT 1 FROM pragma_table_info('conflicts') WHERE name = 'scope_identity'
@@ -373,9 +530,21 @@ impl Store {
         )
         .context("create canonical conflict identity index")?;
         conn.execute(
+            "INSERT OR IGNORE INTO conflict_detections(
+               id, conflict_id, severity, score, scope_json, explanation, suggestion,
+               evidence_json, previously_settled, detected_at
+             )
+             SELECT 'dtn_legacy_' || id, id, severity, score, scope_json, explanation,
+                    suggestion, evidence_json,
+                    CASE WHEN status IN ('OPEN', 'COORDINATING') THEN 0 ELSE 1 END,
+                    detected_at
+             FROM conflicts",
+            [],
+        )?;
+        conn.execute(
             "INSERT INTO meta(key, value) VALUES('schema_version', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [SCHEMA_VERSION.to_string()],
+            [DATABASE_SCHEMA_VERSION.to_string()],
         )?;
         Ok(())
     }
@@ -414,7 +583,7 @@ impl Store {
         let created_at = Utc::now().to_rfc3339();
         let payload_json = serde_json::to_string(payload)?;
         let material = format!(
-            "{prev_hash}|{event_id}|{SCHEMA_VERSION}|{event_type}|{entity_type}|{entity_id}|{}|{created_at}|{payload_json}",
+            "{prev_hash}|{event_id}|{EVENT_SCHEMA_VERSION}|{event_type}|{entity_type}|{entity_id}|{}|{created_at}|{payload_json}",
             agent_id.unwrap_or("")
         );
         let event_hash = format!("{:x}", Sha256::digest(material.as_bytes()));
@@ -424,7 +593,7 @@ impl Store {
              VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 event_id,
-                SCHEMA_VERSION,
+                EVENT_SCHEMA_VERSION,
                 event_type,
                 entity_type,
                 entity_id,
@@ -549,44 +718,30 @@ impl Store {
     }
 
     pub fn verify_event_chain(&self) -> Result<bool> {
-        let conn = self.lock()?;
-        let mut statement = conn.prepare(
-            "SELECT seq, event_id, schema_version, event_type, entity_type, entity_id, agent_id,
-             payload_json, created_at, prev_hash, event_hash FROM events ORDER BY seq",
-        )?;
-        let mut rows = statement.query([])?;
-        let mut expected_prev = "GENESIS".to_string();
-        while let Some(row) = rows.next()? {
-            let event_id: String = row.get(1)?;
-            let schema_version: i64 = row.get(2)?;
-            let event_type: String = row.get(3)?;
-            let entity_type: String = row.get(4)?;
-            let entity_id: String = row.get(5)?;
-            let agent_id: Option<String> = row.get(6)?;
-            let payload_json: String = row.get(7)?;
-            let created_at: String = row.get(8)?;
-            let prev_hash: String = row.get(9)?;
-            let event_hash: String = row.get(10)?;
-            if prev_hash != expected_prev {
-                return Ok(false);
-            }
-            // Hash the payload bytes exactly as stored. Appending hashes the
-            // serialized payload it writes, so stored bytes are always the
-            // hashed bytes; re-serializing parsed JSON here would tie
-            // verification to the verifying binary's map key order, and a
-            // chain written by one release could falsely fail audit under
-            // another.
-            let material = format!(
-                "{prev_hash}|{event_id}|{schema_version}|{event_type}|{entity_type}|{entity_id}|{}|{created_at}|{payload_json}",
-                agent_id.as_deref().unwrap_or("")
-            );
-            let actual = format!("{:x}", Sha256::digest(material.as_bytes()));
-            if actual != event_hash {
-                return Ok(false);
-            }
-            expected_prev = event_hash;
+        Ok(self.audit_event_chain(1000)?.valid)
+    }
+
+    /// Verify a stable prefix of the append-only event log in bounded pages.
+    /// Persistent stores use a dedicated read-only connection, so this audit
+    /// never holds the coordinator's shared process mutex.
+    pub fn audit_event_chain(&self, page_size: usize) -> Result<EventChainAudit> {
+        let page_size = page_size.clamp(1, 10_000);
+        if self.path.as_os_str() == ":memory:" {
+            let conn = self.lock()?;
+            return audit_event_connection(&conn, page_size);
         }
-        Ok(true)
+        let conn = Self::open_read_only_connection(self.path())?;
+        audit_event_connection(&conn, page_size)
+    }
+
+    /// A non-waiting readiness probe. Busy means "not ready now" rather than
+    /// making a monitoring request queue behind coordinator work.
+    pub fn readiness(&self) -> Result<bool> {
+        match self.conn.try_lock() {
+            Ok(conn) => Ok(conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))? == 1),
+            Err(TryLockError::WouldBlock) => Ok(false),
+            Err(TryLockError::Poisoned(_)) => bail!("SQLite connection lock poisoned"),
+        }
     }
 
     pub fn graph_snapshot(&self) -> Result<Value> {
@@ -639,10 +794,84 @@ impl Store {
             "claims": count("claims")?,
             "changesets": count("changesets")?,
             "validations": count("validations")?,
+            "validation_attempts": count("validation_attempts")?,
             "conflicts": count("conflicts")?,
+            "conflict_detections": count("conflict_detections")?,
             "events": count("events")?,
         }))
     }
+}
+
+fn audit_event_connection(conn: &Connection, page_size: usize) -> Result<EventChainAudit> {
+    let max_seq: Option<i64> =
+        conn.query_row("SELECT MAX(seq) FROM events", [], |row| row.get(0))?;
+    let Some(max_seq) = max_seq else {
+        return Ok(EventChainAudit {
+            valid: true,
+            events_verified: 0,
+            last_seq: None,
+            head_hash: None,
+        });
+    };
+
+    let mut after_seq = 0_i64;
+    let mut expected_prev = "GENESIS".to_string();
+    let mut events_verified = 0_usize;
+    let mut last_seq = None;
+    while after_seq < max_seq {
+        let mut statement = conn.prepare_cached(
+            "SELECT seq, event_id, schema_version, event_type, entity_type, entity_id, agent_id,
+             payload_json, created_at, prev_hash, event_hash
+             FROM events WHERE seq > ?1 AND seq <= ?2 ORDER BY seq LIMIT ?3",
+        )?;
+        let mut rows = statement.query(params![after_seq, max_seq, page_size as i64])?;
+        let mut page_rows = 0_usize;
+        while let Some(row) = rows.next()? {
+            let seq: i64 = row.get(0)?;
+            let event_id: String = row.get(1)?;
+            let schema_version: i64 = row.get(2)?;
+            let event_type: String = row.get(3)?;
+            let entity_type: String = row.get(4)?;
+            let entity_id: String = row.get(5)?;
+            let agent_id: Option<String> = row.get(6)?;
+            let payload_json: String = row.get(7)?;
+            let created_at: String = row.get(8)?;
+            let prev_hash: String = row.get(9)?;
+            let event_hash: String = row.get(10)?;
+            let material = format!(
+                "{prev_hash}|{event_id}|{schema_version}|{event_type}|{entity_type}|{entity_id}|{}|{created_at}|{payload_json}",
+                agent_id.as_deref().unwrap_or("")
+            );
+            let actual = format!("{:x}", Sha256::digest(material.as_bytes()));
+            if prev_hash != expected_prev || actual != event_hash {
+                return Ok(EventChainAudit {
+                    valid: false,
+                    events_verified,
+                    last_seq,
+                    head_hash: (events_verified > 0).then_some(expected_prev),
+                });
+            }
+            expected_prev = event_hash;
+            events_verified += 1;
+            last_seq = Some(seq);
+            after_seq = seq;
+            page_rows += 1;
+        }
+        if page_rows == 0 {
+            return Ok(EventChainAudit {
+                valid: false,
+                events_verified,
+                last_seq,
+                head_hash: (events_verified > 0).then_some(expected_prev),
+            });
+        }
+    }
+    Ok(EventChainAudit {
+        valid: true,
+        events_verified,
+        last_seq,
+        head_hash: Some(expected_prev),
+    })
 }
 
 fn parse_json_column(value: String, index: usize) -> rusqlite::Result<Value> {
@@ -733,7 +962,7 @@ mod tests {
             )
             .unwrap();
         let material = format!(
-            "{prev_hash}|evt_sorted|{SCHEMA_VERSION}|legacy.sorted|Intent|int_sorted|agt_test|{created_at}|{sorted_payload}"
+            "{prev_hash}|evt_sorted|{EVENT_SCHEMA_VERSION}|legacy.sorted|Intent|int_sorted|agt_test|{created_at}|{sorted_payload}"
         );
         let event_hash = format!("{:x}", Sha256::digest(material.as_bytes()));
         store
@@ -745,7 +974,7 @@ mod tests {
                  VALUES('evt_sorted', ?1, 'legacy.sorted', 'Intent', 'int_sorted', 'agt_test',
                  ?2, ?3, ?4, ?5)",
                 params![
-                    SCHEMA_VERSION,
+                    EVENT_SCHEMA_VERSION,
                     sorted_payload,
                     created_at,
                     prev_hash,
@@ -759,7 +988,7 @@ mod tests {
         // differently ordered bytes than the stored payload, even
         // semantically equal JSON, must fail.
         let mismatched_material = format!(
-            "{event_hash}|evt_mismatch|{SCHEMA_VERSION}|legacy.mismatch|Intent|int_mismatch|agt_test|{created_at}|{{\"alpha\":2,\"zeta\":1}}"
+            "{event_hash}|evt_mismatch|{EVENT_SCHEMA_VERSION}|legacy.mismatch|Intent|int_mismatch|agt_test|{created_at}|{{\"alpha\":2,\"zeta\":1}}"
         );
         let mismatched_hash = format!("{:x}", Sha256::digest(mismatched_material.as_bytes()));
         store
@@ -771,7 +1000,7 @@ mod tests {
                  VALUES('evt_mismatch', ?1, 'legacy.mismatch', 'Intent', 'int_mismatch',
                  'agt_test', ?2, ?3, ?4, ?5)",
                 params![
-                    SCHEMA_VERSION,
+                    EVENT_SCHEMA_VERSION,
                     r#"{"zeta":1,"alpha":2}"#,
                     created_at,
                     event_hash,
@@ -780,6 +1009,144 @@ mod tests {
             )
             .unwrap();
         assert!(!store.verify_event_chain().unwrap());
+    }
+
+    #[test]
+    fn event_chain_audit_pages_the_complete_stable_prefix() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("foremerge").join("state.sqlite3");
+        let store = Store::open(&database).unwrap();
+        {
+            let mut conn = store.lock().unwrap();
+            let tx = Store::immediate_tx(&mut conn).unwrap();
+            for index in 0..2_505 {
+                Store::append_event(
+                    &tx,
+                    "audit.fixture",
+                    "Intent",
+                    &format!("int_{index}"),
+                    None,
+                    &json!({ "index": index }),
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        let audit = store.audit_event_chain(17).unwrap();
+        assert!(audit.valid);
+        assert_eq!(audit.events_verified, 2_505);
+        assert_eq!(audit.last_seq, Some(2_505));
+        assert!(audit.head_hash.is_some());
+    }
+
+    #[test]
+    fn read_only_open_never_creates_or_migrates_a_store() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("missing").join("state.sqlite3");
+        let error = Store::open_existing_read_only(&database)
+            .err()
+            .expect("missing store must stay missing");
+        assert!(format!("{error:#}").contains("NOT_INITIALIZED:"));
+        assert!(!temp.path().join("missing").exists());
+
+        let writable = Store::open(&database).unwrap();
+        drop(writable);
+        let read_only = Store::open_existing_read_only(&database).unwrap();
+        assert!(read_only.audit_event_chain(1).unwrap().valid);
+        assert!(
+            read_only
+                .lock()
+                .unwrap()
+                .execute("INSERT INTO meta(key, value) VALUES('write', 'denied')", [])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn version_two_migration_backfills_scopes_attempts_and_conflict_occurrences() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("foremerge").join("state.sqlite3");
+        let store = Store::open(&database).unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute_batch(
+                r#"
+                INSERT INTO agents(id, name, model, capabilities_json, worktree, git_branch,
+                  git_head, status, registered_at, last_seen_at)
+                VALUES('agt_legacy', 'legacy', NULL, '[]', NULL, NULL, NULL, 'ACTIVE',
+                  '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                INSERT INTO tasks(id, task_key, title, created_by_agent_id, created_at)
+                VALUES('tsk_legacy', 'legacy-task', 'Legacy task', 'agt_legacy',
+                  '2026-01-01T00:00:00Z');
+                INSERT INTO intents(id, agent_id, task_id, summary, rationale, scopes_json,
+                  depends_on_json, metadata_json, status, version, created_at, updated_at)
+                VALUES('int_legacy', 'agt_legacy', 'tsk_legacy', 'Legacy intent', NULL,
+                  '[{"kind":"symbol","key":"LegacyTarget"}]', '[]', '{}', 'VALIDATED', 1,
+                  '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                INSERT INTO changesets(id, agent_id, task_id, intent_id, summary, files_json,
+                  symbols_json, contracts_json, dependencies_json, tests_json, decisions_json,
+                  provenance_json, fingerprint, status, created_at, updated_at)
+                VALUES('cst_legacy', 'agt_legacy', 'tsk_legacy', 'int_legacy', 'Legacy candidate',
+                  '[]', '[]', '[]', '[]', '[]', '[]', '{}', 'sha256:legacy', 'VALIDATED',
+                  '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                INSERT INTO validations(id, changeset_id, command_json, passed, exit_code, stdout,
+                  stderr, duration_ms, fingerprint, run_at)
+                VALUES('val_legacy', 'cst_legacy', '["true"]', 1, 0, '', '', 1,
+                  'sha256:legacy', '2026-01-01T00:00:00Z');
+                INSERT INTO conflicts(id, kind, severity, score, source_intent_id,
+                  target_intent_id, scope_json, scope_identity, explanation, suggestion,
+                  evidence_json, status, detected_at)
+                VALUES('cfl_legacy', 'overlapping_claim', 'MEDIUM', 0.5, NULL, 'int_legacy',
+                  '{"kind":"symbol","key":"LegacyTarget"}', 'symbol:legacytarget',
+                  'Legacy evidence', 'Coordinate', '{}', 'RESOLVED',
+                  '2026-01-01T00:00:00Z');
+                DROP TABLE validation_attempts;
+                DROP TABLE conflict_detections;
+                DROP TABLE intent_scopes;
+                UPDATE meta SET value = '1' WHERE key = 'schema_version';
+                "#,
+            )
+            .unwrap();
+        drop(store);
+
+        let migrated = Store::open(&database).unwrap();
+        let conn = migrated.lock().unwrap();
+        let schema: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema, DATABASE_SCHEMA_VERSION.to_string());
+        let scope: String = conn
+            .query_row(
+                "SELECT canonical_scope FROM intent_scopes WHERE intent_id = 'int_legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(scope, "symbol:legacytarget");
+        let attempt: (bool, String) = conn
+            .query_row(
+                "SELECT authoritative, exclusion_ruleset_digest FROM validation_attempts
+                 WHERE id = 'val_legacy'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(attempt, (true, "legacy".to_string()));
+        let occurrence: (String, bool) = conn
+            .query_row(
+                "SELECT conflict_id, previously_settled FROM conflict_detections
+                 WHERE id = 'dtn_legacy_cfl_legacy'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(occurrence, ("cfl_legacy".to_string(), true));
     }
 
     #[cfg(unix)]

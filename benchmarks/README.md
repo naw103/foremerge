@@ -4,6 +4,29 @@ This directory contains reviewable scenario specifications for comparing
 Git-worktree-only agents with agents using Foremerge. The JSON files are ground
 truth and experimental inputs. They are not benchmark measurements.
 
+All five fixtures are executable correctness cases:
+
+```sh
+make benchmarks
+# equivalent: cargo test --test benchmark_scenarios -- --nocapture
+```
+
+The first four run the actual deterministic detector; the fifth builds a real
+temporary Git repository and proves a failed validation cannot create an
+accepted ref. CI executes the complete corpus on Linux, macOS, and Windows.
+
+The separate query harness makes local timing claims reproducible without
+turning one machine's output into a published benchmark result:
+
+```sh
+make query-benchmark
+# custom scales:
+cargo run --release --example query_benchmark -- 500 5000 20000
+```
+
+It emits newline-delimited JSON with seed time and median timings for unfiltered,
+agent/status-filtered, semantic-scope-hit, and semantic-scope-miss queries.
+
 The full method, metrics, controls, and reporting requirements are in
 [`docs/benchmark-plan.md`](../docs/benchmark-plan.md).
 
@@ -41,7 +64,7 @@ conceptual.
 4. Include a negative control when introducing a new detector rule.
 5. Make every success criterion observable in events, process output, tests, or
    Git refs.
-6. Validate JSON syntax and run the benchmark smoke checks once a runner exists.
+6. Validate JSON syntax and run the executable benchmark corpus.
 
 Do not tune a detector only against these public fixtures. Hold back evaluation
 cases when measuring precision and recall.

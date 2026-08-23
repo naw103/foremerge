@@ -248,6 +248,7 @@ Each finding contains:
     "detected_before_code": true
   },
   "status": "OPEN",
+  "previously_settled": false,
   "detected_at": "..."
 }
 ```
@@ -273,6 +274,16 @@ findings. An ad-hoc `check_conflicts` preflight returns `eph_`-prefixed findings
 whose evidence contains `ephemeral: true`; they are not valid durable links for
 coordination messages. Conflict reports set `blocking` when they contain a
 high-severity result.
+
+The canonical `cfl_*` row owns lifecycle state and the evidence from its first
+detection. Every observation is also appended to immutable
+`conflict_detections`. Redetection emits `conflict.redetected`, preserves the
+canonical evidence and `RESOLVED`/`OVERRIDDEN`/`DISMISSED` state, and returns
+`previously_settled: true` when a decision already exists. Foremerge
+intentionally does not auto-reopen: a lease renewal after two agents agreed to
+share a scope must not resurrect their settled warning. Operators can inspect
+the observation history with `foremerge conflicts detections <cfl_id>` or the
+matching authenticated HTTP read.
 
 Claims never fail because of a finding. Acceptance evaluates high-severity
 conflicts separately. The MVP permits an explicit `allow_high_conflicts`

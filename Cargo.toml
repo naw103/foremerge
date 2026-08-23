@@ -1,6 +1,6 @@
 [package]
 name = "foremerge"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 description = "The open-source coordination protocol for autonomous software engineering"
@@ -38,7 +38,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 sha2 = "0.10"
-tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "net", "process", "signal", "time", "io-util", "io-std"] }
+tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "net", "process", "signal", "sync", "time", "io-util", "io-std"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.18", features = ["v4", "serde"] }

@@ -6,9 +6,8 @@ and validation commands you trust.
 
 ## Supported versions
 
-Security fixes are made on the default branch and, after the first tagged
-release, on the latest release line. Older pre-1.0 versions may be asked to
-upgrade before receiving a fix.
+Security fixes are made on the default branch and the latest release line.
+Older pre-1.0 versions may be asked to upgrade before receiving a fix.
 
 | Version | Supported |
 | --- | --- |
@@ -63,6 +62,16 @@ issue.
   fallback directory, but it is not a sandbox or multi-user authorization
   boundary. Anyone permitted to change that local repository state can change
   executable validation policy; review checks as trusted automation.
+- Validation exclusions are also operator-owned repository policy stored under
+  Git's common directory. Their normalized digest is part of the ChangeSet
+  fingerprint, they can hide only exact/prefix-matched untracked paths, and MCP
+  cannot modify them. Keep the rules narrow and remove excluded artifacts before
+  acceptance; exclusions are not a sandbox or a substitute for reviewing test
+  output.
+- `/healthz` and `/readyz` are intentionally unauthenticated loopback probes.
+  Full event-chain audit and every `/v1` coordination/read endpoint require the
+  daemon bearer token. Do not expose either probe as evidence of audit integrity;
+  use the authenticated audit route or read-only `foremerge doctor`.
 
 See [`docs/limitations.md`](docs/limitations.md) for the broader trust model and
 known product limitations.

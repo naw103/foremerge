@@ -9,6 +9,8 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-22
+
 ### Added
 
 - `foremerge status`: one human-first screen answering "what are my agents
@@ -19,6 +21,60 @@ changes when they are called out here with a migration note.
   text; `--json` returns the typed report in the standard envelope. The whole
   report is read in one transaction, so its sections describe one consistent
   moment.
+- Immutable `validation_attempts` retain every completed command with explicit
+  authoritative/stale state, expected and observed fingerprints, bounded
+  output, changed-path diagnostics, excluded paths, and policy digest.
+- Stable conflict lifecycle identities now have immutable detection occurrences,
+  `conflict.redetected` events, and `previously_settled` responses.
+- Operator-only `validation-exclusions show|set` with exact/prefix untracked
+  rules, normalized digest binding, atomic private storage, and ADR 0001. MCP
+  intentionally has no policy-mutation tool.
+- Authenticated paged event-chain audit over a separate read-only connection,
+  exposed through HTTP and `events audit`.
+- Read parity across HTTP and MCP for agent list, intent show, ChangeSet show,
+  and the consistent status report, bringing the MCP surface to 17 tools.
+- An executable five-scenario correctness corpus and an optimized query-work
+  microbenchmark harness with JSON output.
+- macOS and Windows CI/release test gates, including platform-specific
+  validation-timeout cleanup coverage.
+
+### Changed
+
+- Breaking HTTP observability change: `/healthz` now reports process liveness
+  only and performs no database or Git work. Use public `/readyz` for bounded
+  non-waiting readiness and authenticated `/v1/audit/event-chain` for integrity
+  audit. Migration: monitoring that consumed health counts or `event_chain_ok`
+  must move to the typed read/audit routes.
+- Breaking diagnostic change: `foremerge doctor` is strictly read-only. It no
+  longer initializes or migrates a missing database and instead returns
+  `database_ok: false` with `foremerge init` as the next step.
+- HTTP and MCP dispatch synchronous SQLite/Git service operations through
+  Tokio's blocking pool. SIGINT/SIGTERM drain in-flight HTTP requests for at
+  most 30 seconds and terminate remaining validation process trees.
+- Work queries use dynamic indexed SQL, a normalized `intent_scopes`
+  projection, SQL-side limits, cached statements, and one reverse-dependency
+  scan per request.
+- Validation captures the final Git snapshot before opening its short write
+  transaction, then rechecks current revision and lifecycle state atomically.
+- Symbol inference provenance reports when the 4 MiB diff capture was
+  truncated, with captured and total byte counts.
+
+### Fixed
+
+- A passing check that generated an untracked artifact no longer disappears:
+  the stale attempt is queryable and names the path while remaining unable to
+  satisfy acceptance.
+- Redetecting a resolved, overridden, or dismissed conflict no longer rewrites
+  its original evidence or silently reopens it.
+- Full event-chain verification no longer holds the coordinator's shared mutex
+  or runs through the unauthenticated liveness route.
+
+### Migration
+
+- Opening a tagged 0.1/0.2 database creates and backfills
+  `validation_attempts`, `conflict_detections`, and `intent_scopes`, plus the
+  order/filter indexes used by the 0.3 query path. Existing authoritative
+  validations and conflicts become legacy immutable observations.
 
 ## [0.2.0] - 2026-08-21
 
@@ -81,6 +137,7 @@ changes when they are called out here with a migration note.
 - Apache-2.0 licensing, contribution and security policies, CI, release checks,
   limitations, roadmap, and a reproducible benchmark specification.
 
-[Unreleased]: https://github.com/naw103/foremerge/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/naw103/foremerge/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/naw103/foremerge/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/naw103/foremerge/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/naw103/foremerge/releases/tag/v0.1.0
