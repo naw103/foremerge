@@ -3306,7 +3306,10 @@ fn validation_timeout_kills_direct_child_on_windows() {
             "validate".to_string(),
             changeset_id,
             "--timeout-seconds".to_string(),
-            "1".to_string(),
+            // Windows PowerShell startup can exceed one second on a cold CI
+            // runner. Give the fixture enough time to record its PID before
+            // Foremerge exercises the timeout cleanup path.
+            "5".to_string(),
             "--".to_string(),
             "powershell.exe".to_string(),
             "-NoProfile".to_string(),
@@ -3321,7 +3324,7 @@ fn validation_timeout_kills_direct_child_on_windows() {
         validation["data"]["stderr"]
             .as_str()
             .expect("validation stderr")
-            .contains("timed out after 1 seconds")
+            .contains("timed out after 5 seconds")
     );
     let pid = fs::read_to_string(&pid_file).expect("validation child recorded its pid");
     let output = Command::new("tasklist")
