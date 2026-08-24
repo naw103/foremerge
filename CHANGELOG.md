@@ -11,6 +11,13 @@ changes when they are called out here with a migration note.
 
 ### Fixed
 
+- Validation now refuses to start when excluded generated files are already
+  present. Exclusions exist so a check may create such files without
+  invalidating its own fingerprint; a file that exists beforehand is different,
+  because the command may consume it, and a pass could then depend on content
+  absent from the candidate commit and uncovered by the fingerprint. Requiring a
+  clean start means every excluded path seen afterwards was produced by that
+  run. Migration: delete generated artifacts between validations.
 - Acceptance now enforces the documented requirement that excluded generated
   files be removed first. Excluded paths are deliberately outside the
   fingerprint, so they never made the worktree dirty and `ensure_clean` let a
@@ -33,9 +40,20 @@ changes when they are called out here with a migration note.
   duplicates on first open, keeping genuine legacy rows where they are a
   conflict's only observation. Gating also removes a full rescan of `intents`,
   `conflicts`, and `validations` from every CLI invocation.
-- `PRAGMA recursive_triggers` is enabled so the append-only triggers on
-  `validation_attempts`, `conflict_detections`, and `events` also fire for the
-  implicit delete inside an `INSERT OR REPLACE`, which previously bypassed them.
+- Reusing the id of an existing `validation_attempts` or `conflict_detections`
+  row is rejected by the schema itself. `INSERT OR REPLACE` deletes the
+  conflicting row first, and that delete only fires the append-only trigger when
+  `recursive_triggers` is on, which is a per-connection setting that any other
+  SQLite client can ignore. `PRAGMA recursive_triggers` is now enabled as
+  defense in depth rather than as the guarantee.
+- The schema version is parsed strictly and a store newer than the running build
+  is refused with `UNSUPPORTED_SCHEMA` instead of being migrated backwards and
+  restamped. A malformed value is reported as `CORRUPT_STORE` rather than
+  silently reading as zero, which would have rerun every one-time backfill.
+- The schema 3 repair removes only a byte-identical duplicate observation. The
+  previous condition deleted any synthesized row whenever a native one existed
+  for the same conflict, which destroyed a genuine earlier observation that a
+  later redetection happened to follow.
 - The documented daemon shutdown grace is now a process-exit bound. The daemon
   builds and owns its Tokio runtime, so when the 30 second HTTP grace expires it
   abandons the remaining requests (terminating the validation subprocess trees

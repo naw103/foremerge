@@ -1042,6 +1042,18 @@ impl Foremerge {
                 fingerprint_diagnostic(&changeset, &current)
             );
         }
+        // Exclusions exist so a check may CREATE generated files without
+        // invalidating its own fingerprint. A file already present when the
+        // command starts is different: the command may consume it, so a pass
+        // could depend on content that is not in the candidate commit and is
+        // not covered by the fingerprint. Requiring a clean start means every
+        // excluded path observed afterwards was produced by this run.
+        if !current.excluded_paths.is_empty() {
+            bail!(
+                "CHECK_FAILED: excluded generated files are already present, so validation could consume content that is not in the candidate commit; remove them and validate again (this does not change the fingerprint): {}",
+                current.excluded_paths.join(", ")
+            );
+        }
 
         let started = Instant::now();
         let mut command = Command::new(&request.command[0]);
