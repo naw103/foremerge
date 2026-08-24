@@ -399,7 +399,7 @@ curl --fail --silent --show-error \
 
 Do not print, commit, or share the token. `/healthz` is database-free process
 liveness and `/readyz` is a bounded non-waiting store probe; both are public.
-Every `/v1` route—including paged event-chain audit—requires the token unless
+Every `/v1` route, including the paged event-chain audit, requires the token unless
 the daemon was deliberately started with `--no-auth` for a trusted local test.
 The MVP refuses non-loopback binds and is not a hardened multi-tenant service.
 
