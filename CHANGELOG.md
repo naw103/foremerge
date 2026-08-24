@@ -40,6 +40,10 @@ changes when they are called out here with a migration note.
   duplicates on first open, keeping genuine legacy rows where they are a
   conflict's only observation. Gating also removes a full rescan of `intents`,
   `conflicts`, and `validations` from every CLI invocation.
+- The `validations` projection is append-only. It is the table acceptance
+  actually reads, and it was the only one of the four record tables with no
+  guard, so a rewritten or replaced row could turn a failing gate into a passing
+  one while the audit tables looked untouched.
 - Reusing the id of an existing `validation_attempts` or `conflict_detections`
   row is rejected by the schema itself. `INSERT OR REPLACE` deletes the
   conflicting row first, and that delete only fires the append-only trigger when
