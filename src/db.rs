@@ -323,6 +323,11 @@ impl Store {
             BEFORE DELETE ON validation_attempts
             BEGIN SELECT RAISE(ABORT, 'validation attempts are immutable'); END;
 
+            CREATE TRIGGER IF NOT EXISTS validation_attempts_no_replace
+            BEFORE INSERT ON validation_attempts
+            WHEN EXISTS(SELECT 1 FROM validation_attempts WHERE id = NEW.id)
+            BEGIN SELECT RAISE(ABORT, 'validation attempts are immutable'); END;
+
             CREATE TABLE IF NOT EXISTS decisions (
                 id TEXT PRIMARY KEY,
                 changeset_id TEXT REFERENCES changesets(id),
@@ -377,6 +382,16 @@ impl Store {
 
             CREATE TRIGGER IF NOT EXISTS conflict_detections_no_delete
             BEFORE DELETE ON conflict_detections
+            BEGIN SELECT RAISE(ABORT, 'conflict detections are immutable'); END;
+
+            -- INSERT OR REPLACE deletes the conflicting row first, and that
+            -- delete only fires the trigger above when recursive_triggers is
+            -- enabled, which is a per-connection setting an outside client does
+            -- not share. Rejecting an insert that reuses an existing id makes
+            -- the guarantee live in the schema instead.
+            CREATE TRIGGER IF NOT EXISTS conflict_detections_no_replace
+            BEFORE INSERT ON conflict_detections
+            WHEN EXISTS(SELECT 1 FROM conflict_detections WHERE id = NEW.id)
             BEGIN SELECT RAISE(ABORT, 'conflict detections are immutable'); END;
 
             CREATE TABLE IF NOT EXISTS coordination_messages (
@@ -443,14 +458,31 @@ impl Store {
         // are gated on this: re-running them on every open is what let a
         // duplicate legacy detection row be minted for conflicts that already
         // had a native one.
-        let stored_version: i64 = conn
+        let recorded_version: Option<String> = conn
             .query_row(
-                "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'schema_version'",
+                "SELECT value FROM meta WHERE key = 'schema_version'",
                 [],
                 |row| row.get(0),
             )
-            .optional()?
-            .unwrap_or(0);
+            .optional()?;
+        let stored_version: i64 = match recorded_version {
+            // Parsed strictly. A CAST would silently read a malformed value as
+            // zero, which would rerun every one-time backfill against a store
+            // that has already had them applied.
+            Some(value) => value.trim().parse::<i64>().map_err(|_| {
+                anyhow::anyhow!(
+                    "CORRUPT_STORE: schema_version is not an integer: {value:?}; this database was not written by Foremerge or is damaged"
+                )
+            })?,
+            None => 0,
+        };
+        if stored_version > DATABASE_SCHEMA_VERSION {
+            // Migrating downwards would rewrite the stamp and let this build
+            // write a store it does not understand.
+            bail!(
+                "UNSUPPORTED_SCHEMA: database schema {stored_version} is newer than this build supports ({DATABASE_SCHEMA_VERSION}); upgrade Foremerge to open it"
+            );
+        }
         let has_supersedes: bool = conn.query_row(
             "SELECT EXISTS(
                SELECT 1 FROM pragma_table_info('changesets') WHERE name = 'supersedes_changeset_id'
@@ -491,14 +523,20 @@ impl Store {
         )?;
         if stored_version < 2 {
             conn.execute(
-                "INSERT OR IGNORE INTO validation_attempts(
+                // Explicit NOT EXISTS rather than OR IGNORE: the append-only
+                // insert guard raises, and a raise is not a constraint
+                // violation that OR IGNORE would swallow.
+                "INSERT INTO validation_attempts(
                    id, changeset_id, command_json, passed, exit_code, stdout, stderr, duration_ms,
                    expected_fingerprint, observed_fingerprint, authoritative, stale_reason,
                    changed_files_json, excluded_paths_json, exclusion_ruleset_digest, run_at
                  )
                  SELECT id, changeset_id, command_json, passed, exit_code, stdout, stderr,
                         duration_ms, fingerprint, fingerprint, 1, NULL, '[]', '[]', 'legacy', run_at
-                 FROM validations",
+                 FROM validations
+                 WHERE NOT EXISTS(
+                     SELECT 1 FROM validation_attempts a WHERE a.id = validations.id
+                 )",
                 [],
             )?;
         }
@@ -578,7 +616,7 @@ impl Store {
             // duplicate for every conflict that already recorded a native
             // detection.
             conn.execute(
-                "INSERT OR IGNORE INTO conflict_detections(
+                "INSERT INTO conflict_detections(
                    id, conflict_id, severity, score, scope_json, explanation, suggestion,
                    evidence_json, previously_settled, detected_at
                  )
@@ -601,6 +639,10 @@ impl Store {
             // append-only trigger is dropped for the length of this repair and
             // restored inside the same transaction.
             conn.execute_batch("DROP TRIGGER IF EXISTS conflict_detections_no_delete;")?;
+            // Only a byte-identical twin is a phantom. A legacy row that
+            // differs from every native row is a genuine earlier observation,
+            // typically the sole record of a detection that predates schema 2,
+            // and deleting it would destroy real history.
             let repaired = conn.execute(
                 "DELETE FROM conflict_detections
                  WHERE id LIKE 'dtn\\_legacy\\_%' ESCAPE '\\'
@@ -608,6 +650,15 @@ impl Store {
                        SELECT 1 FROM conflict_detections other
                        WHERE other.conflict_id = conflict_detections.conflict_id
                          AND other.id NOT LIKE 'dtn\\_legacy\\_%' ESCAPE '\\'
+                         AND other.detected_at = conflict_detections.detected_at
+                         AND other.severity = conflict_detections.severity
+                         AND other.score = conflict_detections.score
+                         AND other.explanation = conflict_detections.explanation
+                         AND other.suggestion = conflict_detections.suggestion
+                         AND other.evidence_json = conflict_detections.evidence_json
+                         AND other.previously_settled = conflict_detections.previously_settled
+                         AND IFNULL(other.scope_json, '')
+                             = IFNULL(conflict_detections.scope_json, '')
                    )",
                 [],
             )?;
@@ -1260,5 +1311,215 @@ mod tests {
         symlink(&target, &link).unwrap();
         let error = Store::open(&link).err().expect("symlink must be rejected");
         assert!(format!("{error:#}").starts_with("INVALID_INPUT:"));
+    }
+}
+
+#[cfg(test)]
+mod schema_repair_tests {
+    use super::*;
+
+    /// Conflicts reference intents, which reference a task and an agent, so a
+    /// fixture needs the whole chain before it can seed a detection.
+    fn seed_intents(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO agents(id, name, model, capabilities_json, worktree, git_branch,
+             git_head, status, registered_at, last_seen_at)
+             VALUES('agt_x', 'fixture', 'test', '[]', NULL, NULL, NULL, 'ACTIVE',
+                    '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("seed agent");
+        conn.execute(
+            "INSERT INTO tasks(id, task_key, title, created_by_agent_id, created_at)
+             VALUES('tsk_x', 'fixture', 'fixture', 'agt_x', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("seed task");
+        for intent in ["int_a", "int_b"] {
+            conn.execute(
+                "INSERT INTO intents(id, agent_id, task_id, summary, rationale, scopes_json,
+                 depends_on_json, metadata_json, status, created_at, updated_at)
+                 VALUES(?1, 'agt_x', 'tsk_x', 'fixture intent', NULL, '[]', '[]', '{}', 'INTENT',
+                        '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                params![intent],
+            )
+            .expect("seed intent");
+        }
+    }
+
+    fn seed_conflict(conn: &Connection, id: &str, detected_at: &str) {
+        conn.execute(
+            "INSERT INTO conflicts(id, kind, severity, score, source_intent_id, target_intent_id,
+             scope_json, scope_identity, explanation, suggestion, evidence_json, status, detected_at)
+             VALUES(?1, 'replace_vs_extend', 'HIGH', 0.9, 'int_a', 'int_b', NULL, ?1,
+                    'shared scope', 'coordinate', '{}', 'OPEN', ?2)",
+            params![id, detected_at],
+        )
+        .expect("seed conflict");
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn seed_detection(conn: &Connection, id: &str, conflict: &str, explanation: &str, at: &str) {
+        conn.execute(
+            "INSERT INTO conflict_detections(id, conflict_id, severity, score, scope_json,
+             explanation, suggestion, evidence_json, previously_settled, detected_at)
+             VALUES(?1, ?2, 'HIGH', 0.9, NULL, ?3, 'coordinate', '{}', 0, ?4)",
+            params![id, conflict, explanation, at],
+        )
+        .expect("seed detection");
+    }
+
+    fn detection_ids(conn: &Connection, conflict: &str) -> Vec<String> {
+        let mut statement = conn
+            .prepare("SELECT id FROM conflict_detections WHERE conflict_id = ?1 ORDER BY id")
+            .expect("prepare");
+        statement
+            .query_map([conflict], |row| row.get::<_, String>(0))
+            .expect("query")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect")
+    }
+
+    /// Schema 2 minted a byte-identical twin for a conflict that already had a
+    /// native observation. Only that twin may be removed.
+    #[test]
+    fn repair_removes_only_byte_identical_phantoms() {
+        let store = Store::in_memory().expect("open store");
+        let conn = store.lock().expect("lock");
+        seed_intents(&conn);
+        seed_conflict(&conn, "cfl_phantom", "2026-03-01T00:00:00Z");
+        seed_detection(
+            &conn,
+            "dtn_native_p",
+            "cfl_phantom",
+            "same",
+            "2026-03-01T00:00:00Z",
+        );
+        seed_detection(
+            &conn,
+            "dtn_legacy_cfl_phantom",
+            "cfl_phantom",
+            "same",
+            "2026-03-01T00:00:00Z",
+        );
+
+        seed_conflict(&conn, "cfl_genuine", "2026-01-01T00:00:00Z");
+        seed_detection(
+            &conn,
+            "dtn_legacy_cfl_genuine",
+            "cfl_genuine",
+            "early observation",
+            "2026-01-01T00:00:00Z",
+        );
+        seed_detection(
+            &conn,
+            "dtn_native_later",
+            "cfl_genuine",
+            "later observation",
+            "2026-02-01T00:00:00Z",
+        );
+
+        conn.execute(
+            "UPDATE meta SET value = '2' WHERE key = 'schema_version'",
+            [],
+        )
+        .expect("pretend the store was written by schema 2");
+        Store::migrate(&conn).expect("repair migration");
+
+        assert_eq!(
+            detection_ids(&conn, "cfl_phantom"),
+            vec!["dtn_native_p".to_string()],
+            "the identical twin must be removed"
+        );
+        assert_eq!(
+            detection_ids(&conn, "cfl_genuine"),
+            vec![
+                "dtn_legacy_cfl_genuine".to_string(),
+                "dtn_native_later".to_string()
+            ],
+            "a genuine earlier observation must survive a later redetection"
+        );
+
+        // Repeat opens must not remove anything else or reintroduce a twin.
+        Store::migrate(&conn).expect("second open");
+        Store::migrate(&conn).expect("third open");
+        assert_eq!(detection_ids(&conn, "cfl_phantom").len(), 1);
+        assert_eq!(detection_ids(&conn, "cfl_genuine").len(), 2);
+    }
+
+    /// An insert reusing an existing id is how INSERT OR REPLACE overwrites an
+    /// append-only row. The guard must live in the schema, not in a
+    /// per-connection pragma.
+    #[test]
+    fn reusing_an_immutable_id_is_rejected() {
+        let store = Store::in_memory().expect("open store");
+        let conn = store.lock().expect("lock");
+        seed_intents(&conn);
+        seed_conflict(&conn, "cfl_a", "2026-01-01T00:00:00Z");
+        seed_detection(&conn, "dtn_a", "cfl_a", "original", "2026-01-01T00:00:00Z");
+        let replaced = conn.execute(
+            "INSERT OR REPLACE INTO conflict_detections(id, conflict_id, severity, score,
+             scope_json, explanation, suggestion, evidence_json, previously_settled, detected_at)
+             VALUES('dtn_a', 'cfl_a', 'HIGH', 0.9, NULL, 'tampered', 'coordinate', '{}', 0,
+                    '2026-01-01T00:00:00Z')",
+            [],
+        );
+        assert!(
+            replaced.is_err(),
+            "REPLACE must not overwrite an observation"
+        );
+        let explanation: String = conn
+            .query_row(
+                "SELECT explanation FROM conflict_detections WHERE id = 'dtn_a'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read back");
+        assert_eq!(explanation, "original");
+    }
+
+    #[test]
+    fn a_newer_schema_is_refused_and_left_untouched() {
+        let store = Store::in_memory().expect("open store");
+        let conn = store.lock().expect("lock");
+        let future = DATABASE_SCHEMA_VERSION + 1;
+        conn.execute(
+            "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+            [future.to_string()],
+        )
+        .expect("stamp a future version");
+        let error = Store::migrate(&conn).expect_err("a newer store must be refused");
+        assert!(
+            format!("{error:#}").contains("UNSUPPORTED_SCHEMA"),
+            "unexpected error: {error:#}"
+        );
+        let recorded: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read version");
+        assert_eq!(
+            recorded,
+            future.to_string(),
+            "refusing must not rewrite the stamp"
+        );
+    }
+
+    #[test]
+    fn a_malformed_schema_version_is_corrupt_not_zero() {
+        let store = Store::in_memory().expect("open store");
+        let conn = store.lock().expect("lock");
+        conn.execute(
+            "UPDATE meta SET value = 'banana' WHERE key = 'schema_version'",
+            [],
+        )
+        .expect("stamp a malformed version");
+        let error = Store::migrate(&conn).expect_err("a malformed version must be refused");
+        assert!(
+            format!("{error:#}").contains("CORRUPT_STORE"),
+            "unexpected error: {error:#}"
+        );
     }
 }

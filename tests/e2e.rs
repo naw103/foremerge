@@ -805,6 +805,30 @@ fn stale_validation_attempt_is_retained_and_exclusion_rules_enable_a_safe_revisi
         &intent_id,
         "Candidate with digest-bound artifact policy",
     );
+    // A validation must begin with no excluded artifacts present, so the
+    // leftover from the previous run has to go first. Otherwise this run could
+    // consume content that is not in the candidate commit, and Foremerge cannot
+    // tell consumption from overwriting.
+    let stale_artifact = cli_failure(
+        &repo.root,
+        None,
+        vec![
+            "changeset".to_string(),
+            "validate".to_string(),
+            second_changeset.clone(),
+            "--".to_string(),
+            "true".to_string(),
+        ],
+    );
+    assert_eq!(stale_artifact["error"]["code"], "CHECK_FAILED");
+    assert!(
+        stale_artifact["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("coverage.log")),
+        "the refusal must name the artifact: {stale_artifact}"
+    );
+    fs::remove_file(repo.root.join("coverage.log")).expect("clear the previous artifact");
+
     let validation = cli_success(
         &repo.root,
         None,
