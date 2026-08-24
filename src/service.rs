@@ -1100,6 +1100,8 @@ impl Foremerge {
                         if let Some(pid) = child_pid {
                             let _ = Command::new("/bin/kill")
                                 .args(["-KILL", "--", &format!("-{pid}")])
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
                                 .status()
                                 .await;
                         }
@@ -1107,6 +1109,8 @@ impl Foremerge {
                         if let Some(pid) = child.id() {
                             let _ = Command::new("taskkill")
                                 .args(["/PID", &pid.to_string(), "/T", "/F"])
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
                                 .status()
                                 .await;
                         }
@@ -2377,6 +2381,8 @@ impl Drop for ValidationProcessGuard {
         if self.armed {
             let _ = std::process::Command::new("/bin/kill")
                 .args(["-KILL", "--", &format!("-{}", self.pid)])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status();
         }
     }
@@ -2388,6 +2394,8 @@ impl Drop for ValidationProcessGuard {
         if self.armed {
             let _ = std::process::Command::new("taskkill")
                 .args(["/PID", &self.pid.to_string(), "/T", "/F"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status();
         }
     }
