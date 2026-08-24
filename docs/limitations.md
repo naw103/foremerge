@@ -72,6 +72,17 @@ Passing Foremerge-executed validation is a gate; agent-reported tests are
 provenance only. A passing command is not proof that the chosen validation was
 complete or that the software has no defects.
 
+`authoritative` has a precise and limited meaning: the worktree fingerprint was
+identical immediately before and immediately after the command, and the
+ChangeSet revision and lifecycle state did not change while it ran. It does not
+assert that the command observed the fingerprinted tree. A command that mutates
+tracked files, tests the mutated tree, and restores it before exiting leaves the
+fingerprint unchanged and is recorded as authoritative. Foremerge samples the
+endpoints; it does not watch the tree during the run, and it does not sandbox
+the command. Named checks over MCP narrow this because an agent chooses only
+which registered check runs, never its argument vector; a caller using the CLI
+or the HTTP API supplies the command directly and is trusted accordingly.
+
 Every completed command is retained as local audit data even when its result is
 stale and non-authoritative. Validation stdout/stderr can contain secrets.
 Digest-bound exclusions can hide only explicitly listed untracked generated

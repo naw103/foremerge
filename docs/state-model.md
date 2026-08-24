@@ -161,6 +161,13 @@ short final transaction then reloads the ChangeSet and intent, verifies the
 current revision/state, compares the captured fingerprint, appends the attempt,
 and applies lifecycle state only when the result remains authoritative.
 
+`authoritative` therefore means the endpoints agreed: the fingerprint was
+identical before and after the run, and the revision and lifecycle state held.
+It is not a claim that the command read the fingerprinted tree, because
+Foremerge samples the worktree around the command rather than watching it during
+execution. See [limitations](limitations.md) for what that does and does not
+rule out.
+
 Every completed command is retained in immutable `validation_attempts`, even if
 a concurrent revision, acceptance, or worktree mutation makes it stale. Such an
 attempt records `authoritative: false`, a reason, expected and observed

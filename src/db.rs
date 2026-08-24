@@ -294,6 +294,23 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_validations_changeset ON validations(changeset_id, run_at);
 
+            -- This is the table acceptance actually reads, so it needs at least
+            -- the protection the audit tables have. A row is written once, in
+            -- the same transaction as its authoritative attempt, and is never
+            -- updated or deleted afterwards.
+            CREATE TRIGGER IF NOT EXISTS validations_no_update
+            BEFORE UPDATE ON validations
+            BEGIN SELECT RAISE(ABORT, 'validations are append-only'); END;
+
+            CREATE TRIGGER IF NOT EXISTS validations_no_delete
+            BEFORE DELETE ON validations
+            BEGIN SELECT RAISE(ABORT, 'validations are append-only'); END;
+
+            CREATE TRIGGER IF NOT EXISTS validations_no_replace
+            BEFORE INSERT ON validations
+            WHEN EXISTS(SELECT 1 FROM validations WHERE id = NEW.id)
+            BEGIN SELECT RAISE(ABORT, 'validations are append-only'); END;
+
             CREATE TABLE IF NOT EXISTS validation_attempts (
                 id TEXT PRIMARY KEY,
                 changeset_id TEXT NOT NULL REFERENCES changesets(id),
@@ -1476,6 +1493,66 @@ mod schema_repair_tests {
             )
             .expect("read back");
         assert_eq!(explanation, "original");
+    }
+
+    /// Acceptance reads `validations`, so it must be at least as hard to forge
+    /// as the audit tables. Before this it was the only one of the four with no
+    /// append-only guard at all.
+    #[test]
+    fn the_acceptance_gate_projection_is_append_only() {
+        let store = Store::in_memory().expect("open store");
+        let conn = store.lock().expect("lock");
+        seed_intents(&conn);
+        conn.execute(
+            "INSERT INTO changesets(id, agent_id, task_id, intent_id, summary, files_json,
+             symbols_json, contracts_json, dependencies_json, tests_json, decisions_json,
+             provenance_json, worktree, git_ref, base_ref, fingerprint, status, created_at,
+             updated_at)
+             VALUES('chg_a', 'agt_x', 'tsk_x', 'int_a', 's', '[]', '[]', '[]', '[]', '[]', '[]',
+                    '{}', NULL, NULL, NULL, 'sha256:aaa', 'PROVISIONAL',
+                    '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("seed changeset");
+        conn.execute(
+            "INSERT INTO validations(id, changeset_id, command_json, passed, exit_code, stdout,
+             stderr, duration_ms, fingerprint, run_at)
+             VALUES('val_a', 'chg_a', '[\"true\"]', 0, 1, '', '', 5, 'sha256:aaa',
+                    '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("seed validation");
+
+        // Each of these is a way to turn a failing gate into a passing one.
+        assert!(
+            conn.execute("UPDATE validations SET passed = 1 WHERE id = 'val_a'", [])
+                .is_err(),
+            "a recorded validation must not be rewritten"
+        );
+        assert!(
+            conn.execute("DELETE FROM validations WHERE id = 'val_a'", [])
+                .is_err(),
+            "a recorded validation must not be removed"
+        );
+        assert!(
+            conn.execute(
+                "INSERT OR REPLACE INTO validations(id, changeset_id, command_json, passed,
+                 exit_code, stdout, stderr, duration_ms, fingerprint, run_at)
+                 VALUES('val_a', 'chg_a', '[\"true\"]', 1, 0, '', '', 5, 'sha256:aaa',
+                        '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .is_err(),
+            "REPLACE must not overwrite a recorded validation"
+        );
+        let passed: i64 = conn
+            .query_row(
+                "SELECT passed FROM validations WHERE id = 'val_a'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read back");
+        assert_eq!(passed, 0, "the failing result must survive every attempt");
     }
 
     #[test]
