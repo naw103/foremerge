@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::Duration;
 use uuid::Uuid;
 
-const DATABASE_SCHEMA_VERSION: i64 = 2;
+const DATABASE_SCHEMA_VERSION: i64 = 3;
 // Event hashing is versioned independently from the mutable SQLite projection
 // schema. A database migration must not silently change the hash material for
 // otherwise identical events.
@@ -123,7 +123,12 @@ impl Store {
     fn configure(conn: &Connection) -> Result<()> {
         conn.busy_timeout(Duration::from_secs(10))?;
         conn.execute_batch(
+            // Recursive triggers make the append-only triggers fire for the
+            // implicit delete inside an INSERT OR REPLACE. Without it, REPLACE
+            // silently bypasses the immutability guards on validation_attempts,
+            // conflict_detections, and events.
             "PRAGMA foreign_keys = ON;
+             PRAGMA recursive_triggers = ON;
              PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;",
         )?;
@@ -156,6 +161,21 @@ impl Store {
     }
 
     fn migrate(conn: &Connection) -> Result<()> {
+        // One transaction for the whole migration. A partially applied
+        // migration would otherwise leave derived projections incomplete, and
+        // an incomplete intent_scopes projection silently omits intents from
+        // scope queries, which is worse than failing to open.
+        // IMMEDIATE, not the default DEFERRED: migration always writes, and a
+        // deferred transaction would take a read lock first and then deadlock
+        // on the upgrade when two processes open the same store at once,
+        // failing instantly instead of waiting out the busy timeout.
+        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+        Self::migrate_in(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn migrate_in(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS meta (
@@ -418,6 +438,19 @@ impl Store {
             BEGIN SELECT RAISE(ABORT, 'event log is append-only'); END;
             "#,
         )?;
+        // The schema version the store was last written with. Absent means a
+        // brand new database, or one predating the stamp. One-time backfills
+        // are gated on this: re-running them on every open is what let a
+        // duplicate legacy detection row be minted for conflicts that already
+        // had a native one.
+        let stored_version: i64 = conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
         let has_supersedes: bool = conn.query_row(
             "SELECT EXISTS(
                SELECT 1 FROM pragma_table_info('changesets') WHERE name = 'supersedes_changeset_id'
@@ -456,21 +489,31 @@ impl Store {
              WHERE integration_commit IS NULL AND status = 'COMMITTED'",
             [],
         )?;
-        conn.execute(
-            "INSERT OR IGNORE INTO validation_attempts(
-               id, changeset_id, command_json, passed, exit_code, stdout, stderr, duration_ms,
-               expected_fingerprint, observed_fingerprint, authoritative, stale_reason,
-               changed_files_json, excluded_paths_json, exclusion_ruleset_digest, run_at
-             )
-             SELECT id, changeset_id, command_json, passed, exit_code, stdout, stderr, duration_ms,
-                    fingerprint, fingerprint, 1, NULL, '[]', '[]', 'legacy', run_at
-             FROM validations",
-            [],
-        )?;
-        let mut statement = conn.prepare(
-            "SELECT id, scopes_json FROM intents
-             WHERE NOT EXISTS(SELECT 1 FROM intent_scopes s WHERE s.intent_id = intents.id)",
-        )?;
+        if stored_version < 2 {
+            conn.execute(
+                "INSERT OR IGNORE INTO validation_attempts(
+                   id, changeset_id, command_json, passed, exit_code, stdout, stderr, duration_ms,
+                   expected_fingerprint, observed_fingerprint, authoritative, stale_reason,
+                   changed_files_json, excluded_paths_json, exclusion_ruleset_digest, run_at
+                 )
+                 SELECT id, changeset_id, command_json, passed, exit_code, stdout, stderr,
+                        duration_ms, fingerprint, fingerprint, 1, NULL, '[]', '[]', 'legacy', run_at
+                 FROM validations",
+                [],
+            )?;
+        }
+        // Below schema 3 a projection could have been left partially written by
+        // an interrupted migration, so every intent is reprojected once.
+        // Afterwards only intents with no projection at all need work, which is
+        // the ordinary case of a store written by an older binary.
+        let mut statement = if stored_version < 3 {
+            conn.prepare("SELECT id, scopes_json FROM intents")?
+        } else {
+            conn.prepare(
+                "SELECT id, scopes_json FROM intents
+                 WHERE NOT EXISTS(SELECT 1 FROM intent_scopes s WHERE s.intent_id = intents.id)",
+            )?
+        };
         let intent_scopes = statement
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -529,18 +572,57 @@ impl Store {
             [],
         )
         .context("create canonical conflict identity index")?;
-        conn.execute(
-            "INSERT OR IGNORE INTO conflict_detections(
-               id, conflict_id, severity, score, scope_json, explanation, suggestion,
-               evidence_json, previously_settled, detected_at
-             )
-             SELECT 'dtn_legacy_' || id, id, severity, score, scope_json, explanation,
-                    suggestion, evidence_json,
-                    CASE WHEN status IN ('OPEN', 'COORDINATING') THEN 0 ELSE 1 END,
-                    detected_at
-             FROM conflicts",
-            [],
-        )?;
+        if stored_version < 2 {
+            // Only conflicts carrying no observation of their own need a
+            // synthesized one. Without the NOT EXISTS guard this mints a
+            // duplicate for every conflict that already recorded a native
+            // detection.
+            conn.execute(
+                "INSERT OR IGNORE INTO conflict_detections(
+                   id, conflict_id, severity, score, scope_json, explanation, suggestion,
+                   evidence_json, previously_settled, detected_at
+                 )
+                 SELECT 'dtn_legacy_' || id, id, severity, score, scope_json, explanation,
+                        suggestion, evidence_json,
+                        CASE WHEN status IN ('OPEN', 'COORDINATING') THEN 0 ELSE 1 END,
+                        detected_at
+                 FROM conflicts
+                 WHERE NOT EXISTS(
+                     SELECT 1 FROM conflict_detections d WHERE d.conflict_id = conflicts.id
+                 )",
+                [],
+            )?;
+        }
+        if stored_version == 2 {
+            // Schema 2 minted a synthesized detection for every conflict on
+            // every open, so conflicts that already had a native observation
+            // carry a duplicate. Remove only those duplicates: a legacy row is
+            // genuine when it is the conflict's sole observation. The
+            // append-only trigger is dropped for the length of this repair and
+            // restored inside the same transaction.
+            conn.execute_batch("DROP TRIGGER IF EXISTS conflict_detections_no_delete;")?;
+            let repaired = conn.execute(
+                "DELETE FROM conflict_detections
+                 WHERE id LIKE 'dtn\\_legacy\\_%' ESCAPE '\\'
+                   AND EXISTS(
+                       SELECT 1 FROM conflict_detections other
+                       WHERE other.conflict_id = conflict_detections.conflict_id
+                         AND other.id NOT LIKE 'dtn\\_legacy\\_%' ESCAPE '\\'
+                   )",
+                [],
+            )?;
+            conn.execute_batch(
+                "CREATE TRIGGER IF NOT EXISTS conflict_detections_no_delete
+                 BEFORE DELETE ON conflict_detections
+                 BEGIN SELECT RAISE(ABORT, 'conflict detections are immutable'); END;",
+            )?;
+            if repaired > 0 {
+                tracing::info!(
+                    removed = repaired,
+                    "removed duplicate conflict detections written by schema 2"
+                );
+            }
+        }
         conn.execute(
             "INSERT INTO meta(key, value) VALUES('schema_version', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",

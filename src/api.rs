@@ -12,12 +12,41 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::future::IntoFuture;
+use std::future::{Future, IntoFuture};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
+
+/// Bounded wait for the Tokio runtime once `serve` has returned. Dropping the
+/// runtime cancels pending request futures, which runs the validation
+/// cancellation guards, but it cannot cancel a blocking task that is already
+/// inside a synchronous child process. The caller uses this bound so a wedged
+/// child cannot hold the process open forever.
+pub const RUNTIME_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+/// How the HTTP server stopped, so the caller can decide how the process exits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownOutcome {
+    /// Every in-flight request finished inside the grace period.
+    Drained,
+    /// The grace expired with requests still in flight; the remaining request
+    /// futures were abandoned rather than awaited.
+    GraceExpired,
+}
+
+impl ShutdownOutcome {
+    /// The shutdown bound had to be enforced rather than observed.
+    pub fn grace_expired(self) -> bool {
+        matches!(self, Self::GraceExpired)
+    }
+}
+
+/// The grace applied to in-flight HTTP work after SIGINT or SIGTERM.
+pub fn shutdown_grace() -> Duration {
+    SHUTDOWN_GRACE
+}
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -211,30 +240,64 @@ async fn authenticate(
     Ok(next.run(request).await)
 }
 
-pub async fn serve(state: ApiState, bind: SocketAddr) -> anyhow::Result<()> {
+/// Serve the loopback JSON API until SIGINT or SIGTERM, then drain.
+///
+/// The returned outcome reports whether the drain completed or the grace had to
+/// be enforced. A `GraceExpired` outcome means abandoned request futures may
+/// still be attached to the runtime, so the caller must shut the runtime down
+/// under [`RUNTIME_SHUTDOWN_GRACE`] and then exit the process deliberately.
+pub async fn serve(state: ApiState, bind: SocketAddr) -> anyhow::Result<ShutdownOutcome> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(%bind, "Foremerge API listening");
+    serve_with_shutdown(listener, router(state), SHUTDOWN_GRACE, shutdown_signal()).await
+}
+
+/// Shared shutdown mechanics for [`serve`], with the listener, router, grace,
+/// and shutdown trigger injected so the bound itself is testable.
+async fn serve_with_shutdown<F>(
+    listener: tokio::net::TcpListener,
+    router: Router,
+    grace: Duration,
+    shutdown: F,
+) -> anyhow::Result<ShutdownOutcome>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
     let draining = Arc::new(tokio::sync::Notify::new());
-    let server = axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown_signal(draining.clone()))
+    let notify = draining.clone();
+    let graceful = async move {
+        shutdown.await;
+        tracing::info!("shutdown requested; draining in-flight requests");
+        notify.notify_one();
+    };
+    let server = axum::serve(listener, router)
+        .with_graceful_shutdown(graceful)
         .into_future();
     tokio::pin!(server);
     tokio::select! {
-        result = &mut server => result?,
+        result = &mut server => {
+            result?;
+            Ok(ShutdownOutcome::Drained)
+        }
         () = draining.notified() => {
-            match tokio::time::timeout(SHUTDOWN_GRACE, &mut server).await {
-                Ok(result) => result?,
-                Err(_) => tracing::warn!(
-                    grace_seconds = SHUTDOWN_GRACE.as_secs(),
-                    "shutdown grace expired; terminating remaining in-flight requests"
-                ),
+            match tokio::time::timeout(grace, &mut server).await {
+                Ok(result) => {
+                    result?;
+                    Ok(ShutdownOutcome::Drained)
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        grace_seconds = grace.as_secs(),
+                        "shutdown grace expired; abandoning remaining in-flight requests"
+                    );
+                    Ok(ShutdownOutcome::GraceExpired)
+                }
             }
         }
     }
-    Ok(())
 }
 
-async fn shutdown_signal(draining: Arc<tokio::sync::Notify>) {
+async fn shutdown_signal() {
     let ctrl_c = async {
         if let Err(error) = tokio::signal::ctrl_c().await {
             tracing::error!(%error, "install Ctrl-C handler");
@@ -255,8 +318,6 @@ async fn shutdown_signal(draining: Arc<tokio::sync::Notify>) {
         () = ctrl_c => {},
         () = terminate => {},
     }
-    tracing::info!("shutdown requested; draining in-flight requests");
-    draining.notify_one();
 }
 
 async fn health() -> ApiResult<Value> {
@@ -670,7 +731,84 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
+    use tokio::io::AsyncWriteExt;
     use tower::ServiceExt;
+
+    async fn loopback_listener() -> (tokio::net::TcpListener, SocketAddr) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let address = listener.local_addr().expect("resolve listener address");
+        (listener, address)
+    }
+
+    #[tokio::test]
+    async fn a_completed_drain_reports_a_clean_shutdown() {
+        let (listener, _address) = loopback_listener().await;
+        let (trigger, shutdown) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve_with_shutdown(
+            listener,
+            Router::new().route("/quick", get(|| async { "ok" })),
+            SHUTDOWN_GRACE,
+            async move {
+                let _ = shutdown.await;
+            },
+        ));
+        trigger.send(()).expect("request shutdown");
+        let outcome = server
+            .await
+            .expect("server task")
+            .expect("server shutdown cleanly");
+        assert_eq!(outcome, ShutdownOutcome::Drained);
+        assert!(!outcome.grace_expired());
+    }
+
+    #[tokio::test]
+    async fn an_expired_grace_is_reported_instead_of_waiting_for_the_request() {
+        let (listener, address) = loopback_listener().await;
+        // The handler blocks far longer than the grace, so the drain cannot
+        // finish and the bound must be the thing that ends `serve`.
+        let started = Arc::new(tokio::sync::Notify::new());
+        let handler_started = started.clone();
+        let router = Router::new().route(
+            "/slow",
+            get(move || {
+                let started = handler_started.clone();
+                async move {
+                    started.notify_one();
+                    tokio::time::sleep(Duration::from_secs(3600)).await;
+                    "never"
+                }
+            }),
+        );
+        let (trigger, shutdown) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve_with_shutdown(
+            listener,
+            router,
+            Duration::from_millis(100),
+            async move {
+                let _ = shutdown.await;
+            },
+        ));
+        // Hold the connection open for the whole test: dropping it early would
+        // let the server finish the drain for the wrong reason.
+        let mut connection = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect to the API");
+        connection
+            .write_all(b"GET /slow HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .expect("send a request that never completes");
+        started.notified().await;
+        trigger.send(()).expect("request shutdown");
+        let outcome = server
+            .await
+            .expect("server task")
+            .expect("server shutdown without a transport error");
+        assert_eq!(outcome, ShutdownOutcome::GraceExpired);
+        assert!(outcome.grace_expired());
+        drop(connection);
+    }
 
     #[tokio::test]
     async fn health_is_live_json_and_does_not_require_token() {

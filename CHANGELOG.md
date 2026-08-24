@@ -9,6 +9,45 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+### Fixed
+
+- Acceptance now enforces the documented requirement that excluded generated
+  files be removed first. Excluded paths are deliberately outside the
+  fingerprint, so they never made the worktree dirty and `ensure_clean` let a
+  candidate through while they were still present. That allowed a ChangeSet to
+  be accepted whose validation may have depended on content absent from the
+  accepted commit, which is exactly what the fingerprint exists to prevent.
+  Removing the files cannot invalidate the ChangeSet, because their presence
+  and content were excluded from the fingerprint to begin with.
+- Migration now runs in a single immediate transaction. An interrupted upgrade
+  previously left the `intent_scopes` projection partially written, and the
+  per-intent skip guard then treated the partial intent as done forever, so the
+  intent silently disappeared from scope queries with no error. The migration is
+  now all or nothing, and schema 3 reprojects every intent once to repair stores
+  already damaged this way.
+- One-time backfills are gated on the stored schema version instead of running
+  on every `Store::open`. Schema 2 re-ran them on every process start, which
+  minted a duplicate synthesized detection for every conflict that already had a
+  native one: two immutable observations for a single detection, and an
+  occurrence table that disagreed with the event log. Schema 3 removes those
+  duplicates on first open, keeping genuine legacy rows where they are a
+  conflict's only observation. Gating also removes a full rescan of `intents`,
+  `conflicts`, and `validations` from every CLI invocation.
+- `PRAGMA recursive_triggers` is enabled so the append-only triggers on
+  `validation_attempts`, `conflict_detections`, and `events` also fire for the
+  implicit delete inside an `INSERT OR REPLACE`, which previously bypassed them.
+- The documented daemon shutdown grace is now a process-exit bound. The daemon
+  builds and owns its Tokio runtime, so when the 30 second HTTP grace expires it
+  abandons the remaining requests (terminating the validation subprocess trees
+  it started), waits at most 5 further seconds for blocking work that cannot be
+  cancelled, and then exits: 0 after a clean drain, 1 when the bound had to be
+  enforced. Previously the runtime was dropped at the end of `main`, which
+  blocked forever on an uncancellable blocking task such as a wedged `git`
+  child, leaving the daemon alive and swallowing later signals. Documentation
+  now also states what still survives the forced exit: a child process started
+  outside a validation guard is not killed, and signals sent during the drain
+  are ignored.
+
 ## [0.3.0] - 2026-08-22
 
 ### Added

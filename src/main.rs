@@ -451,8 +451,25 @@ struct RequestArgs {
     url: String,
 }
 
-#[tokio::main]
-async fn main() {
+/// How the requested command finished, so `main` can pick an exit code without
+/// inspecting command state again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Completion {
+    /// The command finished normally.
+    Normal,
+    /// The daemon's shutdown grace expired with HTTP work still in flight, so
+    /// the process is exiting on the bound rather than on a completed drain.
+    ForcedShutdown,
+}
+
+fn exit_code(completion: Completion) -> i32 {
+    match completion {
+        Completion::Normal => 0,
+        Completion::ForcedShutdown => 1,
+    }
+}
+
+fn main() {
     let cli = Cli::parse();
     let mcp_mode = matches!(&cli.command, Commands::Mcp);
     tracing_subscriber::fmt()
@@ -462,37 +479,68 @@ async fn main() {
         .with_writer(std::io::stderr)
         .init();
     let json_mode = cli.json;
-    if let Err(error) = execute(cli).await {
-        if error
-            .downcast_ref::<io::Error>()
-            .is_some_and(|value| value.kind() == io::ErrorKind::BrokenPipe)
-        {
-            return;
+    // The runtime is built by hand rather than through `#[tokio::main]` so the
+    // process can bound its own teardown: `shutdown_timeout` drops pending
+    // tasks (running validation cancellation guards) and then stops waiting on
+    // blocking work that cannot be cancelled, such as a wedged child process.
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("error: build Tokio runtime: {error}");
+            std::process::exit(1);
         }
-        if json_mode && !mcp_mode {
-            let line = serde_json::to_string(&json!({
-                "ok": false,
-                "error": { "code": error_code(&error), "message": format!("{error:#}") }
-            }))
-            .expect("serialize error");
-            if let Err(write_error) = write_stdout_line(&line) {
-                if write_error
-                    .downcast_ref::<io::Error>()
-                    .is_none_or(|value| value.kind() != io::ErrorKind::BrokenPipe)
-                {
-                    eprintln!("error: {write_error:#}");
-                }
+    };
+    let code = match runtime.block_on(execute(cli)) {
+        Ok(completion) => {
+            if completion == Completion::ForcedShutdown {
+                eprintln!(
+                    "error: shutdown grace of {} seconds expired with requests still in flight; exiting without waiting for them",
+                    api::shutdown_grace().as_secs()
+                );
             }
-        } else {
-            eprintln!("error: {error:#}");
+            exit_code(completion)
         }
-        std::process::exit(1);
-    }
+        Err(error) => {
+            if error
+                .downcast_ref::<io::Error>()
+                .is_some_and(|value| value.kind() == io::ErrorKind::BrokenPipe)
+            {
+                0
+            } else {
+                if json_mode && !mcp_mode {
+                    let line = serde_json::to_string(&json!({
+                        "ok": false,
+                        "error": { "code": error_code(&error), "message": format!("{error:#}") }
+                    }))
+                    .expect("serialize error");
+                    if let Err(write_error) = write_stdout_line(&line) {
+                        if write_error
+                            .downcast_ref::<io::Error>()
+                            .is_none_or(|value| value.kind() != io::ErrorKind::BrokenPipe)
+                        {
+                            eprintln!("error: {write_error:#}");
+                        }
+                    }
+                } else {
+                    eprintln!("error: {error:#}");
+                }
+                1
+            }
+        }
+    };
+    // Bounded teardown, then a deliberate exit: without both, dropping the
+    // runtime would block indefinitely on an uncancellable blocking task.
+    runtime.shutdown_timeout(api::RUNTIME_SHUTDOWN_GRACE);
+    std::process::exit(code);
 }
 
-async fn execute(cli: Cli) -> Result<()> {
+async fn execute(cli: Cli) -> Result<Completion> {
     let cwd = cli.cwd.canonicalize().unwrap_or(cli.cwd.clone());
     let database = git::resolve_database_path(&cwd, cli.database.as_deref());
+    let mut completion = Completion::Normal;
     match cli.command {
         Commands::Init => {
             let service = open_service(&database, &cwd)?;
@@ -643,7 +691,10 @@ async fn execute(cli: Cli) -> Result<()> {
             if !cli.json {
                 eprintln!("Foremerge API listening on http://{bind}");
             }
-            api::serve(ApiState { service, token }, bind).await?;
+            let outcome = api::serve(ApiState { service, token }, bind).await?;
+            if outcome.grace_expired() {
+                completion = Completion::ForcedShutdown;
+            }
         }
         Commands::Mcp => {
             let service = open_service(&database, &cwd)?;
@@ -722,7 +773,7 @@ async fn execute(cli: Cli) -> Result<()> {
             execute_service(command, service, &cwd, cli.json).await?;
         }
     }
-    Ok(())
+    Ok(completion)
 }
 
 fn open_service(database: &Path, cwd: &Path) -> Result<Foremerge> {
@@ -1285,4 +1336,23 @@ fn error_code_from_message(message: &str) -> String {
         })
         .unwrap_or("ERROR")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_forced_shutdown_is_reported_through_a_nonzero_exit_code() {
+        assert_eq!(exit_code(Completion::Normal), 0);
+        assert_eq!(exit_code(Completion::ForcedShutdown), 1);
+    }
+
+    #[test]
+    fn the_runtime_teardown_bound_is_finite_and_shorter_than_the_http_grace() {
+        // The documented worst case is the HTTP grace plus this bound, so a
+        // teardown bound at or above the grace would silently double it.
+        assert!(api::RUNTIME_SHUTDOWN_GRACE > Duration::ZERO);
+        assert!(api::RUNTIME_SHUTDOWN_GRACE < api::shutdown_grace());
+    }
 }
