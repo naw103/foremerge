@@ -384,6 +384,20 @@ pub fn ensure_clean(worktree: impl AsRef<Path>) -> Result<()> {
             snapshot.changed_files.join(", ")
         );
     }
+    // Excluded generated files are deliberately kept out of the fingerprint, so
+    // they do not make the worktree dirty. They must still be gone before
+    // acceptance: the validated tree contained them and the accepted commit
+    // does not, so leaving them lets a candidate be accepted whose validation
+    // depended on content that is not in the commit. Deleting them cannot
+    // invalidate the ChangeSet, because their presence and content were
+    // excluded from the fingerprint in the first place.
+    if !snapshot.excluded_paths.is_empty() {
+        bail!(
+            "CHECK_FAILED: worktree {} still holds excluded generated files; remove them before acceptance (this does not change the fingerprint): {}",
+            snapshot.root.display(),
+            snapshot.excluded_paths.join(", ")
+        );
+    }
     Ok(())
 }
 

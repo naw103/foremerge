@@ -173,7 +173,11 @@ full event-chain audit is authenticated and paged through a separate read-only
 connection. Synchronous SQLite and Git service calls are dispatched with
 `spawn_blocking` so they do not occupy Tokio worker threads. SIGINT/SIGTERM stop
 new HTTP work and bound in-flight draining to 30 seconds; validation cancellation
-terminates the subprocess tree.
+terminates the subprocess tree. The daemon owns its own Tokio runtime so the
+bound is a process-exit bound: when the grace expires it abandons the remaining
+requests, gives uncancellable blocking work 5 further seconds, and exits 1
+(a clean drain exits 0). A child process started outside a validation guard, for
+example a wedged `git` call, is not killed and may outlive the daemon.
 
 ## Trust and safety boundaries
 

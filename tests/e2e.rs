@@ -837,6 +837,20 @@ fn stale_validation_attempt_is_retained_and_exclusion_rules_enable_a_safe_revisi
             .is_some_and(|digest| digest.starts_with("sha256:"))
     );
 
+    // The excluded artifact is deliberately outside the fingerprint, so it does
+    // not make the worktree dirty. Acceptance must still refuse while it is
+    // present: the validated tree contained it and the accepted commit does
+    // not, so accepting here would bless a candidate whose validation may have
+    // depended on content missing from the commit.
+    let blocked = cli_failure(&repo.root, None, ["changeset", "accept", &second_changeset]);
+    assert_eq!(blocked["error"]["code"], "CHECK_FAILED");
+    assert!(
+        blocked["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("coverage.log")),
+        "acceptance must name the excluded artifact: {blocked}"
+    );
+
     fs::remove_file(repo.root.join("coverage.log")).expect("remove generated artifact");
     let accepted = cli_success(&repo.root, None, ["changeset", "accept", &second_changeset]);
     assert_eq!(accepted["data"]["status"], "ACCEPTED");
@@ -4947,5 +4961,101 @@ fn real_mcp_stdio_drives_the_lifecycle_through_named_verification_and_acceptance
             .expect("open lifecycle database")
             .verify_event_chain()
             .unwrap()
+    );
+}
+
+/// Every CLI invocation reopens the store and therefore reruns migration. A
+/// one-time backfill that is not gated on the stored schema version mints a
+/// duplicate row on the second open, which is how schema 2 fabricated a second
+/// "immutable" detection for conflicts that already had a native one. The
+/// in-process tests could not see this because they never reopen.
+#[test]
+fn reopening_the_store_does_not_fabricate_extra_conflict_detections() {
+    let repo = create_repo();
+    cli_success(&repo.root, None, ["init"]);
+    let first = cli_success(
+        &repo.root,
+        None,
+        ["agent", "register", "--name", "stripe", "--no-worktree"],
+    )["data"]["id"]
+        .as_str()
+        .expect("agent id")
+        .to_string();
+    let second = cli_success(
+        &repo.root,
+        None,
+        ["agent", "register", "--name", "paypal", "--no-worktree"],
+    )["data"]["id"]
+        .as_str()
+        .expect("agent id")
+        .to_string();
+    cli_success(
+        &repo.root,
+        None,
+        [
+            "intent",
+            "publish",
+            "--agent",
+            &first,
+            "--task",
+            "modernize",
+            "--summary",
+            "Replace PaymentService with StripePaymentService",
+            "--scope",
+            "symbol:PaymentService",
+        ],
+    );
+    cli_success(
+        &repo.root,
+        None,
+        [
+            "intent",
+            "publish",
+            "--agent",
+            &second,
+            "--task",
+            "paypal",
+            "--summary",
+            "Add PayPal support to PaymentService",
+            "--scope",
+            "symbol:PaymentService",
+        ],
+    );
+    let conflicts = cli_success(&repo.root, None, ["conflicts", "list"]);
+    let conflict_id = conflicts["data"][0]["id"]
+        .as_str()
+        .expect("a conflict was detected")
+        .to_string();
+
+    // Each of these is a separate process, so each reopens and remigrates.
+    for _ in 0..3 {
+        cli_success(&repo.root, None, ["status"]);
+    }
+
+    let detections = cli_success(&repo.root, None, ["conflicts", "detections", &conflict_id]);
+    let observations = detections["data"].as_array().expect("detections array");
+    assert_eq!(
+        observations.len(),
+        1,
+        "one detection must record exactly one observation across reopens: {detections}"
+    );
+    assert!(
+        !observations[0]["id"]
+            .as_str()
+            .expect("detection id")
+            .starts_with("dtn_legacy_"),
+        "a natively detected conflict must not be backfilled as legacy: {detections}"
+    );
+
+    let events = cli_success(&repo.root, None, ["events", "list", "--after-seq", "0"]);
+    let detected = events["data"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .filter(|event| event["event_type"] == "conflict.detected")
+        .count();
+    assert_eq!(
+        detected, 1,
+        "the event log and the occurrence table must agree: {events}"
     );
 }

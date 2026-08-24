@@ -499,6 +499,23 @@ MVP API does not promise general HTTP idempotency keys. Generated IDs and the
 append-only event log make duplicate semantic actions visible, but clients
 should not assume a repeated POST is deduplicated.
 
+### Shutdown
+
 On SIGINT or SIGTERM the daemon stops accepting new connections and gives
-in-flight operations, including validation, up to 30 seconds to finish. After
-that bound it terminates remaining requests and their validation process trees.
+in-flight operations, including validation, up to 30 seconds to finish. If the
+drain completes the daemon exits 0.
+
+If the grace expires with requests still in flight, the daemon does not wait for
+them. It abandons the remaining request futures (which terminates the validation
+subprocess trees Foremerge started itself), then allows up to 5 more seconds for
+blocking work that cannot be cancelled, and then exits 1. The process therefore
+exits within roughly 35 seconds of the signal.
+
+Two things survive that forced exit:
+
+- A child process Foremerge did not start under a validation guard, such as a
+  wedged `git` invocation inside a request, is not killed and can outlive the
+  daemon. Foremerge stops waiting for it; it does not reap it.
+- Further signals sent during the drain are ignored. The first SIGINT or SIGTERM
+  starts the bounded sequence above and the daemon exits on its own; SIGKILL is
+  the only way to end it sooner.
