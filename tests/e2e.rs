@@ -3297,11 +3297,16 @@ fn validation_timeout_kills_direct_child_on_windows() {
         &intent_id,
         "Validation with a long-lived Windows child",
     );
-    let pid_file = repo.temp.path().join("validation-child.pid");
-    let escaped_pid_file = pid_file.to_string_lossy().replace('\'', "''");
-    let powershell_command = format!(
-        "$PID | Set-Content -NoNewline -LiteralPath '{escaped_pid_file}'; Start-Sleep -Seconds 60"
-    );
+    let system_root = std::env::var_os("SystemRoot")
+        .or_else(|| std::env::var_os("WINDIR"))
+        .expect("Windows system root");
+    let child_name = "fm-timeout-child.exe";
+    let child_path = repo.temp.path().join(child_name);
+    fs::copy(
+        PathBuf::from(system_root).join("System32").join("ping.exe"),
+        &child_path,
+    )
+    .expect("copy a uniquely named long-lived Windows fixture");
     let validation = cli_success(
         &repo.root,
         None,
@@ -3312,10 +3317,9 @@ fn validation_timeout_kills_direct_child_on_windows() {
             "--timeout-seconds".to_string(),
             "1".to_string(),
             "--".to_string(),
-            "powershell.exe".to_string(),
-            "-NoProfile".to_string(),
-            "-Command".to_string(),
-            powershell_command,
+            child_path.to_string_lossy().into_owned(),
+            "-t".to_string(),
+            "127.0.0.1".to_string(),
         ],
     );
     assert_eq!(validation["data"]["passed"], false);
@@ -3325,11 +3329,10 @@ fn validation_timeout_kills_direct_child_on_windows() {
             .expect("validation stderr")
             .contains("timed out after 1 seconds")
     );
-    let pid = fs::read_to_string(&pid_file).expect("validation child recorded its pid");
     let output = Command::new("tasklist")
         .args([
             "/FI",
-            &format!("PID eq {}", pid.trim()),
+            &format!("IMAGENAME eq {child_name}"),
             "/FO",
             "CSV",
             "/NH",
@@ -3339,7 +3342,7 @@ fn validation_timeout_kills_direct_child_on_windows() {
     assert!(output.status.success());
     let listing = String::from_utf8_lossy(&output.stdout);
     assert!(
-        listing.contains("No tasks are running") || !listing.contains(pid.trim()),
+        !listing.to_ascii_lowercase().contains(child_name),
         "validation child survived timeout: {listing}"
     );
 }
