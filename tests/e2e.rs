@@ -5141,3 +5141,254 @@ fn reopening_the_store_does_not_fabricate_extra_conflict_detections() {
         "the event log and the occurrence table must agree: {events}"
     );
 }
+
+/// Drive a repository to a published ChangeSet, returning (repo, agent, intent,
+/// changeset). Every test below needs the same runway.
+fn repo_with_published_changeset() -> (RepoFixture, String, String, String) {
+    let repo = create_repo();
+    let root = repo.root.clone();
+    cli_success(&root, None, ["init"]);
+    let agent = cli_success(
+        &root,
+        None,
+        [
+            "agent",
+            "register",
+            "--name",
+            "worker",
+            "--worktree",
+            root.to_str().unwrap(),
+        ],
+    )["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let intent = cli_success(
+        &root,
+        None,
+        [
+            "intent",
+            "publish",
+            "--agent",
+            &agent,
+            "--task",
+            "t",
+            "--summary",
+            "Add a greeting helper",
+            "--scope",
+            "symbol:Greeter::greet",
+        ],
+    )["data"]["intent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    cli_success(
+        &root,
+        None,
+        [
+            "work",
+            "claim",
+            "--agent",
+            &agent,
+            "--intent",
+            &intent,
+            "--scope",
+            "symbol:Greeter::greet",
+        ],
+    );
+    cli_success(&root, None, ["work", "start", "--agent", &agent, &intent]);
+    fs::write(root.join("greeter.txt"), "greet\n").expect("write file");
+    git(&root, ["add", "-A"]);
+    git(&root, ["commit", "--quiet", "-m", "add greeter"]);
+    let changeset = cli_success(
+        &root,
+        None,
+        [
+            "changeset",
+            "publish",
+            "--agent",
+            &agent,
+            "--intent",
+            &intent,
+            "--summary",
+            "Adds a greeting helper",
+            "--file",
+            "greeter.txt",
+        ],
+    )["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    (repo, agent, intent, changeset)
+}
+
+/// A repository with no test suite could not finish the lifecycle at all, and
+/// the only way through was to validate a no-op command, which wrote a passing
+/// validation into the append-only log for work nothing had checked.
+#[test]
+fn unverified_work_is_recorded_as_unverified_rather_than_faked() {
+    let (repo, _agent, _intent, changeset) = repo_with_published_changeset();
+    let root = repo.root.clone();
+
+    // Strict is the default, so this still refuses, but it now names the way out.
+    let refusal = cli_failure(&root, None, ["changeset", "accept", &changeset]);
+    let message = refusal["error"]["message"].as_str().unwrap();
+    assert!(message.contains("UNVERIFIED"), "{message}");
+    assert!(message.contains("--allow-unverified"), "{message}");
+
+    let accepted = cli_success(
+        &root,
+        None,
+        [
+            "changeset",
+            "accept",
+            &changeset,
+            "--allow-unverified",
+            "--override-reason",
+            "this repository has no test suite",
+        ],
+    );
+    assert_eq!(accepted["data"]["status"], "ACCEPTED");
+    assert_eq!(accepted["data"]["acceptance_verification"], "UNVERIFIED");
+    assert_eq!(
+        accepted["data"]["acceptance_reason"],
+        "this repository has no test suite"
+    );
+
+    // The immutable record must say the same thing, since that is the artifact
+    // an audit actually reads.
+    let events = cli_success(&root, None, ["events", "list", "--limit", "200"]);
+    let accepted_event = events["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["event_type"] == "changeset.accepted")
+        .expect("an acceptance event");
+    assert_eq!(accepted_event["payload"]["verification"], "UNVERIFIED");
+}
+
+/// An advisory policy is for repositories with nothing to verify. It must never
+/// wave through a check that ran and failed, which is evidence of breakage
+/// rather than an absence of evidence.
+#[test]
+fn an_advisory_policy_allows_unverified_work_but_never_a_failing_check() {
+    let (repo, _agent, _intent, changeset) = repo_with_published_changeset();
+    let root = repo.root.clone();
+    cli_success(&root, None, ["checks", "policy", "advisory"]);
+
+    // Nothing ran: permitted, and recorded honestly.
+    let accepted = cli_success(&root, None, ["changeset", "accept", &changeset]);
+    assert_eq!(accepted["data"]["acceptance_verification"], "UNVERIFIED");
+
+    // A check that ran and failed: refused under the same policy.
+    let (repo2, _a2, _i2, changeset2) = repo_with_published_changeset();
+    let root2 = repo2.root.clone();
+    cli_success(&root2, None, ["checks", "policy", "advisory"]);
+    cli_success(
+        &root2,
+        None,
+        ["changeset", "validate", &changeset2, "--", "false"],
+    );
+    let refusal = cli_failure(&root2, None, ["changeset", "accept", &changeset2]);
+    let message = refusal["error"]["message"].as_str().unwrap();
+    assert!(message.contains("FAILED"), "{message}");
+    // The remedy for a failure is to fix it, not to loosen the policy.
+    assert!(
+        !message.contains("checks policy advisory"),
+        "advisory policy must not be offered as the answer to a real failure: {message}"
+    );
+}
+
+/// An agent whose work outlasts its lease previously had no way to hold its
+/// claims, and lost collision protection silently.
+#[test]
+fn an_agent_can_renew_its_lease_while_working_without_stacking_claims() {
+    let repo = create_repo();
+    let root = repo.root.clone();
+    cli_success(&root, None, ["init"]);
+    let agent = cli_success(
+        &root,
+        None,
+        [
+            "agent",
+            "register",
+            "--name",
+            "worker",
+            "--worktree",
+            root.to_str().unwrap(),
+        ],
+    )["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let intent = cli_success(
+        &root,
+        None,
+        [
+            "intent",
+            "publish",
+            "--agent",
+            &agent,
+            "--task",
+            "t",
+            "--summary",
+            "s",
+            "--scope",
+            "symbol:Greeter::greet",
+        ],
+    )["data"]["intent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let claim_args = [
+        "work",
+        "claim",
+        "--agent",
+        &agent,
+        "--intent",
+        &intent,
+        "--scope",
+        "symbol:Greeter::greet",
+    ];
+    let first = cli_success(&root, None, claim_args);
+    let first_lease = first["data"]["claims"][0]["lease_expires_at"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    cli_success(&root, None, ["work", "start", "--agent", &agent, &intent]);
+
+    // Renewing mid-work is the whole point: previously IN_PROGRESS was refused.
+    let renewed = cli_success(
+        &root,
+        None,
+        [
+            "work",
+            "claim",
+            "--agent",
+            &agent,
+            "--intent",
+            &intent,
+            "--scope",
+            "symbol:Greeter::greet",
+            "--lease-seconds",
+            "7200",
+        ],
+    );
+    let renewed_lease = renewed["data"]["claims"][0]["lease_expires_at"]
+        .as_str()
+        .unwrap();
+    assert!(
+        renewed_lease > first_lease.as_str(),
+        "lease should extend: {first_lease} -> {renewed_lease}"
+    );
+
+    // The same scope must not end up claimed twice, or `status` overstates what
+    // is actually held.
+    let status = cli_success(&root, None, ["status"]);
+    let claims = status["data"]["claims"].as_array().unwrap();
+    assert_eq!(
+        claims.len(),
+        1,
+        "renewal stacked a duplicate claim: {claims:?}"
+    );
+}

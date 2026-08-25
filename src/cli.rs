@@ -155,6 +155,38 @@ enum CheckCommand {
     List,
     /// Remove a trusted verification check.
     Remove { name: String },
+    /// Warn when a published symbol scope names something that exists nowhere
+    /// in the worktree. Off by default.
+    VerifySymbols {
+        #[arg(action = clap::ArgAction::Set)]
+        enabled: bool,
+    },
+    /// Show or set what acceptance requires when Foremerge verified nothing.
+    Policy {
+        /// Omit to show the current policy.
+        #[arg(value_enum)]
+        policy: Option<AcceptancePolicyArg>,
+    },
+}
+
+/// CLI spelling of `checks::AcceptancePolicy`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum AcceptancePolicyArg {
+    /// Only work Foremerge verified itself may be accepted.
+    Strict,
+    /// Work with nothing to verify may be accepted, recorded as UNVERIFIED
+    /// with a reason. A check that ran and failed still needs an operator
+    /// override.
+    Advisory,
+}
+
+impl From<AcceptancePolicyArg> for checks::AcceptancePolicy {
+    fn from(value: AcceptancePolicyArg) -> Self {
+        match value {
+            AcceptancePolicyArg::Strict => Self::Strict,
+            AcceptancePolicyArg::Advisory => Self::Advisory,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -244,6 +276,16 @@ enum WorkCommand {
         intent_id: String,
         #[arg(long = "agent")]
         agent_id: String,
+    },
+    /// Take over an intent whose agent has stopped. Refused while any of its
+    /// claims are still live, so it cannot take work from a busy agent.
+    Adopt {
+        intent_id: String,
+        #[arg(long = "agent")]
+        agent_id: String,
+        /// Recorded on the handover.
+        #[arg(long)]
+        reason: String,
     },
     /// Poll semantic events as they cross useful boundaries.
     Watch {
@@ -368,8 +410,14 @@ enum ChangeSetCommand {
         git_ref: Option<String>,
         #[arg(long)]
         allow_high_conflicts: bool,
-        /// Required rationale when explicitly overriding unresolved HIGH conflicts.
-        #[arg(long, requires = "allow_high_conflicts")]
+        /// Accept work Foremerge did not verify, or verified as failing. The
+        /// ChangeSet records it as UNVERIFIED or FAILED with your reason, so
+        /// the audit trail never implies a check ran when none did.
+        #[arg(long)]
+        allow_unverified: bool,
+        /// Required rationale when overriding unresolved HIGH conflicts or
+        /// accepting unverified work.
+        #[arg(long)]
         override_reason: Option<String>,
     },
     /// Record the durable Git commit after integration.
@@ -643,6 +691,13 @@ async fn execute(cli: Cli) -> Result<Completion> {
             let next_client_step = client_diagnostics
                 .as_ref()
                 .and_then(|values| values.iter().find_map(|value| value.next_step.clone()));
+            // Acceptance is verification-gated, so a repository whose checks
+            // cannot run is one where no work can ever be accepted. That was
+            // only discoverable by an agent failing at the last step, which is
+            // the worst possible moment to find out.
+            let checks_diagnosis = repo
+                .as_ref()
+                .map(|value| checks::diagnose(&checks::registry_path(&value.common_dir), &cwd));
             let report = DoctorReport {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 database: database.to_string_lossy().into_owned(),
@@ -676,8 +731,14 @@ async fn execute(cli: Cli) -> Result<Completion> {
                         .to_string()
                 },
                 clients: client_diagnostics,
+                checks: checks_diagnosis.clone(),
             };
             emit(cli.json, serde_json::to_value(report)?)?;
+            if let Some(diagnosis) = checks_diagnosis {
+                for warning in &diagnosis.warnings {
+                    eprintln!("warning: {warning}");
+                }
+            }
         }
         Commands::Daemon { bind, no_auth } => {
             if !bind.ip().is_loopback() {
@@ -726,6 +787,13 @@ async fn execute(cli: Cli) -> Result<Completion> {
                 )?,
                 CheckCommand::List => checks::load_at(&registry_path)?,
                 CheckCommand::Remove { name } => checks::remove_at(&registry_path, &name)?,
+                CheckCommand::VerifySymbols { enabled } => {
+                    checks::set_verify_symbol_scopes_at(&registry_path, enabled)?
+                }
+                CheckCommand::Policy { policy: None } => checks::load_at(&registry_path)?,
+                CheckCommand::Policy {
+                    policy: Some(policy),
+                } => checks::set_policy_at(&registry_path, policy.into())?,
             };
             emit(
                 cli.json,
@@ -865,6 +933,11 @@ async fn execute_service(
             intent_id,
             agent_id,
         }) => serde_json::to_value(service.start_work(&agent_id, &intent_id)?)?,
+        Commands::Work(WorkCommand::Adopt {
+            intent_id,
+            agent_id,
+            reason,
+        }) => serde_json::to_value(service.adopt_intent(&agent_id, &intent_id, &reason)?)?,
         Commands::Work(WorkCommand::Discard {
             intent_id,
             agent_id,
@@ -999,12 +1072,14 @@ async fn execute_service(
             changeset_id,
             git_ref,
             allow_high_conflicts,
+            allow_unverified,
             override_reason,
         }) => serde_json::to_value(service.accept_changeset(
             &changeset_id,
             AcceptRequest {
                 git_ref,
                 allow_high_conflicts,
+                allow_unverified,
                 override_reason,
             },
         )?)?,
@@ -1075,7 +1150,18 @@ fn pad(value: &str, width: usize) -> String {
 fn render_status(report: &StatusReport) -> String {
     let mut out = String::new();
 
-    out.push_str(&format!("Agents ({} active)\n", report.agents.len()));
+    // Counting silent agents as active is how `status` came to claim eleven
+    // agents were working when most had been dead for hours.
+    let live = report.agents.iter().filter(|agent| !agent.stale).count();
+    let stale = report.agents.len() - live;
+    out.push_str(&format!(
+        "Agents ({live} active{})\n",
+        if stale > 0 {
+            format!(", {stale} silent for over 2h")
+        } else {
+            String::new()
+        }
+    ));
     if report.agents.is_empty() {
         out.push_str("  none\n");
     } else {

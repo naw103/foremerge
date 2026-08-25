@@ -382,6 +382,11 @@ async fn call_tool(service: &Foremerge, params: Value) -> Result<Value, (i64, St
                             AcceptRequest {
                                 git_ref: request.git_ref,
                                 allow_high_conflicts: false,
+                                // Agents never override. Accepting work with
+                                // nothing to verify is governed by the
+                                // repository's acceptance policy, which a human
+                                // sets once, not by the agent asking nicely.
+                                allow_unverified: false,
                                 override_reason: None,
                             },
                         )

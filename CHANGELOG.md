@@ -9,7 +9,37 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+Opening a store with this release migrates it to database schema 5. Symbol
+scopes are now normalized, so every canonical form stored under an older schema
+is recomputed: the scope projection is rebuilt from `intents.scopes_json`, which
+is the source of truth and is untouched, and claims are recomputed in place.
+Where normalization makes two live claims on one intent share a scope, the
+longest-lived is kept and the others are released. An older Foremerge build will
+refuse to open a schema 5 store rather than migrate it backwards.
+
 ### Added
+
+- `foremerge work adopt` transfers an intent whose agent has stopped. An agent
+  that died mid-task previously left its intent owned forever by an agent that
+  would never return, so the work could only be duplicated. Adoption is refused
+  while any claim on the intent is still live, so it can never take work from an
+  agent that is merely busy; the expiry of every claim is the evidence that the
+  owner has stopped. The handover records the previous owner and a reason.
+- `foremerge checks policy <strict|advisory>` sets what acceptance requires when
+  Foremerge verified nothing itself. Strict, the default and the previous
+  behaviour, accepts only verified work. Advisory accepts work with nothing to
+  verify, recorded as `UNVERIFIED` with a reason. A check that ran and *failed*
+  is never cleared by policy, because a failure is evidence of breakage rather
+  than an absence of evidence.
+- `foremerge changeset accept --allow-unverified --override-reason` is the
+  operator equivalent, available regardless of policy. Agents cannot use it:
+  overrides remain CLI-only human actions.
+- `foremerge checks verify-symbols true` warns when a published `symbol:` scope
+  names something that appears nowhere in the worktree. Off by default, and
+  always a warning, because a scope may legitimately name something the agent is
+  about to create.
+- `foremerge doctor` reports whether the registered checks can actually run
+  here, and warns when none are registered under a strict policy.
 
 - `fmg` is a short name for the `foremerge` command. It is the same binary
   installed under a second name, so `fmg status` and `foremerge status` are
@@ -24,6 +54,35 @@ changes when they are called out here with a migration note.
   prints guidance to stderr on startup, and answers a bare tool name with the
   equivalent JSON-RPC line. Both are suppressed when stdin is a pipe, so client
   sessions are byte for byte unchanged.
+
+### Fixed
+
+- Symbol scopes are normalized to `container::member`, discarding namespace,
+  module and path prefixes, so `App\Services\Report::render` and
+  `Report::render` are one scope. Agents describe the same method differently
+  and previously never collided at all, which silently defeated overlap
+  detection for the case it exists to catch. The deliberate cost is that two
+  same-named classes in different namespaces now share a scope and can warn
+  about each other: for an advisory system a spurious warning is cheap and a
+  missed collision is the failure that matters. Other scope kinds keep their key
+  verbatim, because a path or a route is already unambiguous.
+- An agent may claim while its intent is `IN_PROGRESS`, which is how a long task
+  renews its lease. Previously there was no renew and no re-claim, so work that
+  outlasted its lease lost its claims with no way to hold them and no signal
+  that it had happened. Re-claiming a scope the intent already holds now extends
+  that claim in place instead of stacking a second row for the same scope.
+- Acceptance can record that nothing was verified. A repository with no test
+  suite could not complete the lifecycle at all, and the only way through was to
+  validate a no-op command such as `true`, which wrote a passing validation into
+  the append-only, hash-chained log for work that nothing had checked. The gate
+  exists so an agent's assertion is never mistaken for evidence, and its only
+  workaround was to fabricate evidence. ChangeSets now carry the honest outcome
+  (`VERIFIED`, `FAILED` or `UNVERIFIED`) and the reason, on the record and in
+  the acceptance event.
+- `foremerge status` no longer counts silent agents as active. Registration
+  status never expired, so a fleet that died hours earlier still reported as
+  fully working; agents unseen for over two hours are now shown as silent and
+  excluded from the active count. Claims already expired correctly.
 
 ## [0.3.1] - 2026-08-24
 

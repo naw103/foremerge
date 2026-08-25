@@ -13,6 +13,25 @@ const MAX_COMMAND_BYTES: usize = 64 * 1024;
 const MAX_ARGS: usize = 128;
 const MAX_TIMEOUT_SECONDS: u64 = 3600;
 
+/// What acceptance requires when Foremerge has not verified the work itself.
+///
+/// This governs agents. A human operator can always override from the CLI, and
+/// either way the outcome is recorded on the ChangeSet rather than disguised as
+/// a check that passed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AcceptancePolicy {
+    /// Only work Foremerge verified itself may be accepted. The default,
+    /// because it is the existing behaviour and the stronger guarantee.
+    #[default]
+    Strict,
+    /// Work with nothing to verify may be accepted, and is recorded as
+    /// `UNVERIFIED` with a reason. A check that ran and *failed* still needs an
+    /// operator override, because a failure is real evidence rather than an
+    /// absence of it.
+    Advisory,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NamedCheck {
     pub command: Vec<String>,
@@ -24,6 +43,13 @@ pub struct CheckRegistry {
     pub version: u32,
     #[serde(default)]
     pub checks: BTreeMap<String, NamedCheck>,
+    #[serde(default)]
+    pub acceptance_policy: AcceptancePolicy,
+    /// Warn when a published `symbol:` scope names something that appears
+    /// nowhere in the worktree. Off by default, because a scope may legitimately
+    /// name something the agent is about to create.
+    #[serde(default)]
+    pub verify_symbol_scopes: bool,
 }
 
 impl Default for CheckRegistry {
@@ -31,6 +57,8 @@ impl Default for CheckRegistry {
         Self {
             version: CONFIG_VERSION,
             checks: BTreeMap::new(),
+            acceptance_policy: AcceptancePolicy::default(),
+            verify_symbol_scopes: false,
         }
     }
 }
@@ -84,6 +112,107 @@ pub fn set_at(config_path: &Path, name: &str, check: NamedCheck) -> Result<Check
     registry.checks.insert(name.to_string(), check);
     save_path(config_path, &registry)?;
     Ok(registry)
+}
+
+/// Set the acceptance policy for this repository.
+pub fn set_policy_at(config_path: &Path, policy: AcceptancePolicy) -> Result<CheckRegistry> {
+    let mut registry = load_path(config_path)?;
+    registry.acceptance_policy = policy;
+    save_path(config_path, &registry)?;
+    Ok(registry)
+}
+
+/// The acceptance policy recorded for a repository, defaulting to strict when
+/// no registry file exists yet. Read failures also fall back to strict: a
+/// damaged registry must never be a route to accepting unverified work.
+pub fn acceptance_policy_at(config_path: &Path) -> AcceptancePolicy {
+    load_path(config_path)
+        .map(|registry| registry.acceptance_policy)
+        .unwrap_or_default()
+}
+
+/// Turn the symbol-existence advisory on or off for this repository.
+pub fn set_verify_symbol_scopes_at(config_path: &Path, enabled: bool) -> Result<CheckRegistry> {
+    let mut registry = load_path(config_path)?;
+    registry.verify_symbol_scopes = enabled;
+    save_path(config_path, &registry)?;
+    Ok(registry)
+}
+
+/// Whether the symbol-existence advisory is enabled, defaulting to off.
+pub fn verify_symbol_scopes_at(config_path: &Path) -> bool {
+    load_path(config_path)
+        .map(|registry| registry.verify_symbol_scopes)
+        .unwrap_or(false)
+}
+
+/// Whether the registered checks can actually run from `cwd`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckDiagnostic {
+    pub registered: usize,
+    pub acceptance_policy: AcceptancePolicy,
+    /// Checks whose executable could not be found, or whose relative path
+    /// argument does not exist here.
+    pub unrunnable: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// Diagnose the registry without running anything.
+///
+/// A check is reported as unrunnable when its executable is not on `PATH` and
+/// not a file here, or when a relative path in its argv does not exist in this
+/// worktree. That second case is the one that bites: dependency directories are
+/// usually gitignored, so `git worktree add` never creates them and every check
+/// fails in every agent worktree while the primary checkout looks fine.
+pub fn diagnose(config_path: &Path, cwd: &Path) -> CheckDiagnostic {
+    let registry = load_path(config_path).unwrap_or_default();
+    let mut unrunnable = Vec::new();
+    let mut warnings = Vec::new();
+    for (name, check) in &registry.checks {
+        let Some(program) = check.command.first() else {
+            continue;
+        };
+        if !executable_exists(program, cwd) {
+            unrunnable.push(name.clone());
+            warnings.push(format!(
+                "check '{name}' cannot run here: '{program}' is not on PATH and not a file in this worktree"
+            ));
+            continue;
+        }
+        // A relative path argument that does not exist is the gitignored
+        // dependency directory problem.
+        if let Some(missing) = check.command[1..]
+            .iter()
+            .filter(|argument| argument.contains('/') && !argument.starts_with('-'))
+            .find(|argument| !cwd.join(argument).exists())
+        {
+            unrunnable.push(name.clone());
+            warnings.push(format!(
+                "check '{name}' refers to '{missing}', which does not exist in this worktree; if it is gitignored, `git worktree add` will not have created it"
+            ));
+        }
+    }
+    if registry.checks.is_empty() && registry.acceptance_policy == AcceptancePolicy::Strict {
+        warnings.push(
+            "no verification checks are registered and the acceptance policy is strict, so no ChangeSet can be accepted here. Register one with `foremerge checks set <name> -- <command>`, or, if this repository has nothing to verify, run `foremerge checks policy advisory`.".to_string(),
+        );
+    }
+    CheckDiagnostic {
+        registered: registry.checks.len(),
+        acceptance_policy: registry.acceptance_policy,
+        unrunnable,
+        warnings,
+    }
+}
+
+fn executable_exists(program: &str, cwd: &Path) -> bool {
+    let candidate = Path::new(program);
+    if candidate.components().count() > 1 {
+        return cwd.join(candidate).exists() || candidate.exists();
+    }
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
+        .unwrap_or(false)
 }
 
 pub fn remove(cwd: &Path, name: &str) -> Result<CheckRegistry> {

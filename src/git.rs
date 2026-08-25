@@ -590,6 +590,26 @@ fn git_output_bytes_limited(cwd: &Path, args: &[&str]) -> Result<LimitedOutput> 
     }
 }
 
+/// Whether `needle` appears anywhere in the repository's tracked files.
+///
+/// Used only for the opt-in symbol-existence advisory. `git grep` is used
+/// because it already respects tracked files and ignore rules, and because Git
+/// is a dependency this project already has. A failure to run is reported as
+/// "found", so a broken search can never manufacture a warning.
+pub fn tracked_content_contains(worktree: &Path, needle: &str) -> bool {
+    if needle.trim().is_empty() {
+        return true;
+    }
+    Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["grep", "--ignore-case", "--fixed-strings", "--quiet", "-e"])
+        .arg(needle)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -52,9 +52,58 @@ impl Scope {
         Self::parse(&format!("{}:{}", self.kind, self.key))
     }
 
+    /// The identity two agents must agree on for an overlap to be detected.
+    ///
+    /// Symbol keys are reduced to their last two `::` segments with any
+    /// namespace, module or path prefix removed, so
+    /// `App\Services\Report::render` and `Report::render` are one scope rather
+    /// than two. Agents describe the same method differently, and before this
+    /// they simply never collided.
+    ///
+    /// The deliberate cost is that two same-named classes in different
+    /// namespaces now share a scope and can warn about each other. For an
+    /// advisory system that is the right direction to err: a spurious warning
+    /// is cheap, and a missed collision is the failure the tool exists to
+    /// prevent. Other scope kinds keep their key verbatim, because a path or a
+    /// route is already unambiguous and truncating it would lose meaning.
     pub fn canonical(&self) -> String {
-        format!("{}:{}", self.kind.to_lowercase(), self.key.to_lowercase())
+        let key = if self.kind.eq_ignore_ascii_case("symbol") {
+            normalize_symbol_key(&self.key)
+        } else {
+            self.key.to_lowercase()
+        };
+        format!("{}:{}", self.kind.to_lowercase(), key)
     }
+}
+
+/// Reduce a symbol key to `container::member`, or `member` when it has no
+/// container, discarding namespace and path prefixes in either part.
+fn normalize_symbol_key(key: &str) -> String {
+    let segments: Vec<&str> = key
+        .split("::")
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if segments.is_empty() {
+        return key.trim().to_lowercase();
+    }
+    let start = segments.len().saturating_sub(2);
+    segments[start..]
+        .iter()
+        .map(|segment| {
+            // Whatever separator the language uses, only the final name
+            // identifies the thing: `App\Services\Report`, `app/services/Report`
+            // and `app.services.Report` all name `Report`.
+            segment
+                .rsplit(['\\', '/', '.'])
+                .next()
+                .unwrap_or(segment)
+                .trim()
+                .to_lowercase()
+        })
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("::")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,6 +178,10 @@ pub struct IntentDetail {
 pub struct PublishIntentOutcome {
     pub intent: Intent,
     pub conflicts: Vec<Conflict>,
+    /// Advisory notes about the intent itself, as opposed to conflicts with
+    /// other agents. Empty unless a repository opts in to extra checking.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -317,6 +370,14 @@ pub struct ChangeSet {
     pub supersedes_changeset_id: Option<String>,
     pub fingerprint: String,
     pub status: String,
+    /// What Foremerge actually knew about this work when it was accepted:
+    /// `VERIFIED`, `FAILED` or `UNVERIFIED`. `None` until acceptance.
+    #[serde(default)]
+    pub acceptance_verification: Option<String>,
+    /// Why unverified or failing work was accepted anyway. Recorded so the
+    /// audit trail never has to imply a check ran when none did.
+    #[serde(default)]
+    pub acceptance_reason: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     /// Open or coordinating conflicts touching this ChangeSet's intent at the
@@ -398,6 +459,11 @@ pub struct AcceptRequest {
     pub git_ref: Option<String>,
     #[serde(default)]
     pub allow_high_conflicts: bool,
+    /// Accept work that Foremerge did not verify, or verified as failing.
+    /// Requires `override_reason`, and the outcome is recorded on the
+    /// ChangeSet rather than being disguised as a passing check.
+    #[serde(default)]
+    pub allow_unverified: bool,
     #[serde(default)]
     pub override_reason: Option<String>,
 }
@@ -472,6 +538,10 @@ pub struct DoctorReport {
     /// was asked to inspect specific clients.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clients: Option<Vec<crate::integrations::ClientDiagnostic>>,
+    /// Whether the repository's registered verification checks can actually
+    /// run here. Absent when the store is not bound to a Git repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<crate::checks::CheckDiagnostic>,
 }
 
 /// One consistent snapshot answering "what are my agents doing right now".
@@ -499,7 +569,23 @@ pub struct StatusAgent {
     pub name: String,
     pub model: Option<String>,
     pub worktree: Option<String>,
+    /// When this agent last called Foremerge.
+    #[serde(default)]
+    pub last_seen_at: String,
+    /// Whether it has been silent for longer than [`AGENT_STALE_AFTER_SECONDS`].
+    /// Registration status alone never expires, so without this a fleet that
+    /// died hours ago still reports as fully active.
+    #[serde(default)]
+    pub stale: bool,
 }
+
+/// How long an agent may be silent before `status` stops calling it active.
+///
+/// Agents go quiet for legitimate reasons: one drafting a long document can
+/// easily run forty minutes between tool calls. Two hours is well beyond that
+/// while still being far short of "yesterday". This marks agents rather than
+/// hiding them, so nothing is ever silently dropped from view.
+pub const AGENT_STALE_AFTER_SECONDS: i64 = 2 * 60 * 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusIntentGroup {
@@ -556,4 +642,80 @@ pub struct StatusChangeSetGroup {
 
 pub fn empty_object() -> Value {
     json!({})
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    #[test]
+    fn a_namespaced_symbol_and_a_bare_one_are_the_same_scope() {
+        // The GPTree dogfood run: two agents named one method two ways and so
+        // never collided.
+        let namespaced = Scope::new(
+            "symbol",
+            "App\\Services\\ConversationContextService::buildContext",
+        );
+        let bare = Scope::new("symbol", "ConversationContextService::buildContext");
+        assert_eq!(namespaced.canonical(), bare.canonical());
+        assert_eq!(
+            bare.canonical(),
+            "symbol:conversationcontextservice::buildcontext"
+        );
+    }
+
+    #[test]
+    fn every_language_separator_is_reduced_to_the_final_name() {
+        for key in [
+            "App\\Services\\Report::render",
+            "app/services/Report::render",
+            "app.services.Report::render",
+            "crate::app::services::Report::render",
+            "Report::render",
+        ] {
+            assert_eq!(
+                Scope::new("symbol", key).canonical(),
+                "symbol:report::render",
+                "{key} did not normalize"
+            );
+        }
+    }
+
+    #[test]
+    fn a_symbol_without_a_container_keeps_its_own_name() {
+        assert_eq!(
+            Scope::new("symbol", "App\\Services\\Report").canonical(),
+            "symbol:report"
+        );
+        assert_eq!(Scope::new("symbol", "render").canonical(), "symbol:render");
+    }
+
+    #[test]
+    fn non_symbol_scopes_keep_their_key_verbatim() {
+        // A path or a route is already unambiguous, and truncating it would
+        // merge genuinely different files.
+        assert_eq!(
+            Scope::new("file", "app/Services/Report.php").canonical(),
+            "file:app/services/report.php"
+        );
+        assert_eq!(
+            Scope::new("api", "/api/admin/reports/{id}").canonical(),
+            "api:/api/admin/reports/{id}"
+        );
+        assert_ne!(
+            Scope::new("file", "a/Report.php").canonical(),
+            Scope::new("file", "b/Report.php").canonical()
+        );
+    }
+
+    #[test]
+    fn normalization_is_idempotent() {
+        // Canonical forms are stored, so a second pass must not shift them
+        // again or a later migration would keep chasing its own output.
+        for key in ["App\\Services\\Report::render", "Report::render", "render"] {
+            let once = Scope::new("symbol", key).canonical();
+            let stripped = once.strip_prefix("symbol:").unwrap();
+            assert_eq!(Scope::new("symbol", stripped).canonical(), once);
+        }
+    }
 }
