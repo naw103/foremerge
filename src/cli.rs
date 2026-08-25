@@ -793,6 +793,21 @@ async fn execute(cli: Cli) -> Result<Completion> {
             }
         }
         Commands::Mcp => {
+            // Clients register one portable MCP entry and spawn it in the
+            // directory the operator is working in, so the repository is
+            // resolved here the way git resolves one: from where the process
+            // runs. Outside a repository that resolution has no answer, and
+            // continuing would create a stray store beside the spawn directory
+            // rather than coordinating anything, so fail where the operator can
+            // still read the reason.
+            if cli.database.is_none() {
+                git::discover(&cwd).with_context(|| {
+                    format!(
+                        "INVALID_INPUT: no Git repository at {}; the MCP server resolves its repository from the directory the client spawns it in, so start the client inside a repository or register it with an explicit --cwd",
+                        cwd.display()
+                    )
+                })?;
+            }
             let service = open_service(&database, &cwd)?;
             mcp::run_stdio(service).await?;
         }

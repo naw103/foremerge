@@ -111,8 +111,9 @@ the scope, and check for conflicts before you start.
 ```
 
 Adjust step 4 to whatever this repository's real test command is. Step 3 asks
-the client to enable an MCP server, so it will prompt you before doing so, and
-the Codex registration is user level and points at one repository at a time.
+the client to enable an MCP server, so it will prompt you before doing so. The
+Codex registration is user level, but one registration serves every repository:
+start Codex inside the repository you want it to coordinate.
 
 ### Or do it yourself
 
@@ -171,8 +172,8 @@ Upgrading Foremerge refreshes its own unedited skill file in place, but a skill
 file you edited, or a differing Foremerge MCP entry, is never replaced unless
 you explicitly pass `--force`. `setup all` attempts every client and reports each
 result, exiting nonzero if any failed. The Codex MCP registration is user-level
-and points at one repository at a time; see
-[agent client setup](docs/agent-clients.md).
+and serves every repository, resolved from the directory Codex is started in;
+see [agent client setup](docs/agent-clients.md).
 
 `init` creates local coordination state under the repository's Git common
 directory. It does not change tracked files. The following no-worktree sessions

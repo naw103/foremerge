@@ -438,7 +438,7 @@ fn configure_client_mcp(
             if configure_mcp {
                 configure_codex_mcp(root, foremerge_exe, force)
             } else {
-                let (configured, warning) = match codex_mcp_configured(root) {
+                let (configured, warning) = match codex_mcp_configured() {
                     Ok(configured) => (configured, None),
                     Err(error) => (
                         false,
@@ -450,9 +450,8 @@ fn configure_client_mcp(
                     configured,
                     next_step: (!configured).then(|| {
                         format!(
-                            "Run `codex mcp add foremerge -- {} --cwd {} mcp` to enable Foremerge tools.",
-                            foremerge_exe.display(),
-                            root.display()
+                            "Run `codex mcp add foremerge -- {} mcp` to enable Foremerge tools.",
+                            foremerge_exe.display()
                         )
                     }),
                     warning,
@@ -496,21 +495,24 @@ fn diagnose_client(root: &Path, client: Client) -> ClientDiagnostic {
     // Codex keeps its registration in user-global configuration, so a present
     // entry pointing elsewhere needs --force and a message naming both
     // repositories. Project JSON entries only need the generic --force step.
-    let (mcp_configured, mcp_probe_error, mcp_repoint_step, mcp_entry_stale) =
-        match mcp_path.as_deref() {
-            Some(path) => (
-                mcp_json_configured(path, root),
-                None,
-                None,
-                mcp_json_entry_stale(path, root),
-            ),
-            None => match codex_mcp_entry() {
-                Ok(Some(entry)) if entry.is_current_for(root) => (true, None, None, false),
-                Ok(Some(entry)) => (false, None, Some(codex_repoint_step(&entry, root)), false),
-                Ok(None) => (false, None, None, false),
-                Err(error) => (false, Some(format!("{error:#}")), None, false),
+    let (mcp_configured, mcp_probe_error, mcp_entry_stale) = match mcp_path.as_deref() {
+        Some(path) => (
+            mcp_json_configured(path, root),
+            None,
+            mcp_json_entry_stale(path, root),
+        ),
+        None => match codex_mcp_entry() {
+            Ok(Some(entry)) => match entry.registration() {
+                CodexRegistration::Current => (true, None, false),
+                // Setup upgrades this form on its own, so a plain `setup
+                // codex` is the correct next step.
+                CodexRegistration::Upgradable => (false, None, false),
+                CodexRegistration::Foreign => (false, None, true),
             },
-        };
+            Ok(None) => (false, None, false),
+            Err(error) => (false, Some(format!("{error:#}")), false),
+        },
+    };
     // Setup refuses to replace managed content that differs from this release,
     // so offering a plain `setup` here would name a command that cannot
     // succeed. Report what actually blocks it and ask for --force instead.
@@ -519,7 +521,10 @@ fn diagnose_client(root: &Path, client: Client) -> ClientDiagnostic {
         blocked.push("skill file");
     }
     if mcp_entry_stale {
-        blocked.push("mcpServers.foremerge entry");
+        blocked.push(match client {
+            Client::Codex => "Codex MCP registration",
+            Client::Claude | Client::Cursor => "mcpServers.foremerge entry",
+        });
     }
     let client_available = command_available(client.executable())
         || (client == Client::Cursor && command_available("cursor"));
@@ -530,8 +535,6 @@ fn diagnose_client(root: &Path, client: Client) -> ClientDiagnostic {
         Some(format!(
             "Could not probe the codex CLI ({error}); check that `codex` works, then run `foremerge doctor --client codex` again."
         ))
-    } else if let Some(step) = mcp_repoint_step {
-        Some(step)
     } else if !blocked.is_empty() {
         Some(force_setup_step(client, &blocked))
     } else if !skill_current || !mcp_configured {
@@ -612,41 +615,42 @@ fn merge_mcp_config(
     write_managed(path, &encoded, true)
 }
 
-fn configure_codex_mcp(root: &Path, foremerge_exe: &Path, force: bool) -> Result<McpOutcome> {
+fn configure_codex_mcp(_root: &Path, foremerge_exe: &Path, force: bool) -> Result<McpOutcome> {
     if !command_available("codex") {
         return Ok(McpOutcome {
             install: None,
             configured: false,
             next_step: Some(format!(
-                "Run `codex mcp add foremerge -- {} --cwd {} mcp` after installing Codex CLI.",
-                foremerge_exe.display(),
-                root.display()
+                "Run `codex mcp add foremerge -- {} mcp` after installing Codex CLI.",
+                foremerge_exe.display()
             )),
             warning: None,
         });
     }
-    // A probe failure must abort configuration: treating it as "no entry"
-    // would skip the second-repository refusal below and silently repoint a
-    // registration this process could not even read.
+    // A probe failure must abort configuration: treating it as "no entry" would
+    // silently replace a registration this process could not even read.
     let existing = codex_mcp_entry()?;
     if let Some(entry) = &existing {
-        if entry.is_current_for(root) {
-            return Ok(McpOutcome {
-                install: Some(FileInstall {
-                    path: CODEX_MCP_SCOPE.to_string(),
-                    status: "unchanged".to_string(),
-                }),
-                configured: true,
-                next_step: None,
-                warning: None,
-            });
-        }
-        if !force {
-            bail!(
-                "ALREADY_EXISTS: Codex MCP configuration is user-global and its `foremerge` entry currently points at {}; rerun `foremerge setup codex --force` to repoint Codex at {}",
-                entry.target_description(),
-                root.display()
-            );
+        match entry.registration() {
+            CodexRegistration::Current => {
+                return Ok(McpOutcome {
+                    install: Some(FileInstall {
+                        path: CODEX_MCP_SCOPE.to_string(),
+                        status: "unchanged".to_string(),
+                    }),
+                    configured: true,
+                    next_step: None,
+                    warning: None,
+                });
+            }
+            // Foremerge's own pinned form. Replacing it frees Codex to serve
+            // every repository, and destroys nothing an operator wrote.
+            CodexRegistration::Upgradable => {}
+            CodexRegistration::Foreign if !force => bail!(
+                "ALREADY_EXISTS: Codex already defines a user-global `foremerge` MCP entry ({}); inspect it or rerun `foremerge setup codex --force` to replace it",
+                entry.serialized()
+            ),
+            CodexRegistration::Foreign => {}
         }
         let mut remove = Command::new("codex");
         remove.args(["mcp", "remove", "foremerge"]);
@@ -669,11 +673,11 @@ fn configure_codex_mcp(root: &Path, foremerge_exe: &Path, force: bool) -> Result
             entry.restore_command()
         )
     });
+    // No --cwd: Codex spawns stdio servers in the directory it was launched
+    // from, so one registration serves every repository.
     let mut add = Command::new("codex");
     add.args(["mcp", "add", "foremerge", "--"])
         .arg(foremerge_exe)
-        .arg("--cwd")
-        .arg(root)
         .arg("mcp");
     let output = run_bounded(add).map_err(|error| {
         let error = coded(error, "CHECK_FAILED", "run `codex mcp add foremerge`");
@@ -689,22 +693,17 @@ fn configure_codex_mcp(root: &Path, foremerge_exe: &Path, force: bool) -> Result
             removed_note.as_deref().unwrap_or("")
         );
     }
-    let warning = existing.map(|entry| {
-        let mut message = format!(
-            "Codex MCP registration is user-global: Codex now coordinates {}",
-            root.display()
-        );
-        match entry.cwd {
-            Some(previous) if !paths_match(&previous, root) => {
-                message.push_str(&format!(
-                    "; re-run `foremerge setup codex` in {} to switch back.",
-                    previous.display()
-                ));
-            }
-            _ => message.push('.'),
-        }
-        message
-    });
+    let warning = existing
+        .filter(|entry| entry.cwd.is_some())
+        .map(|entry| {
+            format!(
+                "Codex was pinned to {} and is now portable: one registration serves every repository, resolved from the directory Codex is launched in.",
+                entry
+                    .cwd
+                    .as_deref()
+                    .map_or_else(|| "one repository".to_string(), |cwd| cwd.display().to_string())
+            )
+        });
     Ok(McpOutcome {
         install: Some(FileInstall {
             path: CODEX_MCP_SCOPE.to_string(),
@@ -719,6 +718,19 @@ fn configure_codex_mcp(root: &Path, foremerge_exe: &Path, force: bool) -> Result
 /// The Codex CLI's `foremerge` MCP entry, as far as it can be recovered from
 /// `codex mcp get` output. `command` is `None` when only the plain-text form
 /// was parseable.
+/// How Codex's recorded `foremerge` registration relates to the portable one
+/// setup writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexRegistration {
+    /// The portable form: resolves its repository from the spawn directory.
+    Current,
+    /// Foremerge's own earlier form, pinned to one repository with `--cwd`.
+    Upgradable,
+    /// Anything else, including a disabled or unreadable entry. Never replaced
+    /// without --force.
+    Foreign,
+}
+
 #[derive(Debug)]
 struct CodexEntry {
     enabled: bool,
@@ -727,33 +739,33 @@ struct CodexEntry {
 }
 
 impl CodexEntry {
-    fn is_current_for(&self, root: &Path) -> bool {
+    /// How this registration relates to the one setup would write.
+    ///
+    /// Codex stores MCP registrations in user-global configuration, so a
+    /// registration that names a repository can only ever serve that one.
+    /// Setup registers the portable form instead, which carries no `--cwd` and
+    /// resolves the repository from the working directory Codex spawns it in,
+    /// the way git resolves a repository from where it is run.
+    fn registration(&self) -> CodexRegistration {
         // A disabled registration does not serve tools, and an entry whose
-        // command Codex did not report cannot be verified; neither counts as
-        // current, so setup offers --force and doctor reports not configured.
+        // command Codex did not report cannot be verified. Neither is safe to
+        // replace on Foremerge's own authority.
         if !self.enabled {
-            return false;
+            return CodexRegistration::Foreign;
         }
-        let Some(cwd) = self.cwd.as_deref() else {
-            return false;
+        let Some(command) = self.command.as_deref() else {
+            return CodexRegistration::Foreign;
         };
-        if !paths_match(cwd, root) {
-            return false;
+        if !command_resolves_to_foremerge(command) {
+            return CodexRegistration::Foreign;
         }
-        match self.command.as_deref() {
-            Some(command) => command_resolves_to_foremerge(command),
-            None => false,
+        match self.cwd {
+            // The pre-portable form Foremerge itself used to write. Replacing
+            // it destroys nothing an operator authored, and leaving it in place
+            // would keep Codex pinned to one repository.
+            Some(_) => CodexRegistration::Upgradable,
+            None => CodexRegistration::Current,
         }
-    }
-
-    /// How this registration's target reads in operator-facing messages.
-    /// Shared by setup's refusal and doctor's next step so both name the same
-    /// repository instead of drifting apart.
-    fn target_description(&self) -> String {
-        self.cwd.as_deref().map_or_else(
-            || "a different or stale target".to_string(),
-            |cwd| format!("repository {}", cwd.display()),
-        )
     }
 
     fn serialized(&self) -> String {
@@ -823,7 +835,7 @@ fn codex_mcp_entry() -> Result<Option<CodexEntry>> {
             .iter()
             .position(|token| *token == "--cwd")
             .and_then(|position| tokens.get(position + 1))
-            .map(PathBuf::from);
+            .and_then(|value| non_empty_cwd(value));
         // Plain output marks disabled registrations as "name (disabled)".
         return Ok(Some(CodexEntry {
             command: None,
@@ -863,6 +875,13 @@ fn codex_mcp_entry() -> Result<Option<CodexEntry>> {
     Ok(None)
 }
 
+/// A `--cwd` carrying no value pins the registration to nothing. Reading it as
+/// a path would make a malformed entry look like Foremerge's own pinned form
+/// and so replaceable without --force, so treat it as absent instead.
+fn non_empty_cwd(value: &str) -> Option<PathBuf> {
+    (!value.trim().is_empty()).then(|| PathBuf::from(value))
+}
+
 fn parse_codex_entry(value: &Value) -> Option<CodexEntry> {
     let object = find_command_object(value)?;
     let command = object
@@ -874,7 +893,7 @@ fn parse_codex_entry(value: &Value) -> Option<CodexEntry> {
         .and_then(Value::as_array)
         .and_then(|args| {
             let position = args.iter().position(|arg| arg.as_str() == Some("--cwd"))?;
-            args.get(position + 1)?.as_str().map(PathBuf::from)
+            args.get(position + 1)?.as_str().and_then(non_empty_cwd)
         });
     Some(CodexEntry {
         command,
@@ -910,24 +929,13 @@ fn find_command_object(value: &Value) -> Option<&Map<String, Value>> {
     }
 }
 
-/// The corrective step for a Codex registration that exists but does not serve
-/// `root`. Such an entry is refused by a plain `foremerge setup codex`, so the
-/// step must name `--force` and the repository Codex is currently registered
-/// for; otherwise the diagnostic sends the operator to a command that cannot
-/// succeed.
-fn codex_repoint_step(entry: &CodexEntry, root: &Path) -> String {
-    format!(
-        "Codex MCP configuration is user-global and its `foremerge` entry currently points at {}; run `foremerge setup codex --force` from this repository to repoint Codex at {}.",
-        entry.target_description(),
-        root.display()
-    )
-}
-
 /// Ok(true): a current, enabled registration exists. Ok(false): verifiably
 /// absent, stale, or disabled. Err: the codex CLI could not be probed, which
 /// callers must surface rather than treat as absence.
-fn codex_mcp_configured(root: &Path) -> Result<bool> {
-    Ok(matches!(codex_mcp_entry()?, Some(entry) if entry.is_current_for(root)))
+fn codex_mcp_configured() -> Result<bool> {
+    Ok(
+        matches!(codex_mcp_entry()?, Some(entry) if entry.registration() == CodexRegistration::Current),
+    )
 }
 
 fn command_available(command: &str) -> bool {
@@ -1160,27 +1168,61 @@ mod tests {
     }
 
     #[test]
-    fn disabled_or_unverifiable_codex_entries_are_not_current() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
-        let disabled = serde_json::json!({
+    fn a_portable_codex_entry_is_current_and_a_pinned_one_upgrades() {
+        // The form setup writes: no --cwd, so it serves whichever repository
+        // Codex is launched in.
+        let portable = serde_json::json!({
             "name": "foremerge",
-            "enabled": false,
-            "transport": {
-                "command": "/usr/local/bin/foremerge",
-                "args": ["--cwd", root.to_string_lossy(), "mcp"],
-            },
+            "enabled": true,
+            "transport": { "command": "/usr/local/bin/foremerge", "args": ["mcp"] },
         });
-        let entry = parse_codex_entry(&disabled).expect("entry parses");
-        assert!(!entry.enabled);
-        assert!(!entry.is_current_for(&root));
+        // command_resolves_to_foremerge requires the binary to exist, so point
+        // at one that does.
+        let temp = tempfile::tempdir().unwrap();
+        let exe = temp.path().join("foremerge");
+        fs::write(&exe, b"#!/bin/sh\n").unwrap();
+        let mut entry = parse_codex_entry(&portable).expect("entry parses");
+        entry.command = Some(exe.to_string_lossy().into_owned());
+        assert_eq!(entry.registration(), CodexRegistration::Current);
 
-        let unverifiable = CodexEntry {
-            command: None,
-            cwd: Some(root.clone()),
+        // Foremerge's earlier pinned form upgrades without --force.
+        let pinned = CodexEntry {
+            command: Some(exe.to_string_lossy().into_owned()),
+            cwd: Some(PathBuf::from("/somewhere/else")),
             enabled: true,
         };
-        assert!(!unverifiable.is_current_for(&root));
+        assert_eq!(pinned.registration(), CodexRegistration::Upgradable);
+    }
+
+    #[test]
+    fn disabled_unverifiable_or_foreign_codex_entries_need_force() {
+        let temp = tempfile::tempdir().unwrap();
+        let exe = temp.path().join("foremerge");
+        fs::write(&exe, b"#!/bin/sh\n").unwrap();
+
+        // A registration the operator disabled must not be silently re-added.
+        let disabled = CodexEntry {
+            command: Some(exe.to_string_lossy().into_owned()),
+            cwd: None,
+            enabled: false,
+        };
+        assert_eq!(disabled.registration(), CodexRegistration::Foreign);
+
+        // An entry whose command Codex did not report cannot be verified.
+        let unverifiable = CodexEntry {
+            command: None,
+            cwd: None,
+            enabled: true,
+        };
+        assert_eq!(unverifiable.registration(), CodexRegistration::Foreign);
+
+        // Someone else's `foremerge` entry pointing at a different program.
+        let foreign = CodexEntry {
+            command: Some("/usr/bin/env".to_string()),
+            cwd: None,
+            enabled: true,
+        };
+        assert_eq!(foreign.registration(), CodexRegistration::Foreign);
 
         let no_flag = serde_json::json!({
             "transport": { "command": "foremerge", "args": [] },
@@ -1189,45 +1231,15 @@ mod tests {
     }
 
     #[test]
-    fn codex_diagnostic_step_for_another_repository_names_force() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
-        let elsewhere = PathBuf::from("/somewhere/else");
-        let entry = CodexEntry {
-            command: Some("/usr/local/bin/foremerge".to_string()),
-            cwd: Some(elsewhere.clone()),
-            enabled: true,
-        };
-        assert!(!entry.is_current_for(&root));
-
-        let step = codex_repoint_step(&entry, &root);
-        // A plain `setup codex` refuses this entry, so the diagnostic must not
-        // offer it as the next step.
+    fn a_foreign_codex_registration_is_reported_as_needing_force() {
+        let step = force_setup_step(Client::Codex, &["Codex MCP registration"]);
         assert!(
             step.contains("`foremerge setup codex --force`"),
             "step must name --force: {step}"
         );
         assert!(
-            step.contains(&elsewhere.display().to_string()),
-            "step must name the repository Codex currently serves: {step}"
-        );
-        assert!(
-            step.contains(&root.display().to_string()),
-            "step must name the repository being repointed to: {step}"
-        );
-    }
-
-    #[test]
-    fn codex_target_description_survives_an_unreadable_cwd() {
-        let unknown = CodexEntry {
-            command: Some("/usr/local/bin/foremerge".to_string()),
-            cwd: None,
-            enabled: true,
-        };
-        assert_eq!(
-            unknown.target_description(),
-            "a different or stale target",
-            "an entry whose cwd codex did not report still needs --force"
+            step.contains("Codex MCP registration"),
+            "step must name the Codex registration, not a project JSON entry: {step}"
         );
     }
 
