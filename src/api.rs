@@ -380,7 +380,7 @@ async fn register_agent(
     State(state): State<ApiState>,
     headers: HeaderMap,
     ApiJson(request): ApiJson<RegisterAgentRequest>,
-) -> ApiResult<Agent> {
+) -> ApiResult<RegisterAgentOutcome> {
     authorize(&state, &headers)?;
     let service = state.service;
     Ok(success(

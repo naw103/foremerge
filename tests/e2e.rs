@@ -223,12 +223,43 @@ fn database_from_doctor(cwd: &Path) -> PathBuf {
     PathBuf::from(data_string(&doctor, "database"))
 }
 
+/// Multiplier for every wall-clock wait bound in this suite.
+///
+/// Deadline-based waits race real time, so a machine busy with other work can
+/// fail them while the code under test is perfectly correct. That happened at
+/// a load average around 748: three validation tests failed non-deterministically
+/// and passed again once the machine was idle, which costs a debugging cycle
+/// every time because the first hypothesis is always "I broke something".
+///
+/// Raising `FOREMERGE_TEST_TIMEOUT_SCALE` gives those waits more room without
+/// touching any duration a test actually asserts on.
+fn timeout_scale() -> u32 {
+    std::env::var("FOREMERGE_TEST_TIMEOUT_SCALE")
+        .ok()
+        .and_then(|raw| raw.parse::<u32>().ok())
+        .filter(|scale| *scale >= 1)
+        .unwrap_or(1)
+}
+
+/// How long a test may wait for something to happen.
+///
+/// Only for wait bounds. Never use this for a duration under test, such as a
+/// configured validation timeout, or the test would stop checking the thing it
+/// exists to check.
+fn wait_budget(base: Duration) -> Duration {
+    base * timeout_scale()
+}
+
 fn wait_for_sentinel(path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let budget = wait_budget(Duration::from_secs(30));
+    let deadline = Instant::now() + budget;
     while !path.is_file() {
         assert!(
             Instant::now() < deadline,
-            "sentinel was not created within ten seconds: {}",
+            "sentinel was not created within {}s: {}\n\
+             If this machine is busy, raise FOREMERGE_TEST_TIMEOUT_SCALE and retry \
+             before assuming a regression.",
+            budget.as_secs(),
             path.display()
         );
         std::thread::sleep(Duration::from_millis(10));
@@ -990,7 +1021,9 @@ fn final_validation_snapshot_does_not_hold_the_coordination_write_lock() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut registration = registration.spawn().expect("spawn concurrent registration");
-    let deadline = Instant::now() + Duration::from_secs(2);
+    // A genuine write-lock block never completes, so a generous bound still
+    // catches the bug while surviving a loaded machine.
+    let deadline = Instant::now() + wait_budget(Duration::from_secs(5));
     loop {
         if registration
             .try_wait()
@@ -1004,7 +1037,11 @@ fn final_validation_snapshot_does_not_hold_the_coordination_write_lock() {
             let _ = registration.kill();
             let _ = registration.wait();
             let _ = validation.wait_with_output();
-            panic!("concurrent mutation was blocked while the final Git snapshot was running");
+            panic!(
+                "concurrent mutation was blocked while the final Git snapshot was running.\n\
+                 If this machine is busy, raise FOREMERGE_TEST_TIMEOUT_SCALE and retry \
+                 before assuming a regression."
+            );
         }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -1155,6 +1192,73 @@ fn publishing_from_claimed_implicitly_enters_provisional_without_panicking() {
             json!({ "from": "IN_PROGRESS", "to": "PROVISIONAL" }),
         ],
         "claim plus implicit publication must preserve all three lifecycle boundaries"
+    );
+}
+
+/// Registration stays insert-always, because two separate processes may share
+/// a name and silently reusing a record could attach one to another's work.
+/// What it must not do is hide the duplicate: the GPTree dogfood run produced
+/// 11 agent records for 9 logical roles with nothing said about it.
+#[test]
+fn registering_a_second_agent_for_the_same_name_and_worktree_says_so() {
+    let repo = create_repo();
+
+    let first = cli_success(
+        &repo.root,
+        None,
+        ["agent", "register", "--name", "twin", "--model", "e2e-test"],
+    );
+    assert!(
+        first["data"]["warnings"].is_null(),
+        "a first registration has nothing to warn about: {first}"
+    );
+
+    let second = cli_success(
+        &repo.root,
+        None,
+        ["agent", "register", "--name", "twin", "--model", "e2e-test"],
+    );
+
+    // The agent fields stay at the top level of `data`, so the added warnings
+    // field cannot break a caller that reads `data.id` today.
+    let first_id = data_string(&first, "id").to_string();
+    let second_id = data_string(&second, "id").to_string();
+    assert_ne!(first_id, second_id, "each registration is its own record");
+
+    let warnings = second["data"]["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("second registration should warn: {second}"));
+    assert_eq!(warnings.len(), 1, "{second}");
+    let warning = warnings[0].as_str().unwrap();
+    assert!(
+        warning.contains(&first_id),
+        "the warning must name the agent it collides with, got: {warning}"
+    );
+    assert!(
+        warning.contains("work adopt"),
+        "the warning must point at the recovery path, got: {warning}"
+    );
+}
+
+#[test]
+fn a_different_name_in_the_same_worktree_is_not_a_duplicate() {
+    let repo = create_repo();
+    let first = cli_success(
+        &repo.root,
+        None,
+        [
+            "agent", "register", "--name", "alpha", "--model", "e2e-test",
+        ],
+    );
+    let second = cli_success(
+        &repo.root,
+        None,
+        ["agent", "register", "--name", "beta", "--model", "e2e-test"],
+    );
+    assert!(first["data"]["warnings"].is_null(), "{first}");
+    assert!(
+        second["data"]["warnings"].is_null(),
+        "distinct names in one worktree are ordinary: {second}"
     );
 }
 

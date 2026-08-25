@@ -191,7 +191,7 @@ impl Foremerge {
         Ok(())
     }
 
-    pub fn register_agent(&self, request: RegisterAgentRequest) -> Result<Agent> {
+    pub fn register_agent(&self, request: RegisterAgentRequest) -> Result<RegisterAgentOutcome> {
         let name = request.name.trim();
         if name.is_empty() {
             bail!("INVALID_INPUT: agent name cannot be empty");
@@ -229,6 +229,35 @@ impl Foremerge {
         if let Some(repo) = &repo {
             bind_repository(&tx, &repo.common_dir)?;
         }
+
+        // Registration deliberately stays insert-always: two genuinely separate
+        // processes may share a name, and silently handing a new process an
+        // existing record could attach it to work another live process owns.
+        // What is not acceptable is doing it invisibly, so the duplicate is
+        // reported. Observed in the GPTree dogfood run as 11 agent records for
+        // 9 logical roles.
+        let mut warnings = Vec::new();
+        if let Some(worktree) = agent.worktree.as_deref() {
+            let existing: Vec<String> = tx
+                .prepare(
+                    "SELECT id FROM agents
+                     WHERE name = ?1 AND worktree = ?2 AND status = 'ACTIVE'
+                     ORDER BY registered_at",
+                )?
+                .query_map(params![agent.name, worktree], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if !existing.is_empty() {
+                warnings.push(format!(
+                    "an agent named '{}' is already registered ACTIVE for this worktree ({}). \
+                     This registration is a separate participant and cannot claim that agent's \
+                     intents. If this is the same agent restarting, adopt the earlier work with \
+                     `foremerge work adopt` instead of duplicating it.",
+                    agent.name,
+                    existing.join(", ")
+                ));
+            }
+        }
+
         tx.execute(
             "INSERT INTO agents(id, name, model, capabilities_json, worktree, git_branch, git_head,
              status, registered_at, last_seen_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -261,7 +290,7 @@ impl Foremerge {
             &serde_json::to_value(&agent)?,
         )?;
         tx.commit()?;
-        Ok(agent)
+        Ok(RegisterAgentOutcome { agent, warnings })
     }
 
     pub fn publish_intent(
@@ -3390,7 +3419,8 @@ mod tests {
                 capabilities: vec![],
                 worktree: None,
             })
-            .unwrap();
+            .unwrap()
+            .agent;
         let second = service
             .register_agent(RegisterAgentRequest {
                 name: "paypal-agent".into(),
@@ -3398,7 +3428,8 @@ mod tests {
                 capabilities: vec![],
                 worktree: None,
             })
-            .unwrap();
+            .unwrap()
+            .agent;
         let make_intent = |agent: &Agent, summary: &str| {
             service
                 .publish_intent(PublishIntentRequest {
@@ -3454,7 +3485,8 @@ mod tests {
                 capabilities: vec![],
                 worktree: None,
             })
-            .unwrap();
+            .unwrap()
+            .agent;
 
         let error = service
             .publish_intent(PublishIntentRequest {
@@ -3515,6 +3547,7 @@ mod tests {
                     worktree: None,
                 })
                 .unwrap()
+                .agent
         };
         let first = register("canonical-a");
         let second = register("canonical-b");
@@ -3591,6 +3624,7 @@ mod tests {
                     worktree: None,
                 })
                 .unwrap()
+                .agent
         };
         let first = register("occurrence-a");
         let second = register("occurrence-b");
@@ -3710,7 +3744,8 @@ mod tests {
                 capabilities: vec![],
                 worktree: None,
             })
-            .unwrap();
+            .unwrap()
+            .agent;
         let publish = |task: String, scope: Scope| {
             service
                 .publish_intent(PublishIntentRequest {

@@ -130,6 +130,19 @@ pub struct Agent {
     pub registered_at: String,
 }
 
+/// A registration, plus anything the caller should know about it.
+///
+/// The agent is flattened, so the response keeps the shape callers already
+/// depend on and gains `warnings` only when there is something to say.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterAgentOutcome {
+    #[serde(flatten)]
+    pub agent: Agent,
+    /// Advisory notes about the registration itself. Empty in the normal case.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublishIntentRequest {
     pub agent_id: String,
