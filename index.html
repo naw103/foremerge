@@ -181,6 +181,37 @@
   .honest li { margin: 0.45rem 0; font-size: 0.95rem; }
   .honest li::marker { color: var(--amber); }
 
+  .steps { counter-reset: step; display: flex; flex-direction: column; gap: 1.1rem; margin-top: 1.8rem; }
+  .step { display: grid; grid-template-columns: 2rem 1fr; gap: 1rem; align-items: start; }
+  .step::before {
+    counter-increment: step; content: counter(step);
+    font-family: "IBM Plex Mono", monospace; font-size: .82rem; line-height: 1.9;
+    color: #a489e8; border: 1px solid #2f2544; border-radius: 6px;
+    width: 2rem; height: 2rem; display: grid; place-items: center; background: #171426;
+  }
+  .step h3 { font-family: "IBM Plex Sans Condensed", sans-serif; font-size: 1.05rem;
+    font-weight: 600; margin: .25rem 0 .45rem; }
+  .step p { font-size: .95rem; color: #8b93a0; margin: 0 0 .6rem; max-width: 62ch; }
+  .cmd {
+    position: relative; background: #151a21; border: 1px solid #262b34; border-radius: 8px;
+    padding: .8rem 3.6rem .8rem 1rem; font-family: "IBM Plex Mono", monospace;
+    font-size: .86rem; color: #e8eaee; overflow-x: auto; white-space: pre;
+  }
+  .cmd .p { color: #5c6470; user-select: none; }
+  .copy {
+    position: absolute; top: .5rem; right: .5rem; font-family: "IBM Plex Mono", monospace;
+    font-size: .7rem; letter-spacing: .08em; text-transform: uppercase;
+    color: #8b93a0; background: #1b212b; border: 1px solid #2a2f3a; border-radius: 5px;
+    padding: .3rem .55rem; cursor: pointer;
+  }
+  .copy:hover, .copy:focus-visible { color: #e8eaee; border-color: #a489e8; }
+  .prompt-box {
+    background: #151a21; border: 1px solid #262b34; border-radius: 8px;
+    padding: 1rem 3.6rem 1rem 1rem; position: relative;
+    font-family: "IBM Plex Mono", monospace; font-size: .84rem; line-height: 1.65;
+    color: #8b93a0; white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .prompt-box strong { color: #e8eaee; font-weight: 400; }
   footer {
     margin-top: 5.5rem; border-top: 1px solid var(--line);
     padding: 2.2rem 0 3rem; font-size: 0.88rem; color: var(--faint);
@@ -195,7 +226,7 @@
   <nav aria-label="Site">
     <span class="wordmark"><span class="fore">Fore</span>merge</span>
     <span class="links">
-      <a href="https://github.com/naw103/foremerge#quickstart-first-conflict-in-under-five-minutes">Quickstart</a>
+      <a href="#quickstart">Quickstart</a>
       <a href="https://github.com/naw103/foremerge/tree/main/docs">Docs</a>
       <a href="https://github.com/naw103/foremerge">GitHub</a>
     </span>
@@ -254,6 +285,52 @@
       <span class="sev">HIGH · replace_vs_extend · rule FM-C001</span>
       <p>One agent removes the extension point the other depends on. No overlapping lines, no diff, nothing for Git to flag until both implementations exist and the rework is expensive. Foremerge compares declared scopes and intent language <strong>before implementation</strong> and raises an explainable, advisory finding. No hard locks, no LLM in the detection path.</p>
     </div>
+  </div>
+</section>
+
+<section id="quickstart">
+  <div class="wrap prose">
+    <p class="eyebrow">Quickstart</p>
+    <h2>Have your agent set it up.</h2>
+    <p>Foremerge is one binary. The fastest path is to let the agent you already use do the install and wire itself in, then follow the protocol from that point on.</p>
+
+    <div class="steps">
+      <div class="step">
+        <div>
+          <h3>Paste this into Claude Code, Codex, or Cursor</h3>
+          <p>Run it from inside the repository you want to coordinate. Change the check in step 4 to whatever this repository's real test command is.</p>
+          <div class="prompt-box" id="agent-prompt"><button class="copy" type="button" data-copy="agent-prompt">Copy</button><strong>Set up Foremerge in this repository so we can coordinate parallel agents.</strong>
+
+1. Install it:   curl -fsSL https://naw103.github.io/foremerge/install.sh | sh
+2. Initialize:   foremerge init
+3. Wire this client and any others in use:  foremerge setup all
+4. Register the check I should be validated against, for example:
+                 foremerge checks set test -- cargo test --all-targets
+5. Confirm:      foremerge doctor --client all
+
+<strong>Then read the Foremerge skill that step 3 installed for this client and follow it from now on:</strong> publish your intent with semantic scopes before editing, claim the scope, and check for conflicts before you start.</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div>
+          <h3>Or install it yourself</h3>
+          <p>A checksum-verified binary for macOS and Linux, or from crates.io if you have Rust. Windows binaries are on the releases page.</p>
+          <div class="cmd" id="cmd-install"><button class="copy" type="button" data-copy="cmd-install">Copy</button><span class="p">$ </span>curl -fsSL https://naw103.github.io/foremerge/install.sh | sh</div>
+          <div class="cmd" id="cmd-cargo" style="margin-top:.6rem"><button class="copy" type="button" data-copy="cmd-cargo">Copy</button><span class="p">$ </span>cargo install --locked foremerge</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div>
+          <h3>Then, once per repository</h3>
+          <p><code>setup all</code> installs the skill and MCP entry for Claude Code, Codex, and Cursor. Your client will ask before enabling anything.</p>
+          <div class="cmd" id="cmd-init"><button class="copy" type="button" data-copy="cmd-init">Copy</button><span class="p">$ </span>foremerge init && foremerge setup all && foremerge doctor --client all</div>
+        </div>
+      </div>
+    </div>
+
+    <p style="margin-top:1.8rem">Two agents can now publish conflicting intents and see the finding above before either writes a line. Full documentation is in the <a href="https://github.com/naw103/foremerge/tree/main/docs">docs directory</a>.</p>
   </div>
 </section>
 
@@ -355,5 +432,20 @@
   </div>
 </footer>
 
+<script>
+document.querySelectorAll('.copy').forEach(function (button) {
+  button.addEventListener('click', function () {
+    var source = document.getElementById(button.dataset.copy).cloneNode(true);
+    var stripped = source.querySelector('.copy');
+    if (stripped) { stripped.remove(); }
+    var text = source.textContent.replace(/^\s*\$\s?/gm, '').trim();
+    navigator.clipboard.writeText(text).then(function () {
+      var original = button.textContent;
+      button.textContent = 'Copied';
+      setTimeout(function () { button.textContent = original; }, 1600);
+    });
+  });
+});
+</script>
 </body>
 </html>
