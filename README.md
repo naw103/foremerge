@@ -90,10 +90,10 @@ foremerge init
 foremerge doctor
 ```
 
-Every command is also available as `fmg`, which is the same binary under a
-shorter name, so `fmg status` and `foremerge status` do the same thing. Both
-are installed together by the release script, the release archives, and
-`cargo install`.
+Every command is also available as `fmg`, the same binary under a shorter name,
+so `fmg status` and `foremerge status` do the same thing. `cargo install` and
+the release archives carry both names, starting with the first release that
+includes them. The `curl` install script does not install the short name yet.
 
 Install the native skill and MCP entry for any clients used in this repository,
 then define the trusted checks agents may request by name:
