@@ -24,9 +24,13 @@ foremerge doctor --client all
 Setup initializes Foremerge state if needed and reports every file or client
 registration it changed. New MCP entries use an absolute binary and repository
 path; the installer also accepts an existing entry that is verifiably current:
-its command resolves to an existing `foremerge` executable (including the
-portable templates shipped in a source clone) and any `--cwd` argument points
-at this repository. Setup is idempotent when installed content is current.
+its command is an absolute path to an existing `foremerge` executable and any
+`--cwd` argument points at this repository. A bare or relative command is not
+current, because the MCP client would resolve it in its own `PATH` and working
+directory rather than this process's. That includes the portable `.mcp.json`
+and `.cursor/mcp.json` templates tracked in a source clone, so running setup in
+a clone reports its MCP entry as stale and rewrites it with absolute paths under
+`--force`. Setup is idempotent when installed content is current.
 
 Every installed skill file ends with a managed stamp naming the release that
 wrote it and a digest of the instructions above it. Upgrading Foremerge
