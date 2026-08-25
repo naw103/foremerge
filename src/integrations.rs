@@ -374,13 +374,34 @@ fn diagnose_client(root: &Path, client: Client) -> ClientDiagnostic {
     let skill_installed = skill_bytes.is_some();
     let skill_current = skill_bytes.as_deref() == Some(SKILL_CONTENT.as_bytes());
     let mcp_path = client.mcp_path(root);
-    let (mcp_configured, mcp_probe_error) = match mcp_path.as_deref() {
-        Some(path) => (mcp_json_configured(path, root), None),
-        None => match codex_mcp_configured(root) {
-            Ok(configured) => (configured, None),
-            Err(error) => (false, Some(format!("{error:#}"))),
-        },
-    };
+    // Codex keeps its registration in user-global configuration, so a present
+    // entry pointing elsewhere needs --force and a message naming both
+    // repositories. Project JSON entries only need the generic --force step.
+    let (mcp_configured, mcp_probe_error, mcp_repoint_step, mcp_entry_stale) =
+        match mcp_path.as_deref() {
+            Some(path) => (
+                mcp_json_configured(path, root),
+                None,
+                None,
+                mcp_json_entry_stale(path, root),
+            ),
+            None => match codex_mcp_entry() {
+                Ok(Some(entry)) if entry.is_current_for(root) => (true, None, None, false),
+                Ok(Some(entry)) => (false, None, Some(codex_repoint_step(&entry, root)), false),
+                Ok(None) => (false, None, None, false),
+                Err(error) => (false, Some(format!("{error:#}")), None, false),
+            },
+        };
+    // Setup refuses to replace managed content that differs from this release,
+    // so offering a plain `setup` here would name a command that cannot
+    // succeed. Report what actually blocks it and ask for --force instead.
+    let mut blocked: Vec<&str> = Vec::new();
+    if skill_installed && !skill_current {
+        blocked.push("skill file");
+    }
+    if mcp_entry_stale {
+        blocked.push("mcpServers.foremerge entry");
+    }
     let client_available = command_available(client.executable())
         || (client == Client::Cursor && command_available("cursor"));
     let ready = client_available && skill_current && mcp_configured;
@@ -390,6 +411,10 @@ fn diagnose_client(root: &Path, client: Client) -> ClientDiagnostic {
         Some(format!(
             "Could not probe the codex CLI ({error}); check that `codex` works, then run `foremerge doctor --client codex` again."
         ))
+    } else if let Some(step) = mcp_repoint_step {
+        Some(step)
+    } else if !blocked.is_empty() {
+        Some(force_setup_step(client, &blocked))
     } else if !skill_current || !mcp_configured {
         Some(format!(
             "Run `foremerge setup {}` from this repository.",
@@ -500,10 +525,7 @@ fn configure_codex_mcp(root: &Path, foremerge_exe: &Path, force: bool) -> Result
         if !force {
             bail!(
                 "ALREADY_EXISTS: Codex MCP configuration is user-global and its `foremerge` entry currently points at {}; rerun `foremerge setup codex --force` to repoint Codex at {}",
-                entry.cwd.as_deref().map_or_else(
-                    || "a different or stale target".to_string(),
-                    |cwd| format!("repository {}", cwd.display())
-                ),
+                entry.target_description(),
                 root.display()
             );
         }
@@ -603,6 +625,16 @@ impl CodexEntry {
             Some(command) => command_resolves_to_foremerge(command),
             None => false,
         }
+    }
+
+    /// How this registration's target reads in operator-facing messages.
+    /// Shared by setup's refusal and doctor's next step so both name the same
+    /// repository instead of drifting apart.
+    fn target_description(&self) -> String {
+        self.cwd.as_deref().map_or_else(
+            || "a different or stale target".to_string(),
+            |cwd| format!("repository {}", cwd.display()),
+        )
     }
 
     fn serialized(&self) -> String {
@@ -759,6 +791,19 @@ fn find_command_object(value: &Value) -> Option<&Map<String, Value>> {
     }
 }
 
+/// The corrective step for a Codex registration that exists but does not serve
+/// `root`. Such an entry is refused by a plain `foremerge setup codex`, so the
+/// step must name `--force` and the repository Codex is currently registered
+/// for; otherwise the diagnostic sends the operator to a command that cannot
+/// succeed.
+fn codex_repoint_step(entry: &CodexEntry, root: &Path) -> String {
+    format!(
+        "Codex MCP configuration is user-global and its `foremerge` entry currently points at {}; run `foremerge setup codex --force` from this repository to repoint Codex at {}.",
+        entry.target_description(),
+        root.display()
+    )
+}
+
 /// Ok(true): a current, enabled registration exists. Ok(false): verifiably
 /// absent, stale, or disabled. Err: the codex CLI could not be probed, which
 /// callers must surface rather than treat as absence.
@@ -773,11 +818,35 @@ fn command_available(command: &str) -> bool {
 }
 
 fn mcp_json_configured(path: &Path, root: &Path) -> bool {
+    mcp_json_entry(path).is_some_and(|entry| mcp_entry_current(&entry, root))
+}
+
+/// The `mcpServers.foremerge` entry recorded in a project MCP file, if the file
+/// exists, parses, and defines one.
+fn mcp_json_entry(path: &Path) -> Option<Value> {
     fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         .and_then(|value| value.get("mcpServers")?.get("foremerge").cloned())
-        .is_some_and(|entry| mcp_entry_current(&entry, root))
+}
+
+/// The corrective step when setup would refuse to replace managed content that
+/// differs from this release. Naming `--force` is what separates this from the
+/// plain step: without it the suggested command fails with ALREADY_EXISTS.
+fn force_setup_step(client: Client, blocked: &[&str]) -> String {
+    format!(
+        "Run `foremerge setup {} --force` from this repository: setup will not replace the existing {} without it.",
+        client.name(),
+        blocked.join(" and ")
+    )
+}
+
+/// True when the project MCP file already defines `mcpServers.foremerge` but
+/// the entry is not current for this repository. Setup refuses to replace such
+/// an entry without --force, so the diagnostic must ask for --force rather than
+/// a plain `setup`.
+fn mcp_json_entry_stale(path: &Path, root: &Path) -> bool {
+    mcp_json_entry(path).is_some_and(|entry| !mcp_entry_current(&entry, root))
 }
 
 /// True only for an entry that is verifiably current for this repository: its
@@ -998,6 +1067,107 @@ mod tests {
             "transport": { "command": "foremerge", "args": [] },
         });
         assert!(parse_codex_entry(&no_flag).expect("entry parses").enabled);
+    }
+
+    #[test]
+    fn codex_diagnostic_step_for_another_repository_names_force() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let elsewhere = PathBuf::from("/somewhere/else");
+        let entry = CodexEntry {
+            command: Some("/usr/local/bin/foremerge".to_string()),
+            cwd: Some(elsewhere.clone()),
+            enabled: true,
+        };
+        assert!(!entry.is_current_for(&root));
+
+        let step = codex_repoint_step(&entry, &root);
+        // A plain `setup codex` refuses this entry, so the diagnostic must not
+        // offer it as the next step.
+        assert!(
+            step.contains("`foremerge setup codex --force`"),
+            "step must name --force: {step}"
+        );
+        assert!(
+            step.contains(&elsewhere.display().to_string()),
+            "step must name the repository Codex currently serves: {step}"
+        );
+        assert!(
+            step.contains(&root.display().to_string()),
+            "step must name the repository being repointed to: {step}"
+        );
+    }
+
+    #[test]
+    fn codex_target_description_survives_an_unreadable_cwd() {
+        let unknown = CodexEntry {
+            command: Some("/usr/local/bin/foremerge".to_string()),
+            cwd: None,
+            enabled: true,
+        };
+        assert_eq!(
+            unknown.target_description(),
+            "a different or stale target",
+            "an entry whose cwd codex did not report still needs --force"
+        );
+    }
+
+    #[test]
+    fn stale_managed_content_asks_for_force_and_names_what_blocks_setup() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let path = root.join(".mcp.json");
+
+        // An absent file and a current entry must not demand --force.
+        assert!(!mcp_json_entry_stale(&path, &root));
+        let exe = root.join("foremerge");
+        fs::write(&exe, b"#!/bin/sh\n").unwrap();
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "mcpServers": {
+                    "foremerge": {
+                        "command": exe.to_string_lossy(),
+                        "args": ["--cwd", root.to_string_lossy(), "mcp"],
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !mcp_json_entry_stale(&path, &root),
+            "a current entry is replaced in place, so it must not demand --force"
+        );
+
+        // An entry pointing at another repository is refused without --force.
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "mcpServers": {
+                    "foremerge": {
+                        "command": exe.to_string_lossy(),
+                        "args": ["--cwd", "/somewhere/else", "mcp"],
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(mcp_json_entry_stale(&path, &root));
+
+        let step = force_setup_step(
+            Client::Claude,
+            &["skill file", "mcpServers.foremerge entry"],
+        );
+        assert!(
+            step.contains("`foremerge setup claude --force`"),
+            "step must name --force: {step}"
+        );
+        assert!(
+            step.contains("skill file and mcpServers.foremerge entry"),
+            "step must name every blocking artifact: {step}"
+        );
     }
 
     #[test]
