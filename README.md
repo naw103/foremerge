@@ -11,11 +11,47 @@ above Git. Agents keep isolated worktrees while sharing intent, semantic
 claims, dependencies, provisional ChangeSets, decisions, validation, and
 provenance.
 
+| [**Tell your agent to install it**](#quickstart-first-conflict-in-under-five-minutes) | → | **Done** | → | **No more silent collisions across worktrees** |
+| :---: | :---: | :---: | :---: | :---: |
+| Paste one line into Claude Code, Codex, or Cursor | | It installs Foremerge and wires itself up | | Every agent sees what the others are about to change, before they change it |
+
 > **Status:** Foremerge `0.3.1` is a pre-1.0, local-first MVP. The CLI, JSON API,
 > MCP server, SQLite store, deterministic conflict detector, and
 > verification-gated lifecycle are implemented. Public schemas may still
 > change. Shared multi-machine mode and published benchmark results do not yet
 > exist.
+
+## How it works
+
+Say you have two AI agents working on the same project at the same time. Each
+one gets its own copy of the code, so they never fight over files. Both finish.
+Both look correct. Then you find they undid each other's work.
+
+Git cannot warn you about that. Git notices a conflict only when two changes
+touch the same lines of the same file. If one agent deletes the function
+another agent is busy extending, those are different lines, so Git merges both
+happily and the result is broken.
+
+Foremerge fixes this by having agents announce what they are about to do,
+before they do it.
+
+1. **Each agent says what it is about to touch.** Not the code, just the
+   target, like "I am going to change the `sendEmail` function."
+2. **Every agent reads from one shared list.** It is a small database inside
+   your project's `.git` folder, so every agent on your machine sees the same
+   picture, whether it is Claude, Codex, or Cursor.
+3. **If two plans collide, you hear about it right away.** Foremerge names the
+   two agents, explains why their plans clash, and suggests how to split the
+   work. Both worktrees are still clean at that point, so no work has to be
+   thrown away.
+
+Think of it as a shared whiteboard. Before an agent starts, it writes down what
+it is about to work on, and it reads what everyone else already wrote.
+
+Two things Foremerge deliberately does not do. It never locks a file or blocks
+an agent, because a single crashed agent would then stall the whole fleet, so
+the warnings are advisory and you stay in charge. And it never asks a model to
+judge conflicts, so the same inputs always produce the same answer.
 
 ## The conflict Git cannot see yet
 
