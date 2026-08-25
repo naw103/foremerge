@@ -3658,9 +3658,11 @@ case "$1" in
         shift 3
         if [ "$1" = "--" ]; then shift; fi
         exe="$1"
-        cwd=""
-        if [ "$2" = "--cwd" ]; then cwd="$3"; fi
-        printf '{"command":"%s","args":["--cwd","%s","mcp"]}\n' "$exe" "$cwd" > "$CODEX_STUB_STATE"
+        if [ "$2" = "--cwd" ]; then
+          printf '{"command":"%s","args":["--cwd","%s","mcp"]}\n' "$exe" "$3" > "$CODEX_STUB_STATE"
+        else
+          printf '{"command":"%s","args":["mcp"]}\n' "$exe" > "$CODEX_STUB_STATE"
+        fi
         exit 0
         ;;
       remove)
@@ -3757,15 +3759,16 @@ fn setup_codex_registers_the_global_mcp_entry_and_is_idempotent() {
     assert_eq!(client["error"], Value::Null);
     assert_eq!(client["warning"], Value::Null);
 
-    let canonical_root = repo.root.canonicalize().expect("canonicalize repo root");
     let log = stub.log_contents();
     let add_line = log
         .lines()
         .find(|line| line.starts_with("mcp add foremerge"))
         .expect("codex mcp add was invoked");
+    // The registration carries no --cwd: Codex spawns the server in the
+    // directory it was launched from, so one entry serves every repository.
     assert!(
-        add_line.ends_with(&format!("--cwd {} mcp", canonical_root.display())),
-        "unexpected add argv: {add_line}"
+        add_line.ends_with(" mcp") && !add_line.contains("--cwd"),
+        "the Codex registration must be portable, got: {add_line}"
     );
 
     let again = stub.run_success(&repo.root, ["setup", "codex"]);
@@ -3782,57 +3785,128 @@ fn setup_codex_registers_the_global_mcp_entry_and_is_idempotent() {
     assert_eq!(doctor["data"]["clients"][0]["mcp_configured"], true);
 }
 
+#[test]
+fn mcp_outside_a_repository_fails_instead_of_creating_a_stray_store() {
+    // The portable registration resolves its repository from the directory the
+    // client spawns the server in. Outside a repository there is no answer, and
+    // silently coordinating against a store created beside the spawn directory
+    // would be worse than refusing.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let outside = temp.path().canonicalize().expect("canonicalize temp dir");
+    let output = Command::new(foremerge_bin())
+        .arg("--json")
+        .arg("--cwd")
+        .arg(&outside)
+        .arg("mcp")
+        .output()
+        .expect("run foremerge mcp");
+    assert!(
+        !output.status.success(),
+        "mcp must refuse outside a repository"
+    );
+    // The diagnosis goes to stderr: anything written to stdout would corrupt
+    // the JSON-RPC stream the client is reading.
+    assert!(
+        output.stdout.is_empty(),
+        "mcp must not write to stdout before the stream is usable: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let message = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        message.contains("INVALID_INPUT"),
+        "the refusal must carry a typed code: {message}"
+    );
+    assert!(
+        message.contains(&outside.display().to_string()),
+        "the error must name the directory it was spawned in: {message}"
+    );
+    assert!(
+        !outside.join(".foremerge").exists(),
+        "refusing must not leave a stray store behind"
+    );
+}
+
 #[cfg(unix)]
 #[test]
-fn setup_codex_refuses_to_hijack_another_repositorys_entry_without_force() {
+fn setup_codex_in_a_second_repository_is_a_no_op() {
     let repo_a = create_repo();
     let repo_b = create_repo();
     let stub = CodexStub::create(repo_a.temp.path());
     stub.run_success(&repo_a.root, ["setup", "codex"]);
-    let canonical_a = repo_a.root.canonicalize().expect("canonicalize repo A");
-    let canonical_b = repo_b.root.canonicalize().expect("canonicalize repo B");
 
-    let refusal = stub.run_failure(&repo_b.root, ["setup", "codex"]);
+    // The registration carries no repository, so it already serves repo B.
+    let second = stub.run_success(&repo_b.root, ["setup", "codex"]);
+    let client = &second["data"]["clients"][0];
+    assert_eq!(client["mcp"]["status"], "unchanged");
+    assert_eq!(client["mcp_configured"], true);
+    assert_eq!(client["error"], Value::Null);
+    assert_eq!(client["warning"], Value::Null);
+
+    let adds = stub
+        .log_contents()
+        .lines()
+        .filter(|line| line.starts_with("mcp add"))
+        .count();
+    assert_eq!(
+        adds, 1,
+        "a second repository must not re-register the entry"
+    );
+
+    // Both repositories report the same registration as ready.
+    for root in [&repo_a.root, &repo_b.root] {
+        let doctor = stub.run_success(root, ["doctor", "--client", "codex"]);
+        assert_eq!(doctor["data"]["clients"][0]["mcp_configured"], true);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_codex_upgrades_a_pinned_entry_but_refuses_a_foreign_one() {
+    let repo = create_repo();
+    let stub = CodexStub::create(repo.temp.path());
+    let canonical = repo.root.canonicalize().expect("canonicalize repo");
+
+    // Foremerge's own earlier form, pinned to one repository, upgrades without
+    // --force: replacing it destroys nothing an operator authored.
+    let exe = foremerge_bin();
+    fs::write(
+        &stub.state,
+        format!(
+            "{{\"command\":\"{}\",\"args\":[\"--cwd\",\"{}\",\"mcp\"]}}\n",
+            exe.display(),
+            canonical.display()
+        ),
+    )
+    .expect("seed pinned registration");
+    let upgraded = stub.run_success(&repo.root, ["setup", "codex"]);
+    let client = &upgraded["data"]["clients"][0];
+    assert_eq!(client["mcp"]["status"], "written");
+    let warning = client["warning"].as_str().expect("upgrade warning");
+    assert!(
+        warning.contains(&canonical.display().to_string()) && warning.contains("portable"),
+        "the warning must say the pinned registration became portable: {warning}"
+    );
+
+    // Someone else's `foremerge` entry is not Foremerge's to replace.
+    fs::write(
+        &stub.state,
+        "{\"command\":\"/usr/bin/env\",\"args\":[\"mcp\"]}\n",
+    )
+    .expect("seed foreign registration");
+    let refusal = stub.run_failure(&repo.root, ["setup", "codex"]);
     assert_eq!(refusal["error"]["code"], "ALREADY_EXISTS");
     let message = refusal["error"]["message"].as_str().expect("error message");
-    assert!(message.contains("user-global"), "{message}");
     assert!(
-        message.contains(&canonical_a.display().to_string()),
-        "refusal must name the other repository: {message}"
-    );
-    let client = &refusal["data"]["clients"][0];
-    assert_eq!(client["client"], "codex");
-    assert!(
-        client["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("user-global")),
-        "per-client report must carry the error: {client}"
+        message.contains("/usr/bin/env"),
+        "the refusal must name the entry it will not replace: {message}"
     );
 
-    let forced = stub.run_success(&repo_b.root, ["setup", "codex", "--force"]);
-    let client = &forced["data"]["clients"][0];
-    assert_eq!(client["mcp"]["status"], "written");
-    let warning = client["warning"].as_str().expect("repoint warning");
-    assert!(
-        warning.contains(&canonical_b.display().to_string()),
-        "warning must name the repository Codex now coordinates: {warning}"
-    );
-    assert!(
-        warning.contains(&canonical_a.display().to_string()) && warning.contains("switch back"),
-        "warning must explain how to switch back: {warning}"
-    );
+    let forced = stub.run_success(&repo.root, ["setup", "codex", "--force"]);
+    assert_eq!(forced["data"]["clients"][0]["mcp"]["status"], "written");
     let log = stub.log_contents();
     assert!(
         log.lines().any(|line| line == "mcp remove foremerge"),
-        "force repoint must remove the previous entry: {log}"
-    );
-    let last_add = log
-        .lines()
-        .rfind(|line| line.starts_with("mcp add"))
-        .expect("codex mcp add was invoked");
-    assert!(
-        last_add.contains(&canonical_b.display().to_string()),
-        "repointed entry must target repo B: {last_add}"
+        "forcing over a foreign entry must remove it first: {log}"
     );
 }
 
@@ -3909,15 +3983,26 @@ fn setup_codex_aborts_when_the_probe_fails_instead_of_silently_adding() {
 
 #[cfg(unix)]
 #[test]
-fn setup_codex_forced_repoint_discloses_a_removed_registration_when_add_fails() {
-    let repo_a = create_repo();
-    let repo_b = create_repo();
-    let stub = CodexStub::create(repo_a.temp.path());
-    stub.run_success(&repo_a.root, ["setup", "codex"]);
-    let canonical_a = repo_a.root.canonicalize().expect("canonicalize repo A");
+fn setup_codex_discloses_a_removed_registration_when_the_replacement_add_fails() {
+    let repo = create_repo();
+    let stub = CodexStub::create(repo.temp.path());
+    let canonical = repo.root.canonicalize().expect("canonicalize repo");
+
+    // A pinned registration is replaced by the portable one. The Codex CLI has
+    // no atomic replace, so if the add fails the previous entry is already gone
+    // and the error must say so.
+    fs::write(
+        &stub.state,
+        format!(
+            "{{\"command\":\"{}\",\"args\":[\"--cwd\",\"{}\",\"mcp\"]}}\n",
+            foremerge_bin().display(),
+            canonical.display()
+        ),
+    )
+    .expect("seed pinned registration");
 
     let output = {
-        let mut command = stub.command(&repo_b.root, ["setup", "codex", "--force"]);
+        let mut command = stub.command(&repo.root, ["setup", "codex"]);
         command.env("CODEX_STUB_FAIL_MCP_ADD", "1");
         command.output().expect("run foremerge")
     };
@@ -3934,7 +4019,7 @@ fn setup_codex_forced_repoint_discloses_a_removed_registration_when_add_fails() 
         "the error must disclose the destroyed registration: {message}"
     );
     assert!(
-        message.contains(&canonical_a.display().to_string()),
+        message.contains(&canonical.display().to_string()),
         "the error must name the removed registration's repository: {message}"
     );
     assert!(

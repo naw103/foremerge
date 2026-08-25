@@ -66,13 +66,21 @@ editing that file directly. Setup reports this one out-of-repository write as
 setup still installs the repository skill and returns the exact registration
 command as its next step.
 
-Because the registration is user-global, Codex coordinates one repository at a
-time: the single `foremerge` entry bakes in the repository's `--cwd`. Running
-`foremerge setup codex` in a second repository refuses when the entry points at
-a different repository; pass `--force` to repoint Codex at the current
-repository. The report then carries an explicit warning naming the repository
-Codex now coordinates and the previous repository where `foremerge setup codex`
-must be re-run to switch back.
+That one registration serves every repository. It carries no `--cwd`: Codex
+spawns stdio MCP servers in the directory it was launched from, so the server
+resolves its repository from there, the way git resolves one from the directory
+you run it in. Running `foremerge setup codex` in a second repository is a
+no-op, and a Codex session started in any repository coordinates that
+repository.
+
+Setup replaces an earlier pinned registration, one carrying a `--cwd`, without
+`--force`: that form was written by Foremerge and pins Codex to a single
+repository. Any other `foremerge` entry, including one an operator disabled,
+is refused unless you pass `--force`.
+
+Start Codex inside a repository. Launched anywhere else the server has no
+repository to resolve and every tool call fails with `INVALID_INPUT` naming the
+directory, rather than coordinating against a store created beside it.
 
 Claude Code and Cursor use project JSON files. Foremerge merges only the
 `mcpServers.foremerge` entry and preserves other top-level keys and servers.
