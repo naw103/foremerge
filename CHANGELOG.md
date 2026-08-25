@@ -70,6 +70,17 @@ refuse to open a schema 5 store rather than migrate it backwards.
   prints guidance to stderr on startup, and answers a bare tool name with the
   equivalent JSON-RPC line. Both are suppressed when stdin is a pipe, so client
   sessions are byte for byte unchanged.
+- `tests/paraphrase_probe.rs`, an adversarial gate over the intent detector. It
+  restates one genuine conflict in ten phrasings while holding the declared
+  scopes identical, so every miss is a paraphrase failure, and pairs genuinely
+  compatible work with destructive keywords on a shared scope, so every HIGH is
+  a false alarm. The build fails if compatible work ever raises a HIGH again or
+  if paraphrase coverage falls below its recorded floor. Per
+  `docs/benchmark-plan.md`, raising that floor by tuning the vocabulary against
+  this file does not count as an improvement; held-back phrasings do.
+- `tests/full_flow_probe.rs`, which reports every warning two agents actually
+  receive across register, publish, and claim, rather than the output of a
+  single detector call.
 
 ### Fixed
 
@@ -99,6 +110,31 @@ refuse to open a schema 5 store rather than migrate it backwards.
   status never expired, so a fleet that died hours earlier still reported as
   fully working; agents unseen for over two hours are now shown as silent and
   excluded from the active count. Claims already expired correctly.
+- A destructive verb anywhere in an intent summary no longer implies that the
+  destruction applies to a shared semantic scope. The detector previously read
+  "Delete the flaky ThumbnailCache benchmark test" as a removal of
+  `ThumbnailCache` itself, and paired it with any additive intent on the same
+  scope to raise a HIGH replace-versus-extend conflict. The explanation it
+  produced was false, and a false HIGH is worse than silence: severity is the
+  signal an agent uses to decide what to stop for, so crying wolf at the top
+  severity trains agents to ignore it. Two structural checks now gate that
+  finding. The verb must not govern only a peripheral artefact, because
+  deleting a test, retiring a feature flag, or dropping a debug counter does
+  not change the contract of the component it is named after. The scope must
+  also be the object of the verb rather than a modifier inside it, because
+  "Move the ThumbnailCache eviction loop into a background task" moves the
+  loop, not the cache. When either check trips, the pair is still reported, at
+  MEDIUM, as a shared semantic scope. Nothing goes unreported; the detector
+  simply stops asserting an incompatibility it cannot support.
+- Widened the operation vocabulary so that common phrasings of the same
+  conflict are classified rather than ignored. Detection requires a known verb
+  on both sides, so coverage was the product of two incomplete word lists and a
+  single unfamiliar word on either side silenced the pair entirely. This is a
+  bounded improvement and not a general solution: a fixed vocabulary cannot
+  cover English, and the remaining misses are words that have not been added
+  yet rather than a different class of problem. Deciding whether intent
+  classification should stay lexical is tracked separately.
+
 
 ## [0.3.1] - 2026-08-24
 

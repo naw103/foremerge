@@ -124,6 +124,222 @@ fn infer(summary: &str, scopes: &[Scope]) -> Inference {
     }
 }
 
+/// Nouns naming an artefact whose removal or rename never changes the contract
+/// of the thing it belongs to. Deleting a test, retiring a feature flag, or
+/// dropping a debug counter is not destroying the component the artefact is
+/// named after, so a destructive verb governing one of these must not be read
+/// as a threat to a shared semantic scope. This list is deliberately small and
+/// closed: it names peripheral artefacts, which are a stable category, rather
+/// than trying to enumerate destructive verbs, which are not.
+const PERIPHERAL_ARTIFACTS: &[&str] = &[
+    "test",
+    "tests",
+    "spec",
+    "specs",
+    "benchmark",
+    "benchmarks",
+    "fixture",
+    "fixtures",
+    "mock",
+    "mocks",
+    "stub",
+    "stubs",
+    "flag",
+    "flags",
+    "counter",
+    "counters",
+    "metric",
+    "metrics",
+    "log",
+    "logs",
+    "logging",
+    "comment",
+    "comments",
+    "docstring",
+    "todo",
+    "variable",
+    "variables",
+    "import",
+    "imports",
+    "dead",
+    "unused",
+    "lint",
+    "typo",
+    "whitespace",
+];
+
+/// Words that end the phrase a verb governs. Everything after one of these
+/// describes where the work happens, not what is being changed, so
+/// `drop the unused debug counter from ThumbnailCache` governs the counter
+/// and merely mentions the cache.
+const OBJECT_BOUNDARY: &[&str] = &[
+    "in",
+    "into",
+    "inside",
+    "within",
+    "from",
+    "to",
+    "onto",
+    "on",
+    "at",
+    "for",
+    "with",
+    "by",
+    "under",
+    "behind",
+    "across",
+    "over",
+    "around",
+    "guarding",
+    "protecting",
+    "covering",
+    "so",
+    "then",
+    "and",
+];
+
+/// Words that name the same entity as the identifier immediately before them,
+/// so `the users.email column` and `the PaymentService class` still refer to
+/// the scope itself rather than to something merely named after it.
+const TRANSPARENT_HEAD: &[&str] = &[
+    "class",
+    "service",
+    "module",
+    "struct",
+    "type",
+    "interface",
+    "component",
+    "implementation",
+    "impl",
+    "object",
+    "model",
+    "entity",
+    "record",
+    "table",
+    "column",
+    "field",
+    "api",
+    "endpoint",
+    "abstraction",
+    "layer",
+];
+
+/// Words that carry no noun of their own and so never end a governed phrase.
+const PHRASE_FILLER: &[&str] = &[
+    "a",
+    "an",
+    "the",
+    "its",
+    "their",
+    "our",
+    "all",
+    "any",
+    "some",
+    "this",
+    "that",
+    "these",
+    "those",
+    "legacy",
+    "old",
+    "new",
+    "existing",
+    "current",
+    "obsolete",
+    "flaky",
+    "confusing",
+    "local",
+    "debug",
+];
+
+/// The phrase a destructive verb governs: everything after the first
+/// destructive keyword, stopping at a clause boundary or punctuation. Returns
+/// words in their original case so scope identifiers stay comparable.
+fn governed_phrase(summary: &str, operation: Operation) -> Option<Vec<String>> {
+    if !operation.destructive() {
+        return None;
+    }
+    let keywords = OPERATION_BUCKETS
+        .iter()
+        .find(|(bucket, _)| *bucket == operation)
+        .map(|(_, keywords)| *keywords)?;
+
+    let trim = |word: &str| {
+        word.trim_matches(|character: char| {
+            !character.is_ascii_alphanumeric()
+                && character != '.'
+                && character != '_'
+                && character != ':'
+        })
+        .to_string()
+    };
+
+    let mut phrase = Vec::new();
+    let mut seen_verb = false;
+    for raw in summary.split_whitespace() {
+        let word = trim(raw);
+        if word.is_empty() {
+            continue;
+        }
+        let lowered = word.to_ascii_lowercase();
+        if !seen_verb {
+            seen_verb = keywords.contains(&lowered.as_str());
+            continue;
+        }
+        if OBJECT_BOUNDARY.contains(&lowered.as_str()) {
+            break;
+        }
+        phrase.push(word);
+        // A sentence or clause ending closes the phrase.
+        if raw.ends_with([',', ';', '.', ')']) {
+            break;
+        }
+    }
+    if !seen_verb || phrase.is_empty() {
+        return None;
+    }
+    Some(phrase)
+}
+
+/// Does the destructive verb govern only a peripheral artefact?
+///
+/// `Delete the flaky ThumbnailCache benchmark test` destroys a test, not the
+/// cache. Used to hold back the HIGH replace-versus-extend finding without
+/// silencing the pair: the caller still reports the overlap at MEDIUM.
+fn destructive_object_is_peripheral(summary: &str, operation: Operation) -> bool {
+    let Some(phrase) = governed_phrase(summary, operation) else {
+        return false;
+    };
+    phrase
+        .iter()
+        .any(|word| PERIPHERAL_ARTIFACTS.contains(&word.to_ascii_lowercase().as_str()))
+}
+
+/// Is the shared scope only a modifier inside the governed phrase?
+///
+/// `Move the ThumbnailCache eviction loop into a background task` governs the
+/// loop; `ThumbnailCache` qualifies which loop. The scope counts as the real
+/// object only when nothing but transparent head nouns follows it.
+fn scope_is_modifier_in_object(summary: &str, operation: Operation, scope: &Scope) -> bool {
+    let Some(phrase) = governed_phrase(summary, operation) else {
+        return false;
+    };
+    let scope_tokens = tokenize(&scope.key);
+    let Some(position) = phrase.iter().rposition(|word| {
+        // Require the word to carry the whole key. A partial token hit
+        // ("payment" against `PaymentService`) is a topical match, not a
+        // naming of the scope, and must not suppress anything.
+        !scope_tokens.is_empty() && scope_tokens.is_subset(&tokenize(word))
+    }) else {
+        // The scope is not inside the governed phrase at all, so this rule
+        // does not apply and must not suppress anything.
+        return false;
+    };
+    phrase[position + 1..].iter().any(|word| {
+        let lowered = word.to_ascii_lowercase();
+        !TRANSPARENT_HEAD.contains(&lowered.as_str()) && !PHRASE_FILLER.contains(&lowered.as_str())
+    })
+}
+
 /// Operation buckets in destructive-priority order: a destructive keyword
 /// anywhere in the summary outranks additive phrasing around it, so "Add a
 /// migration to drop the legacy users.email column" classifies as remove.
@@ -132,12 +348,53 @@ fn infer(summary: &str, scopes: &[Scope]) -> Inference {
 const OPERATION_BUCKETS: &[(Operation, &[&str])] = &[
     (
         Operation::Replace,
-        &["replace", "rewrite", "supersede", "swap"],
+        &[
+            "replace",
+            "rewrite",
+            "supersede",
+            "swap",
+            "consolidate",
+            "unify",
+            "standardize",
+            "standardise",
+            "collapse",
+            "reimplement",
+            "overhaul",
+        ],
     ),
-    (Operation::Remove, &["remove", "delete", "drop", "retire"]),
+    (
+        Operation::Remove,
+        &[
+            "remove",
+            "delete",
+            "drop",
+            "retire",
+            "deprecate",
+            "sunset",
+            "decommission",
+            "eliminate",
+        ],
+    ),
     (Operation::Rename, &["rename", "move"]),
     (Operation::Migrate, &["migrate", "convert"]),
-    (Operation::Extend, &["extend", "augment"]),
+    (
+        Operation::Extend,
+        &[
+            "extend",
+            "augment",
+            "back",
+            "wire",
+            "plug",
+            "teach",
+            "expose",
+            "enable",
+            "offer",
+            "accept",
+            "allow",
+            "integrate",
+            "hook",
+        ],
+    ),
     (Operation::Add, &["add", "introduce", "implement", "create"]),
     (
         Operation::Modify,
@@ -449,12 +706,62 @@ pub fn detect_pair(source: &IntentCandidate, target: &IntentCandidate) -> Vec<Co
             && target_inference.operation.additive())
             || (target_inference.operation.destructive() && source_inference.operation.additive());
         if operations_collide {
-            let (destructive, additive, destructive_scope) =
+            let (destructive, additive, destructive_scope, destructive_summary) =
                 if source_inference.operation.destructive() {
-                    (&source_inference, &target_inference, &overlap.source)
+                    (
+                        &source_inference,
+                        &target_inference,
+                        &overlap.source,
+                        source.summary.as_str(),
+                    )
                 } else {
-                    (&target_inference, &source_inference, &overlap.target)
+                    (
+                        &target_inference,
+                        &source_inference,
+                        &overlap.target,
+                        target.summary.as_str(),
+                    )
                 };
+            // A destructive verb that governs only a peripheral artefact does
+            // not threaten the shared scope. Report the overlap, but do not
+            // claim one agent is removing what the other is extending: that
+            // explanation would be false, and a false HIGH trains agents to
+            // ignore the severity that matters.
+            if destructive_object_is_peripheral(destructive_summary, destructive.operation)
+                || scope_is_modifier_in_object(
+                    destructive_summary,
+                    destructive.operation,
+                    destructive_scope,
+                )
+            {
+                results.push(make_conflict(
+                    "shared_semantic_scope",
+                    "MEDIUM",
+                    (scope_score * 0.7).min(0.8),
+                    source,
+                    target,
+                    Some(scope.clone()),
+                    format!(
+                        "Both intents reference `{}` ({}), but the {} applies to a peripheral artefact rather than to `{}` itself.",
+                        scope.key,
+                        overlap.describe(),
+                        destructive.operation.as_str(),
+                        scope.key
+                    ),
+                    "Confirm the peripheral change is not load-bearing for the other intent, then proceed. Claims remain advisory."
+                        .to_string(),
+                    json!({
+                        "rule": "FM-C003",
+                        "downgraded_from": "replace_vs_extend",
+                        "reason": "destructive verb does not govern the shared scope",
+                        "source_operation": source_inference.operation.as_str(),
+                        "target_operation": target_inference.operation.as_str(),
+                        "source_scope": overlap.source.canonical(),
+                        "target_scope": overlap.target.canonical(),
+                    }),
+                ));
+                return results;
+            }
             let score =
                 (scope_score * destructive.confidence.min(additive.confidence) * 1.02).min(0.99);
             let suggestion = if let Some(migration) = overlap.migration_scope() {
