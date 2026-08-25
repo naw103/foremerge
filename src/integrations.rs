@@ -1195,6 +1195,46 @@ mod tests {
     }
 
     #[test]
+    fn a_cwd_with_no_value_does_not_read_as_a_pinned_registration() {
+        let temp = tempfile::tempdir().unwrap();
+        let exe = temp.path().join("foremerge");
+        fs::write(&exe, b"#!/bin/sh\n").unwrap();
+
+        // A `--cwd` carrying no value pins the entry to nothing. Reading it as
+        // Some("") would classify a malformed entry as Foremerge's own pinned
+        // form, which setup replaces without --force.
+        for empty in ["", "   "] {
+            let json = serde_json::json!({
+                "transport": {
+                    "command": exe.to_string_lossy(),
+                    "args": ["--cwd", empty, "mcp"],
+                },
+            });
+            let entry = parse_codex_entry(&json).expect("entry parses");
+            assert_eq!(
+                entry.cwd, None,
+                "an empty --cwd must read as absent: {empty:?}"
+            );
+            assert_eq!(
+                entry.registration(),
+                CodexRegistration::Current,
+                "an entry pinned to nothing is the portable form, not an upgradable one"
+            );
+        }
+
+        // A real path still reads as pinned.
+        let pinned = serde_json::json!({
+            "transport": {
+                "command": exe.to_string_lossy(),
+                "args": ["--cwd", "/some/repo", "mcp"],
+            },
+        });
+        let entry = parse_codex_entry(&pinned).expect("entry parses");
+        assert_eq!(entry.cwd.as_deref(), Some(Path::new("/some/repo")));
+        assert_eq!(entry.registration(), CodexRegistration::Upgradable);
+    }
+
+    #[test]
     fn disabled_unverifiable_or_foreign_codex_entries_need_force() {
         let temp = tempfile::tempdir().unwrap();
         let exe = temp.path().join("foremerge");
