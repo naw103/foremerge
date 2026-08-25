@@ -110,7 +110,8 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           ARCHIVE="foremerge-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
-          tar -C "target/${{ matrix.target }}/release" -czf "$ARCHIVE" foremerge
+          # `fmg` is the same program under a short name, so both go in the archive.
+          tar -C "target/${{ matrix.target }}/release" -czf "$ARCHIVE" foremerge fmg
           shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
 
       - name: Package (Windows)
@@ -118,7 +119,12 @@ jobs:
         shell: pwsh
         run: |
           $archive = "foremerge-$env:GITHUB_REF_NAME-${{ matrix.target }}.zip"
-          Compress-Archive -Path "target/${{ matrix.target }}/release/foremerge.exe" -DestinationPath $archive
+          # `fmg` is the same program under a short name, so both go in the archive.
+          $binaries = @(
+            "target/${{ matrix.target }}/release/foremerge.exe",
+            "target/${{ matrix.target }}/release/fmg.exe"
+          )
+          Compress-Archive -Path $binaries -DestinationPath $archive
           (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower() + "  $archive" | Out-File -Encoding ascii "$archive.sha256"
 
       - name: Upload artifact

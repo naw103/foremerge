@@ -90,6 +90,11 @@ foremerge init
 foremerge doctor
 ```
 
+Every command is also available as `fmg`, which is the same binary under a
+shorter name, so `fmg status` and `foremerge status` do the same thing. Both
+are installed together by the release script, the release archives, and
+`cargo install`.
+
 Install the native skill and MCP entry for any clients used in this repository,
 then define the trusted checks agents may request by name:
 

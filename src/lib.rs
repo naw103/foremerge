@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod checks;
+pub mod cli;
 pub mod conflict;
 pub mod db;
 pub mod exclusions;

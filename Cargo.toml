@@ -26,6 +26,16 @@ path = "src/lib.rs"
 name = "foremerge"
 path = "src/main.rs"
 
+# The same program under a short name, for typing. Both binaries are thin
+# wrappers over `foremerge::cli::run`, so they cannot drift apart and the CLI
+# compiles once. `fmg` was chosen after checking that nothing installs a binary
+# by that name: it is unclaimed on crates.io, Homebrew, and Debian, and the npm
+# and PyPI packages holding the name are libraries with no executable. `fm` was
+# rejected because a Go terminal file manager already uses it.
+[[bin]]
+name = "fmg"
+path = "src/bin/fmg.rs"
+
 [dependencies]
 anyhow = "1.0"
 axum = "0.8"
