@@ -47,6 +47,64 @@ fn foremerge_bin() -> &'static Path {
     assert_cmd::cargo::cargo_bin!("foremerge")
 }
 
+fn fmg_bin() -> &'static Path {
+    assert_cmd::cargo::cargo_bin!("fmg")
+}
+
+/// `fmg` is the short name for the same program, so it has to be built, has to
+/// behave identically, and has to name itself rather than `foremerge` in help.
+#[test]
+fn the_short_name_is_the_same_program_and_calls_itself_by_the_short_name() {
+    let long = Command::new(foremerge_bin())
+        .arg("--version")
+        .output()
+        .expect("foremerge runs");
+    let short = Command::new(fmg_bin())
+        .arg("--version")
+        .output()
+        .expect("fmg runs");
+    assert!(long.status.success() && short.status.success());
+
+    // Byte-identical version output, which is the simplest proof that the two
+    // names are one build rather than two things that can drift apart. Both
+    // report the product name, so `fmg --version` says `foremerge`: usage text
+    // should echo what you typed, but a version should identify the product.
+    let long_version = String::from_utf8_lossy(&long.stdout).trim().to_string();
+    let short_version = String::from_utf8_lossy(&short.stdout).trim().to_string();
+    assert_eq!(
+        long_version, short_version,
+        "the two names should report one version"
+    );
+    assert!(
+        short_version.starts_with("foremerge "),
+        "expected the product name in --version, got {short_version}"
+    );
+
+    // Usage text has to say `fmg`, or the short name would tell people to type
+    // the long one, which defeats the point of having it.
+    let help = Command::new(fmg_bin())
+        .arg("--help")
+        .output()
+        .expect("fmg --help runs");
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(
+        help.contains("Usage: fmg"),
+        "fmg --help should name fmg, got:\n{help}"
+    );
+
+    // The subcommand tree is the same program, not a reduced shim.
+    let long_help = Command::new(foremerge_bin())
+        .arg("--help")
+        .output()
+        .expect("foremerge --help runs");
+    let long_help = String::from_utf8_lossy(&long_help.stdout);
+    assert_eq!(
+        help.replace("Usage: fmg", "Usage: foremerge"),
+        long_help.to_string(),
+        "the two names should present the same interface"
+    );
+}
+
 fn git<I, S>(cwd: &Path, args: I) -> String
 where
     I: IntoIterator<Item = S>,

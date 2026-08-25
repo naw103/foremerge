@@ -11,6 +11,13 @@ changes when they are called out here with a migration note.
 
 ### Added
 
+- `fmg` is a short name for the `foremerge` command. It is the same binary
+  installed under a second name, so `fmg status` and `foremerge status` are
+  identical, and usage and error text name whichever one you ran. The release
+  archives and `cargo install` provide both. The name was chosen after checking
+  that nothing else installs a binary called `fmg`; `fm` was rejected because a
+  Go terminal file manager already claims it.
+
 - `foremerge mcp` explains itself when it is run in a terminal. It is a stdio
   protocol server, so a person who runs it sees an apparently idle process, and
   typing a tool name such as `list_agents` returns only a parse error. It now
