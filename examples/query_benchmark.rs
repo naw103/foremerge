@@ -3,7 +3,7 @@
 //! Run an optimized build for meaningful timings:
 //! `cargo run --release --example query_benchmark -- 500 5000 20000`.
 
-use foremerge::model::{Scope, WorkQuery};
+use foremerge::model::{Operation, Scope, ScopeClaim, WorkQuery};
 use foremerge::{Foremerge, Store};
 use rusqlite::{Connection, params};
 use serde_json::json;
@@ -124,7 +124,15 @@ fn seed(database: &Path, size: usize) -> anyhow::Result<()> {
             } else {
                 format!("Unrelated{index}")
             };
-            let scopes_json = serde_json::to_string(&[Scope::new("symbol", &scope_key)])?;
+            // Intents store `ScopeClaim`, not bare `Scope`. Seeding the old shape
+            // made every read of this fixture fail on the missing operation.
+            // `modify`, inferred, matches what `intent_scopes` defaults to for
+            // rows that predate declared operations.
+            let scopes_json = serde_json::to_string(&[ScopeClaim {
+                scope: Scope::new("symbol", &scope_key),
+                operation: Operation::Modify,
+                inferred: true,
+            }])?;
             tasks.execute(params![
                 task_id,
                 format!("task-key-{index}"),
