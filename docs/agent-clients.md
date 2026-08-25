@@ -28,11 +28,20 @@ its command resolves to an existing `foremerge` executable (including the
 portable templates shipped in a source clone) and any `--cwd` argument points
 at this repository. Setup is idempotent when installed content is current.
 
-Setup never replaces a differing skill file or `mcpServers.foremerge` entry by
-default; a stale entry (moved repository, deleted binary) is refused rather
-than reported as configured. Inspect the existing content first; use `--force`
-only when replacing it is intentional. Use `--skip-mcp` to install the skill
-without changing MCP configuration.
+Every installed skill file ends with a managed stamp naming the release that
+wrote it and a digest of the instructions above it. Upgrading Foremerge
+therefore replaces its own unedited skill file in place, with no `--force`:
+the digest proves nothing was changed after Foremerge wrote it. A file whose
+body no longer matches its own stamp was edited, and is never replaced without
+`--force`. A file already carrying this release's instructions is left exactly
+as it is, stamped or not, so a source clone's tracked skill files are not
+rewritten.
+
+Setup never replaces an edited skill file or a differing `mcpServers.foremerge`
+entry by default; a stale entry (moved repository, deleted binary) is refused
+rather than reported as configured. Inspect the existing content first; use
+`--force` only when replacing it is intentional. Use `--skip-mcp` to install
+the skill without changing MCP configuration.
 
 `setup all` attempts every requested client even when one fails: the report
 lists each client's result, failed clients carry an `error` field, and the
@@ -127,8 +136,10 @@ the optional HTTP daemon.
 
 ## Repair or remove
 
-If a diagnostic reports stale content, inspect the diff and rerun the matching
-setup command with `--force`.
+If a diagnostic reports stale content, rerun the matching setup command. The
+diagnostic's `next_step` names `--force` only when setup would otherwise refuse,
+which for a skill file means it was edited after Foremerge wrote it. Inspect the
+diff before forcing in that case.
 
 To remove an integration:
 

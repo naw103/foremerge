@@ -1508,14 +1508,25 @@ fn setup_installs_native_claude_and_cursor_integrations_and_named_checks() {
         Path::new(env!("CARGO_MANIFEST_DIR")).join(".codex/skills/foremerge/SKILL.md"),
     )
     .expect("read canonical skill");
-    assert_eq!(
-        fs::read_to_string(repo.root.join(".claude/skills/foremerge/SKILL.md")).unwrap(),
-        canonical_skill
-    );
-    assert_eq!(
-        fs::read_to_string(repo.root.join(".cursor/skills/foremerge/SKILL.md")).unwrap(),
-        canonical_skill
-    );
+    for client in [".claude", ".cursor"] {
+        let installed =
+            fs::read_to_string(repo.root.join(client).join("skills/foremerge/SKILL.md")).unwrap();
+        // Installed files carry a managed stamp over the canonical body, which
+        // is what lets a later release upgrade its own unedited file in place.
+        assert!(
+            installed.starts_with(&canonical_skill),
+            "{client}: installed skill must preserve the canonical instructions"
+        );
+        let stamp = installed[canonical_skill.len()..].trim();
+        assert!(
+            stamp.starts_with("<!-- foremerge:managed ") && stamp.ends_with("-->"),
+            "{client}: installed skill must end with a managed stamp, got {stamp:?}"
+        );
+        assert!(
+            stamp.contains("sha256="),
+            "{client}: stamp must record the body digest, got {stamp:?}"
+        );
+    }
     for config in [
         repo.root.join(".mcp.json"),
         repo.root.join(".cursor/mcp.json"),

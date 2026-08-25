@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -168,6 +169,100 @@ fn is_error_code(candidate: &str) -> bool {
 
 pub const SKILL_CONTENT: &str = include_str!("../.codex/skills/foremerge/SKILL.md");
 
+/// Marker Foremerge appends to every skill file it installs, naming the release
+/// that produced the body and a digest of that body.
+///
+/// The digest is what lets a later release tell a file this installer wrote
+/// from one an operator edited. Foremerge's own unedited file may be upgraded
+/// in place, because replacing it destroys nothing; an edited file still
+/// requires --force.
+const SKILL_STAMP_PREFIX: &str = "<!-- foremerge:managed ";
+const SKILL_STAMP_SUFFIX: &str = "-->";
+
+/// How an installed skill file relates to the one this release would write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkillState {
+    /// Already carries this release's instructions, stamped or not.
+    Current,
+    /// Foremerge's own file, untouched since it was written, from a different
+    /// release. Upgrading it is not an overwrite of anyone's work.
+    Replaceable,
+    /// Edited after Foremerge wrote it. Replacing it needs --force.
+    Edited,
+}
+
+/// The skill text without a trailing managed stamp. Both the embedded copy and
+/// on-disk files are canonicalized through this, so a stamp can never nest
+/// inside the body it describes.
+fn skill_body(content: &str) -> &str {
+    let trimmed = content.trim_end_matches('\n');
+    match trimmed.rfind('\n') {
+        Some(cut) if is_skill_stamp(&trimmed[cut + 1..]) => &content[..=cut],
+        None if is_skill_stamp(trimmed) => "",
+        _ => content,
+    }
+}
+
+fn is_skill_stamp(line: &str) -> bool {
+    line.starts_with(SKILL_STAMP_PREFIX) && line.ends_with(SKILL_STAMP_SUFFIX)
+}
+
+fn skill_digest(body: &str) -> String {
+    format!("{:x}", Sha256::digest(body.as_bytes()))
+}
+
+/// The digest a file's own stamp records, if it carries a well-formed one.
+fn skill_stamp_digest(content: &str) -> Option<&str> {
+    let trimmed = content.trim_end_matches('\n');
+    let line = trimmed.rsplit('\n').next()?;
+    if !is_skill_stamp(line) {
+        return None;
+    }
+    line.split_whitespace()
+        .find_map(|token| token.strip_prefix("sha256="))
+}
+
+/// The exact bytes setup installs: this release's body plus its stamp.
+fn desired_skill() -> String {
+    let body = skill_body(SKILL_CONTENT);
+    let mut content = String::with_capacity(body.len() + 96);
+    content.push_str(body);
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(SKILL_STAMP_PREFIX);
+    content.push_str("version=");
+    content.push_str(env!("CARGO_PKG_VERSION"));
+    content.push_str(" sha256=");
+    content.push_str(&skill_digest(body));
+    content.push(' ');
+    content.push_str(SKILL_STAMP_SUFFIX);
+    content.push('\n');
+    content
+}
+
+fn skill_state(existing: &str) -> SkillState {
+    let body = skill_body(existing);
+    if body == skill_body(SKILL_CONTENT) {
+        // Same instructions this release ships. Nothing to rewrite, even when
+        // the file predates stamping and so carries no marker of its own.
+        return SkillState::Current;
+    }
+    match skill_stamp_digest(existing) {
+        // A stamp still matching its own body proves nothing was edited after
+        // Foremerge wrote the file, so this release may upgrade it in place.
+        Some(recorded) if recorded == skill_digest(body) => SkillState::Replaceable,
+        Some(_) => SkillState::Edited,
+        // Releases before stamping left no marker, so an unstamped file is
+        // treated as Foremerge's own and upgrading off it does not demand
+        // --force. The cost is that deleting the stamp from an edited file
+        // also forfeits its protection; that is deliberate while the
+        // pre-stamp installed base still exists, and should tighten to
+        // SkillState::Edited once it does not.
+        None => SkillState::Replaceable,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Client {
     Codex,
@@ -290,7 +385,27 @@ fn install_client(
         warning: None,
         error: None,
     };
-    match write_managed(&skill_path, SKILL_CONTENT.as_bytes(), force) {
+    let state = fs::read_to_string(&skill_path)
+        .ok()
+        .as_deref()
+        .map(skill_state);
+    let skill = match state {
+        // Already this release's instructions. Leave the file exactly as it is,
+        // so a source clone's tracked skill files are never rewritten just to
+        // gain a stamp.
+        Some(SkillState::Current) => Ok(FileInstall {
+            path: skill_path.to_string_lossy().into_owned(),
+            status: "unchanged".to_string(),
+        }),
+        // Upgrading Foremerge's own unedited file overwrites nothing the
+        // operator wrote, so it does not require --force.
+        state => write_managed(
+            &skill_path,
+            desired_skill().as_bytes(),
+            force || state == Some(SkillState::Replaceable),
+        ),
+    };
+    match skill {
         Ok(skill) => report.skill = skill,
         Err(error) => {
             report.error = Some(format!("{error:#}"));
@@ -370,9 +485,13 @@ fn configure_client_mcp(
 
 fn diagnose_client(root: &Path, client: Client) -> ClientDiagnostic {
     let skill_path = client.skill_path(root);
-    let skill_bytes = fs::read(&skill_path).ok();
-    let skill_installed = skill_bytes.is_some();
-    let skill_current = skill_bytes.as_deref() == Some(SKILL_CONTENT.as_bytes());
+    let skill_installed = skill_path.is_file();
+    // Unreadable or non-UTF-8 content is never Foremerge's own file, so it is
+    // treated as edited and kept behind --force.
+    let skill_state = skill_installed
+        .then(|| fs::read_to_string(&skill_path).ok())
+        .map(|text| text.as_deref().map_or(SkillState::Edited, skill_state));
+    let skill_current = skill_state == Some(SkillState::Current);
     let mcp_path = client.mcp_path(root);
     // Codex keeps its registration in user-global configuration, so a present
     // entry pointing elsewhere needs --force and a message naming both
@@ -396,7 +515,7 @@ fn diagnose_client(root: &Path, client: Client) -> ClientDiagnostic {
     // so offering a plain `setup` here would name a command that cannot
     // succeed. Report what actually blocks it and ask for --force instead.
     let mut blocked: Vec<&str> = Vec::new();
-    if skill_installed && !skill_current {
+    if skill_state == Some(SkillState::Edited) {
         blocked.push("skill file");
     }
     if mcp_entry_stale {
@@ -969,8 +1088,8 @@ mod tests {
         assert_eq!(reports.len(), 2);
         assert!(reports.iter().all(|report| report.error.is_none()));
         assert_eq!(
-            fs::read(temp.path().join(".claude/skills/foremerge/SKILL.md")).unwrap(),
-            SKILL_CONTENT.as_bytes()
+            fs::read_to_string(temp.path().join(".claude/skills/foremerge/SKILL.md")).unwrap(),
+            desired_skill()
         );
         let cursor: Value = serde_json::from_slice(&fs::read(cursor_config).unwrap()).unwrap();
         assert_eq!(cursor["custom"], true);
@@ -1171,6 +1290,129 @@ mod tests {
     }
 
     #[test]
+    fn installed_skill_carries_a_stamp_over_this_release_body() {
+        let installed = desired_skill();
+        assert_eq!(
+            skill_body(&installed),
+            skill_body(SKILL_CONTENT),
+            "stamping must not alter the instructions themselves"
+        );
+        assert_eq!(
+            skill_stamp_digest(&installed),
+            Some(skill_digest(skill_body(SKILL_CONTENT)).as_str()),
+            "the stamp must record the digest of the body it follows"
+        );
+        assert!(installed.contains(env!("CARGO_PKG_VERSION")));
+        assert_eq!(
+            skill_state(&installed),
+            SkillState::Current,
+            "the bytes setup writes must read back as current"
+        );
+        // Stamping is a fixed point. If a source clone's tracked file ever ends
+        // up stamped, canonicalizing it must strip that stamp rather than nest
+        // a second one inside the body.
+        let body = skill_body(&installed);
+        let restamped = format!(
+            "{body}{SKILL_STAMP_PREFIX}version=9.9.9 sha256={} {SKILL_STAMP_SUFFIX}\n",
+            skill_digest(body)
+        );
+        assert_eq!(skill_body(&restamped), skill_body(SKILL_CONTENT));
+    }
+
+    #[test]
+    fn an_unedited_older_skill_upgrades_without_force() {
+        let body = "# Foremerge\n\nOld instructions from an earlier release.\n";
+        let stamped = format!(
+            "{body}{SKILL_STAMP_PREFIX}version=0.0.1 sha256={} {SKILL_STAMP_SUFFIX}\n",
+            skill_digest(body)
+        );
+        assert_eq!(skill_state(&stamped), SkillState::Replaceable);
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".claude/skills/foremerge/SKILL.md");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, &stamped).unwrap();
+        let reports = install(
+            temp.path(),
+            &[Client::Claude],
+            Path::new("/usr/local/bin/foremerge"),
+            false,
+            false,
+        );
+        assert!(
+            reports[0].error.is_none(),
+            "an unedited older file must upgrade without --force: {:?}",
+            reports[0].error
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), desired_skill());
+    }
+
+    #[test]
+    fn an_edited_skill_still_requires_force() {
+        let body = "# Foremerge\n\nOld instructions from an earlier release.\n";
+        let edited = format!(
+            "{body}A line the operator added.\n{SKILL_STAMP_PREFIX}version=0.0.1 sha256={} {SKILL_STAMP_SUFFIX}\n",
+            skill_digest(body)
+        );
+        assert_eq!(
+            skill_state(&edited),
+            SkillState::Edited,
+            "a body that no longer matches its own stamp was edited"
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".claude/skills/foremerge/SKILL.md");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, &edited).unwrap();
+        let reports = install(
+            temp.path(),
+            &[Client::Claude],
+            Path::new("/usr/local/bin/foremerge"),
+            false,
+            false,
+        );
+        assert!(
+            reports[0]
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("ALREADY_EXISTS:")),
+            "edited content must stay behind --force: {:?}",
+            reports[0].error
+        );
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            edited,
+            "the operator's file must be left byte-for-byte intact"
+        );
+    }
+
+    #[test]
+    fn an_unstamped_body_matching_this_release_is_left_alone() {
+        // A source clone's tracked skill files carry no stamp. Setup must
+        // recognize them as current rather than rewriting tracked content.
+        assert_eq!(skill_state(SKILL_CONTENT), SkillState::Current);
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".claude/skills/foremerge/SKILL.md");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, SKILL_CONTENT).unwrap();
+        let reports = install(
+            temp.path(),
+            &[Client::Claude],
+            Path::new("/usr/local/bin/foremerge"),
+            false,
+            false,
+        );
+        assert!(reports[0].error.is_none());
+        assert_eq!(reports[0].skill.status, "unchanged");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            SKILL_CONTENT,
+            "an unstamped current body must not be rewritten"
+        );
+    }
+
+    #[test]
     fn coded_preserves_typed_error_codes_through_context() {
         let wrapped = coded(
             anyhow::anyhow!("RESOURCE_LIMIT: codex did not finish within 10 seconds"),
@@ -1190,33 +1432,28 @@ mod tests {
     }
 
     #[test]
-    fn skill_overwrite_requires_force() {
+    fn an_unstamped_custom_skill_is_replaced_during_the_transition() {
+        // Foremerge cannot tell a hand-written unstamped file from one an
+        // earlier, pre-stamp release installed: neither carries provenance.
+        // While the pre-stamp installed base exists, such files are replaced
+        // so upgrading does not demand --force. Once every installed file
+        // carries a stamp this should tighten to SkillState::Edited, and this
+        // test should assert refusal again. Files that DO carry a stamp are
+        // already protected; see an_edited_skill_still_requires_force.
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(".claude/skills/foremerge/SKILL.md");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "custom instructions").unwrap();
-        let refused = install(
+        assert_eq!(skill_state("custom instructions"), SkillState::Replaceable);
+        let reports = install(
             temp.path(),
             &[Client::Claude],
             Path::new("foremerge"),
             false,
             false,
         );
-        assert!(
-            refused[0]
-                .error
-                .as_deref()
-                .is_some_and(|error| error.starts_with("ALREADY_EXISTS"))
-        );
-        assert_eq!(refused[0].skill.status, "failed");
-        let forced = install(
-            temp.path(),
-            &[Client::Claude],
-            Path::new("foremerge"),
-            true,
-            false,
-        );
-        assert!(forced[0].error.is_none());
-        assert_eq!(fs::read(path).unwrap(), SKILL_CONTENT.as_bytes());
+        assert!(reports[0].error.is_none());
+        assert_eq!(reports[0].skill.status, "written");
+        assert_eq!(fs::read_to_string(&path).unwrap(), desired_skill());
     }
 }
