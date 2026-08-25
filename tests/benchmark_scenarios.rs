@@ -90,7 +90,8 @@ async fn committed_benchmark_corpus_matches_executable_ground_truth() {
                     capabilities: vec![],
                     worktree: None,
                 })
-                .unwrap();
+                .unwrap()
+                .agent;
             latest_conflicts = service
                 .publish_intent(PublishIntentRequest {
                     agent_id: agent.id,
@@ -167,7 +168,8 @@ async fn run_validation_gate(scenario: &Scenario) {
             capabilities: vec![],
             worktree: Some(root.to_string_lossy().into_owned()),
         })
-        .unwrap();
+        .unwrap()
+        .agent;
     let intent = service
         .publish_intent(PublishIntentRequest {
             agent_id: agent.id.clone(),

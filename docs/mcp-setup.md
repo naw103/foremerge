@@ -161,7 +161,12 @@ CLI and HTTP operator surfaces:
 At the start of a coding session:
 
 1. Call `register_agent` with a unique session name, actual model identifier,
-   and isolated worktree.
+   and isolated worktree. Registration always creates a new record, so a
+   restarted agent is a new participant and cannot claim its previous intents.
+   If an ACTIVE agent with the same name already exists for that worktree, the
+   response carries a `warnings` entry naming it; treat that as a signal to
+   adopt the earlier work with `foremerge work adopt` rather than starting
+   again.
 2. Call `query_work` for the task or scopes you expect to touch.
 3. Call `publish_intent` before editing files.
 4. Inspect the returned conflicts or call `check_conflicts` for a provisional

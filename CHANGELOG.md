@@ -19,6 +19,22 @@ refuse to open a schema 5 store rather than migrate it backwards.
 
 ### Added
 
+- Registering an agent now reports when an ACTIVE agent of the same name is
+  already registered for the same worktree. Registration deliberately stays
+  insert-always, because two genuinely separate processes may share a name and
+  silently reusing a record could attach one process to work another still
+  owns. What it should not do is hide the duplicate: a dogfood run produced 11
+  agent records for 9 logical roles with nothing said about it. The response
+  gains a `warnings` entry naming the existing agent and pointing at
+  `foremerge work adopt`. Agent fields stay at the top level of the response,
+  so callers reading `data.id` are unaffected.
+
+- Test wait bounds scale with `FOREMERGE_TEST_TIMEOUT_SCALE`. Three validation
+  tests raced a fixed ten-second deadline and failed on a loaded machine while
+  the code was correct, which costs a debugging cycle every time because the
+  first hypothesis is always a regression. The bounds are now generous by
+  default and raisable, and the failure messages name the variable.
+
 - `foremerge work adopt` transfers an intent whose agent has stopped. An agent
   that died mid-task previously left its intent owned forever by an agent that
   would never return, so the work could only be duplicated. Adoption is refused
