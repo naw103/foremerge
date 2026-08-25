@@ -54,7 +54,7 @@ want to coordinate:
 ```text
 Set up Foremerge in this repository so we can coordinate parallel agents.
 
-1. Install it:      curl -fsSL https://naw103.github.io/foremerge/install.sh | sh
+1. Install it:      curl -fsSL https://foremerge.com/install.sh | sh
 2. Initialize:      foremerge init
 3. Wire this client and any others in use: foremerge setup all
 4. Register the check I should be validated against, for example:
@@ -76,7 +76,7 @@ You need a recent Git and `jq`. Install a prebuilt, checksum-verified release
 binary (macOS and Linux; the script installs to `~/.local/bin`):
 
 ```sh
-curl -fsSL https://naw103.github.io/foremerge/install.sh | sh
+curl -fsSL https://foremerge.com/install.sh | sh
 ```
 
 Or build from source with Rust 1.85+: `cargo install --locked --git
