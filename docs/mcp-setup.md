@@ -390,6 +390,13 @@ For protocol debugging, run `foremerge mcp` directly and send one compact JSON
 object per line. A real MCP client should begin with `initialize`, followed by
 the initialized notification and `tools/list`.
 
+Tool names such as `list_agents` are not commands, so typing one on its own
+returns a `-32700` parse error. When stdin is a terminal the server prints
+guidance to stderr, and typing a bare tool name prints the equivalent JSON-RPC
+line. That guidance is suppressed when stdin is a pipe, so client sessions are
+unaffected. To read coordination state as a person, use the CLI instead, for
+example `foremerge status` or `foremerge agent list`.
+
 The server currently negotiates MCP protocol version `2026-07-28` when the
 client requests it and otherwise falls back to `2025-11-25`. It also responds to
 `ping` and `server/discover`. Notifications have no response.

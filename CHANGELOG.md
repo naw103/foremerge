@@ -9,6 +9,15 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+### Added
+
+- `foremerge mcp` explains itself when it is run in a terminal. It is a stdio
+  protocol server, so a person who runs it sees an apparently idle process, and
+  typing a tool name such as `list_agents` returns only a parse error. It now
+  prints guidance to stderr on startup, and answers a bare tool name with the
+  equivalent JSON-RPC line. Both are suppressed when stdin is a pipe, so client
+  sessions are byte for byte unchanged.
+
 ## [0.3.1] - 2026-08-24
 
 Opening a store with this release migrates it to database schema 4. The upgrade
