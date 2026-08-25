@@ -1,9 +1,14 @@
 # Conflict detection
 
 Foremerge's headline behavior is detecting incompatible intent before Git has a
-textual merge conflict to show. The MVP detector is local, deterministic, and
+textual merge conflict to show. The detector is local, deterministic, and
 explainable. It does not call an LLM, compute embeddings, parse a full AST, or
 claim to prove that two changes are compatible.
+
+It also does not decide what an overlap means. That judgement belongs to the
+calling agent, which records it with `record_assessment`. What this document
+describes is the narrower thing Foremerge does on its own authority: comparing
+declared operations on declared scopes.
 
 ## Inputs
 
@@ -13,13 +18,28 @@ The detector compares two intent candidates:
 IntentCandidate {
   id
   summary
-  scopes[]
+  scopes[]   // ScopeClaim: scope + operation
 }
 ```
 
-Scopes are structured pairs such as `symbol:PaymentService`,
-`api:POST /payments`, or `schema:payments.status`. Intent summaries provide a
-second signal when scopes are absent or broad.
+A `ScopeClaim` is a structured scope such as `symbol:PaymentService`,
+`api:POST /payments`, or `schema:payments.status`, together with the operation
+the intent performs on it:
+
+| Operation | Preserves what other work depends on? |
+| --- | --- |
+| `add`, `extend`, `modify` | yes |
+| `replace`, `remove`, `rename`, `migrate` | no |
+
+The operation is declared by the agent, not read out of the summary. This is
+the load-bearing decision in the whole design. An earlier version inferred it
+from keywords in the prose, which cannot work: "consolidate onto Stripe", "cut
+over to Stripe" and "replace with Stripe" are one operation written three ways,
+and no fixed vocabulary catches every phrasing. Worse, a destructive keyword
+anywhere in a sentence was read as destroying the shared scope, so "delete the
+flaky ThumbnailCache benchmark test" collided with anything extending
+`ThumbnailCache`. Measured on `tests/paraphrase_probe.rs`, inference caught one
+of ten real conflicts and raised a false HIGH on nine of nine compatible pairs.
 
 Conflict checks happen in two places:
 
@@ -29,102 +49,75 @@ Conflict checks happen in two places:
 
 Claim overlap is a separate deterministic warning.
 
-## Operation inference
+## What Foremerge asserts, and what it only surfaces
 
-The summary analyzer maps language to one operation:
+A finding is **asserted** when both sides *declared* an operation on the *same
+canonical scope*. That is a fact derived from two declarations, so Foremerge
+states it and may reach HIGH.
 
-```text
-add | extend | modify | replace | rename | remove | migrate | unknown
-```
+Everything else is **surfaced**: reported for the agent to judge and capped
+below HIGH. Two cases qualify:
 
-Two targeted patterns have high confidence:
+- the scopes matched loosely rather than exactly; or
+- either operation was inferred from prose rather than declared.
 
-```text
-replace X with Y                 -> replace X, destination Y, confidence 0.98
-add Y support to X               -> extend X with variant Y, confidence 0.97
-```
+The reasoning is the same in both: the ambiguity that had to be resolved to
+produce the finding is exactly the ambiguity that cannot be resolved reliably,
+so it must not carry the severity that stops an agent.
 
-The regular expressions also recognize close variants such as “swap out X for
-Y” and “implement Y support for X”.
+Every finding carries `asserted` in its evidence, along with
+`source_operation_inferred` and `target_operation_inferred`.
 
-Otherwise, a small verb lexicon assigns an operation with confidence `0.72`.
-Classification is **destructive-priority**: the buckets below are checked in
-table order, and a destructive keyword anywhere in the summary outranks
-additive phrasing around it. “Add promotional credits, then migrate callers”
-and “Add a migration to drop the legacy users.email column” therefore both
-classify as destructive. The classifier deliberately errs toward higher
-severity, because under-flagging destructive work (which can gate acceptance)
-is strictly worse than a cosmetic operation label.
+## Prose inference
 
-| Operation | Representative words |
-| --- | --- |
-| replace | replace, rewrite, supersede, swap |
-| remove | remove, delete, drop, retire |
-| rename | rename, move |
-| migrate | migrate, convert |
-| extend | extend, augment, any word containing “support” |
-| add | add, introduce, implement, create |
-| modify | modify, change, update, refactor, fix |
+Prose inference survives for one caller: a person typing `foremerge intent
+publish` who gives a summary and no `--operation`. Agents always declare.
 
-If no operation is found, confidence is `0.35`.
+Inference is deliberately conservative. A destructive reading is withdrawn, and
+degraded to `modify`, when the verb governs only a peripheral artefact (a test,
+a flag, a counter, dead code) or when the scope is merely a modifier inside the
+phrase the verb governs. `Delete the flaky ThumbnailCache benchmark test`
+destroys a test; `Move the ThumbnailCache eviction loop into a background task`
+moves a loop. Neither threatens the cache.
 
-Subject extraction runs in two passes. Backticked spans are extracted first
-and are the strongest candidates: any backticked token, including lowercase
-and `::`-qualified names (`` `invoice_totals` ``, `` `billing::Ledger` ``), is
-accepted unless it is a stoplisted English word. A bare token must look like a
-code identifier:
-
-- CamelCase with at least two humps (`PaymentService`, `CreditLedger`); or
-- containing `_`; or
-- `::`-qualified (`billing::Ledger`);
-
-and it must contain at least one lowercase letter (rejecting ticket and
-version noise such as `JIRA_1234` or `Q3_2026`) and must not be a stoplisted
-English sentence-starter (“No”, “The”, “This”, “Then”, and similar), which the
-pattern would otherwise match at the start of a sentence. Among the surviving
-candidates, Foremerge prefers one whose tokens overlap a semantic scope key
-the intent declared; only otherwise does the last candidate win. When no
-confident subject exists, explanations and suggestions fall back to the
-destructive side’s overlapping scope key instead of a mis-extracted word. This
-is intentionally modest natural-language processing, not general semantic
-understanding.
+Anything inferred is marked `inferred: true` and can never assert.
 
 ## Scope matching
 
-Foremerge scores every explicit scope pair and keeps the best tier, so an
-exact match is never shadowed by an earlier-listed weak token overlap:
+Foremerge scores every declared scope pair:
 
 1. Exact canonical scope, such as `symbol:PaymentService` against the same
-   canonical scope: overlap score `1.0`.
+   canonical scope: overlap score `1.0`. **Only this tier can assert.**
 2. Same key across different kinds: overlap score `0.9`.
 3. Scope-key token Jaccard similarity of at least `0.66`: overlap score between
    `0.782` and `0.85`.
 
 Canonical scope comparison is case-insensitive. CamelCase is split before token
-comparison.
+comparison. Symbol keys are reduced to `container::member` with namespace and
+path prefixes discarded, so `App\Services\Report::render` and
+`Report::render` are one scope.
 
-If no explicit scope overlaps but both inferred subjects match, Foremerge adds
-an inferred `symbol` overlap with score `0.78`.
+The strongest interaction is reported once per scope pair, so an intent
+declaring several related scopes does not produce a wall of findings.
 
-The current detector does not inspect changed files, dependency reachability,
-or call graphs. Agents improve precision by publishing the narrowest useful
-semantic scopes.
+The detector does not inspect changed files, dependency reachability, or call
+graphs. Agents improve precision by declaring the narrowest useful scopes.
 
 ## Rules
 
-### FM-C001: replace versus extend
+### FM-C001: destructive versus additive
 
-If one operation is destructive (`replace`, `rename`, `remove`, or `migrate`)
-and the other is additive (`add`, `extend`, or `modify`) on an overlapping
-scope, Foremerge emits:
+If one declared operation is destructive (`replace`, `remove`, `rename`, or
+`migrate`) and the other is additive (`add`, `extend`, or `modify`) on an
+overlapping scope, Foremerge emits:
 
 ```text
-kind: replace_vs_extend
-severity: HIGH
+kind: destructive_vs_additive
+severity: HIGH   (MEDIUM unless asserted)
 ```
 
-This rule returns immediately for the pair because it is the strongest and most
-actionable explanation.
+One intent removes or relocates the extension point the other is building on.
+This is the strongest and most actionable finding.
 
 The suggestion is scope-kind-aware. When **either** side’s overlapping scope
 kind is `schema`, `migration`, or `config`, regardless of which intent was
@@ -137,14 +130,14 @@ provider-abstraction suggestion described below, named after the destructive
 side’s subject or overlapping scope key. Both are heuristic advice, not
 automatic design decisions.
 
-### FM-C002: divergent replacement
+### FM-C002: divergent rewrite
 
-If both intents are destructive on an overlapping scope and point toward
-different destinations, Foremerge emits:
+If both declared operations are destructive on an overlapping scope, Foremerge
+emits:
 
 ```text
-kind: divergent_replacement
-severity: HIGH
+kind: divergent_rewrite
+severity: HIGH   (MEDIUM unless asserted)
 ```
 
 The suggestion asks agents to choose and record one target design before
@@ -152,13 +145,12 @@ continuing. When either side’s overlapping scope kind is `schema`,
 `migration`, or `config`, it instead suggests agreeing the migration order
 explicitly, as in FM-C001.
 
-### FM-C003: shared semantic scope
+### FM-C003: shared contract
 
-If either intent modifies the scope, or both intents are additive, Foremerge
-emits:
+If both declared operations are additive, Foremerge emits:
 
 ```text
-kind: shared_semantic_scope
+kind: shared_contract
 severity: MEDIUM
 ```
 
@@ -167,12 +159,14 @@ agree on a contract or dependency order.
 
 ### FM-C004: duplicate work
 
-Foremerge tokenizes both summaries, splits CamelCase, removes a small stop-word
-set, and calculates Jaccard similarity. It emits a medium `duplicate_work`
-finding when:
+Whether two intents are the same work is a judgement about goals, so this
+finding is never asserted. Foremerge tokenizes both summaries, splits CamelCase,
+removes a small stop-word set, and calculates Jaccard similarity. It emits a
+medium `duplicate_work` finding when:
 
 - summary similarity is at least `0.62`; or
-- operations match, scopes overlap, and summary similarity is above `0.42`.
+- the declared operations match, scopes overlap, and summary similarity is
+  above `0.42`.
 
 One pair can receive both shared-scope and duplicate-work findings. The
 suggestion asks the agents to coordinate ownership: compare intended outcomes
@@ -196,20 +190,23 @@ The new claim is still created. This is the concrete meaning of “soft claim”
 Agent A publishes:
 
 ```text
-Replace PaymentService with StripePaymentService
-scope: symbol:PaymentService
+Consolidate all payment handling onto Stripe
+scope: symbol:PaymentService  operation: replace
 ```
 
 Agent B preflights or publishes:
 
 ```text
-Add PayPal support to PaymentService
-scope: symbol:PaymentService
+Back PaymentService with an additional PayPal gateway
+scope: symbol:PaymentService  operation: extend
 ```
 
-The summaries infer `replace PaymentService` and `extend PaymentService`, while
-the explicit scopes match exactly. FM-C001 returns a high-severity conflict
-before either agent needs to modify a file.
+Both declared an operation on the same canonical scope, so FM-C001 asserts a
+high-severity conflict before either agent needs to modify a file.
+
+Note that neither summary contains the word "replace" or "add". Under the old
+prose inference this pair produced nothing at all. The verdict now follows from
+the declarations, so how either agent phrased its plan is irrelevant.
 
 The suggestion generator strips a `Service` suffix and proposes a stable
 provider contract:
@@ -230,7 +227,7 @@ Each finding contains:
 ```json
 {
   "id": "cfl_...",
-  "kind": "replace_vs_extend",
+  "kind": "destructive_vs_additive",
   "severity": "HIGH",
   "score": 0.989,
   "source_intent_id": "int_...",
@@ -240,6 +237,7 @@ Each finding contains:
   "suggestion": "...",
   "evidence": {
     "rule": "FM-C001",
+    "asserted": true,
     "source_operation": "extend",
     "target_operation": "replace",
     "overlap": "exact semantic scope",
@@ -294,13 +292,17 @@ decision, appends `conflict.overridden`, and changes affected high findings to
 
 ## Known limitations
 
-- Verb and identifier extraction is English-only and heuristic.
+- A declared operation is only as good as the declaration. An agent that
+  declares `extend` and then rewrites the thing is not detectable here, and no
+  rule in this document claims otherwise.
 - Scope hierarchy is not modeled; `domain:payments` does not automatically imply
   every payment symbol.
 - Dependency edges and schema compatibility are not yet evaluated by rules.
 - File overlap and AST ownership are not conflict signals in this release.
-- Synonyms outside the lexicon can be missed.
-- Broad or inaccurate agent-supplied scopes cause false positives or negatives.
+- Prose inference, used only by CLI callers who omit `--operation`, remains
+  English-only and misses phrasings outside its lexicon. That is why it never
+  asserts.
+- Broad or inaccurate agent-declared scopes cause false positives or negatives.
 - A missing finding never proves semantic compatibility.
 
 These limitations are why Foremerge returns evidence and suggestions rather
@@ -308,8 +310,15 @@ than silently blocking work at claim time.
 
 ## Extension path
 
-Additional analyzers should preserve the same finding contract and remain
-optional. Candidates include explicit structured effect objects, scope
-hierarchies, dependency reachability, tree-sitter symbol extraction, API/schema
-compatibility rules, embeddings, and model-assisted suggestions. Deterministic
-rules should remain available as the offline baseline and test oracle.
+Additional analyzers should preserve the same finding contract, remain
+optional, and respect the same boundary: assert only what follows from
+declarations, and surface everything else for the agent to judge. Candidates
+include scope hierarchies, dependency reachability, tree-sitter symbol
+extraction, and API/schema compatibility rules. Deterministic rules should
+remain available as the offline baseline and test oracle.
+
+Foremerge deliberately ships no model of its own. The clients driving it are
+already models, and asking the calling agent to judge an overlap costs no
+inference, no API key, and no network round trip, while producing better
+provenance than a similarity score: `record_assessment` stores what the agent
+concluded and why.

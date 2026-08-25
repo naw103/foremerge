@@ -25,7 +25,8 @@ fn run(label: &str, first: (&str, &str, Vec<ScopeClaim>), second: (&str, &str, V
                 capabilities: vec![],
                 worktree: None,
             })
-            .unwrap();
+            .unwrap()
+            .agent;
         let outcome = service
             .publish_intent(PublishIntentRequest {
                 agent_id: agent.id.clone(),

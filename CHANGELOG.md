@@ -9,13 +9,42 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
-Opening a store with this release migrates it to database schema 5. Symbol
-scopes are now normalized, so every canonical form stored under an older schema
-is recomputed: the scope projection is rebuilt from `intents.scopes_json`, which
-is the source of truth and is untouched, and claims are recomputed in place.
-Where normalization makes two live claims on one intent share a scope, the
-longest-lived is kept and the others are released. An older Foremerge build will
-refuse to open a schema 5 store rather than migrate it backwards.
+### Changed
+
+- **Breaking.** An intent now declares what it does to each scope. `scopes`
+  entries carry an `operation`: `add`, `extend` or `modify`, which preserve
+  what other work depends on, or `replace`, `remove`, `rename` or `migrate`,
+  which do not. The operation sits on the scope rather than the intent because
+  an intent routinely replaces one thing while adding another. Conflict
+  detection is then a comparison of two declared operations on one declared
+  scope, which is a fact rather than a reading of the summary.
+
+  Detection previously recovered the operation from prose by keyword. That
+  cannot work, and the probe added alongside this change measured how badly:
+  nine of ten genuine replace-versus-extend conflicts went unreported because
+  their phrasing fell outside a 26-word vocabulary, while every one of nine
+  compatible pairs raised a HIGH by containing a destructive word somewhere in
+  the sentence. "Delete the flaky ThumbnailCache benchmark test" was read as
+  destroying `ThumbnailCache`. Widening the vocabulary only moves the boundary,
+  and detection needs a known verb on both sides, so coverage was the product
+  of two incomplete lists. The agent already knows which operation it means, so
+  it now says so. The same ten phrasings all reach the same verdict.
+
+  Migration: MCP and HTTP callers add `"operation"` to each scope object. CLI
+  callers write `--scope symbol:PaymentService=replace`. Omitting it at the CLI
+  still works, and infers the operation from the summary, but an inferred
+  operation never asserts.
+
+- Conflict kinds renamed to match what they describe: `replace_vs_extend` is
+  now `destructive_vs_additive`, `divergent_replacement` is
+  `divergent_rewrite`, and `shared_semantic_scope` is `shared_contract`.
+
+- Foremerge now distinguishes what it asserts from what it merely surfaces.
+  A finding is asserted only when both sides declared an operation on the same
+  canonical scope. A fuzzy scope match, or an operation inferred from prose, is
+  capped below HIGH and offered as a candidate instead, because the ambiguity
+  that had to be resolved to produce it is the ambiguity that cannot be
+  resolved reliably. Every finding carries `asserted` in its evidence.
 
 ### Added
 
@@ -34,6 +63,26 @@ refuse to open a schema 5 store rather than migrate it backwards.
   the code was correct, which costs a debugging cycle every time because the
   first hypothesis is always a regression. The bounds are now generous by
   default and raisable, and the failure messages name the variable.
+- `publish_intent` returns `related_work` alongside `conflicts`: each other
+  active intent that touches this one, with its agent, status, and every
+  overlapping scope showing both declared operations and how they interact.
+  Foremerge states what overlaps; whether that is a conflict, a duplicate or a
+  dependency is a judgement about intent, and the agent doing the work is
+  better placed to make it than any rule in the detector.
+- `record_assessment` stores that judgement: a verdict of `conflicts`,
+  `compatible`, `duplicate` or `depends_on`, a rationale, and the action taken.
+  It is available as an MCP tool, as `POST /v1/assessments`, and as
+  `foremerge assess record`. `GET /v1/intents/{id}/assessments` and
+  `foremerge assess list` read them back. This is better provenance than a
+  similarity score, and it is the measurement that matters: whether agents
+  engage with what they are shown.
+- `tests/paraphrase_probe.rs` runs the same ten pairs through both paths and
+  fails the build if a declared verdict ever depends on wording, if compatible
+  work reaches HIGH, or if an inferred operation asserts.
+- `tests/full_flow_probe.rs` reports everything two agents exchange across
+  register, publish, claim and assess, rather than the output of a single
+  detector call.
+
 
 - `foremerge work adopt` transfers an intent whose agent has stopped. An agent
   that died mid-task previously left its intent owned forever by an agent that
@@ -135,6 +184,24 @@ refuse to open a schema 5 store rather than migrate it backwards.
   yet rather than a different class of problem. Deciding whether intent
   classification should stay lexical is tracked separately.
 
+### Migration
+
+Opening a store with this release migrates it to database schema 6. The
+`intent_scopes` projection gains `operation` and `operation_inferred` columns
+and an `assessments` table is created. Intents written by an older build
+recorded only the scope, so their operation is recovered from the summary and
+marked inferred, which is the strongest claim the stored data supports. An
+older Foremerge build will refuse to open a schema 6 store rather than migrate
+it backwards.
+
+
+Opening a store with this release migrates it to database schema 5. Symbol
+scopes are now normalized, so every canonical form stored under an older schema
+is recomputed: the scope projection is rebuilt from `intents.scopes_json`, which
+is the source of truth and is untouched, and claims are recomputed in place.
+Where normalization makes two live claims on one intent share a scope, the
+longest-lived is kept and the others are released. An older Foremerge build will
+refuse to open a schema 5 store rather than migrate it backwards.
 
 ## [0.3.1] - 2026-08-24
 

@@ -34,14 +34,17 @@ The full method, metrics, controls, and reporting requirements are in
 
 Each file in `scenarios/` contains:
 
-- `schema_version`: version of this fixture shape;
+- `schema_version`: version of this fixture shape (2 declares scope operations);
 - `id`, `title`, and `category`: stable identifiers and grouping;
 - `description`: the coordination problem under test;
-- `agents`: task, intent, and typed semantic scopes supplied to each agent;
+- `agents`: task, intent, and typed semantic scopes supplied to each agent,
+  each scope carrying the operation that agent performs on it;
 - `ground_truth`: reviewer-defined expected warning behavior and why; and
 - `success_criteria`: observable conditions, not subjective marketing claims.
 
-Scopes use the same `kind` and `key` representation as the Foremerge protocol.
+Scopes use the same `kind`, `key` and `operation` representation as the
+Foremerge protocol. Declaring the operation is what makes a fixture test the
+detector rather than the phrasing of its prose.
 Scenario prose intentionally avoids prescribing file names when the conflict is
 conceptual.
 

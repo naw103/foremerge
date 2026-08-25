@@ -50,7 +50,7 @@ stripe_intent_body=$(jq -n --arg agent "$stripe_agent_id" '{
   task: "modernize-payments",
   summary: "Replace PaymentService with StripePaymentService",
   rationale: "Move the existing implementation behind Stripe",
-  scopes: [{kind: "symbol", key: "PaymentService"}],
+  scopes: [{kind: "symbol", key: "PaymentService", operation: "replace"}],
   depends_on: [],
   metadata: {}
 }')
@@ -61,7 +61,7 @@ paypal_intent_body=$(jq -n --arg agent "$paypal_agent_id" '{
   task: "add-paypal",
   summary: "Add PayPal support to PaymentService",
   rationale: "Support another payment provider",
-  scopes: [{kind: "symbol", key: "PaymentService"}],
+  scopes: [{kind: "symbol", key: "PaymentService", operation: "extend"}],
   depends_on: [],
   metadata: {}
 }')
@@ -70,7 +70,7 @@ paypal_intent_id=$(printf '%s\n' "$paypal_intent_response" | jq -er '.data.inten
 
 printf '\nConflict returned while publishing Agent B intent\n'
 printf '%s\n' "$paypal_intent_response" |
-  jq '.data.conflicts[] | {kind, severity, scope, explanation, suggestion, evidence}'
+  jq '.data | {conflicts: [.conflicts[] | {kind, severity, scope, explanation, suggestion, evidence}], related_work, assessment_required}'
 
 conflict_check_body=$(jq -n --arg intent "$paypal_intent_id" '{intent_id: $intent}')
 printf '\nExplicit conflict check\n'

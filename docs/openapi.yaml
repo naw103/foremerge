@@ -218,7 +218,7 @@ paths:
   /v1/intents:
     post:
       operationId: publishIntent
-      summary: Publish intent and return pre-code conflicts
+      summary: Publish intent and return pre-code conflicts plus related work to assess
       requestBody:
         required: true
         content:
@@ -236,6 +236,40 @@ paths:
     get:
       operationId: getIntent
       summary: Read one intent, its agent, and current open conflicts
+      parameters:
+        - $ref: "#/components/parameters/IntentId"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/assessments:
+    post:
+      operationId: recordAssessment
+      summary: Record what this agent concluded about one related intent
+      description: >
+        Foremerge states which scopes overlap and how the declared operations
+        relate. Whether that is a conflict, a duplicate or a dependency is a
+        judgement about intent, which the agent doing the work records here.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecordAssessmentRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/intents/{id}/assessments:
+    get:
+      operationId: listAssessments
+      summary: Read every assessment recorded for one intent
       parameters:
         - $ref: "#/components/parameters/IntentId"
       responses:
@@ -536,6 +570,105 @@ components:
         key:
           type: string
           minLength: 1
+    Operation:
+      type: string
+      description: >
+        What an intent does to one scope. add, extend and modify preserve what
+        other work depends on; replace, remove, rename and migrate do not.
+      enum: [add, extend, modify, replace, remove, rename, migrate]
+    ScopeClaim:
+      type: object
+      description: >
+        A scope together with the operation the declaring intent performs on it.
+        Declared by the caller rather than inferred from the summary.
+      required: [kind, key, operation]
+      properties:
+        kind:
+          type: string
+          enum: [symbol, api, schema, config, infra, test, migration, env, file, component, contract, domain]
+        key:
+          type: string
+          minLength: 1
+        operation:
+          $ref: '#/components/schemas/Operation'
+        inferred:
+          type: boolean
+          description: >
+            True when the operation was recovered from prose instead of
+            declared, which happens only for CLI callers. An inferred operation
+            never produces an asserted conflict.
+    Interaction:
+      type: string
+      description: How two declared operations on one scope relate.
+      enum: [destructive_vs_additive, divergent_rewrite, shared_contract]
+    ScopeOverlapView:
+      type: object
+      required: [scope, your_operation, their_operation, interaction, asserted]
+      properties:
+        scope:
+          $ref: '#/components/schemas/Scope'
+        your_operation:
+          $ref: '#/components/schemas/Operation'
+        their_operation:
+          $ref: '#/components/schemas/Operation'
+        interaction:
+          $ref: '#/components/schemas/Interaction'
+        asserted:
+          type: boolean
+    RelatedWork:
+      type: object
+      description: >
+        Another agent's active intent that touches this one. Foremerge states
+        what overlaps; the caller decides what it means and records that with
+        POST /v1/assessments.
+      required: [intent_id, agent_id, agent, task, summary, status, overlap, asserted]
+      properties:
+        intent_id: { type: string }
+        agent_id: { type: string }
+        agent: { type: string }
+        task: { type: string }
+        summary: { type: string }
+        status: { type: string }
+        overlap:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScopeOverlapView'
+        why_surfaced:
+          type: string
+        asserted:
+          type: boolean
+    RecordAssessmentRequest:
+      type: object
+      required: [agent_id, intent_id, related_intent_id, verdict, rationale, action]
+      properties:
+        agent_id: { type: string }
+        intent_id: { type: string }
+        related_intent_id: { type: string }
+        verdict:
+          type: string
+          enum: [conflicts, compatible, duplicate, depends_on]
+        rationale:
+          type: string
+          minLength: 1
+        action:
+          type: string
+          enum: [proceeding, rescoping, waiting, abandoning]
+    Assessment:
+      type: object
+      required: [id, agent_id, intent_id, related_intent_id, verdict, rationale, action, created_at]
+      properties:
+        id: { type: string }
+        agent_id: { type: string }
+        intent_id: { type: string }
+        related_intent_id: { type: string }
+        verdict:
+          type: string
+          enum: [conflicts, compatible, duplicate, depends_on]
+        rationale: { type: string }
+        action:
+          type: string
+          enum: [proceeding, rescoping, waiting, abandoning]
+        created_at: { type: string }
     RegisterAgentRequest:
       type: object
       required: [name]
@@ -569,7 +702,7 @@ components:
         scopes:
           type: array
           items:
-            $ref: "#/components/schemas/Scope"
+            $ref: "#/components/schemas/ScopeClaim"
           default: []
         depends_on:
           type: array
@@ -615,7 +748,7 @@ components:
         scopes:
           type: array
           items:
-            $ref: "#/components/schemas/Scope"
+            $ref: "#/components/schemas/ScopeClaim"
           default: []
       anyOf:
         - required: [intent_id]

@@ -142,17 +142,47 @@ An intent is useful before code exists:
   "summary": "Replace PaymentService with StripePaymentService",
   "rationale": "Move the existing implementation behind Stripe",
   "scopes": [
-    {"kind": "symbol", "key": "PaymentService"},
-    {"kind": "domain", "key": "payments"}
+    {"kind": "symbol", "key": "PaymentService", "operation": "replace"},
+    {"kind": "domain", "key": "payments", "operation": "modify"}
   ],
   "depends_on": [],
   "metadata": {}
 }
 ```
 
+Each declared scope carries the operation this intent performs on it. `add`,
+`extend` and `modify` preserve what other work depends on; `replace`, `remove`,
+`rename` and `migrate` do not. The operation is declared rather than inferred
+from the summary, because the agent knows which it means and English paraphrase
+is not recoverable by keyword matching. An intent commonly treats its scopes
+differently, which is why the operation belongs on the scope.
+
 Publication persists the intent, updates the semantic graph, appends an event,
-and checks it against active work. The response returns both the intent and any
-immediately detected conflicts.
+and checks it against active work. The response returns the intent, any
+immediately detected conflicts, and `related_work`: other agents' active
+intents that touch this one, each overlapping scope carrying both declared
+operations and how they interact.
+
+Foremerge states what overlaps. Whether that constitutes a conflict, a
+duplicate or a dependency is a judgement about intent, and the agent doing the
+work records it:
+
+```json
+{
+  "agent_id": "agt_...",
+  "intent_id": "int_...",
+  "related_intent_id": "int_...",
+  "verdict": "conflicts",
+  "rationale": "Their replacement removes the extension point this intent needs",
+  "action": "rescoping"
+}
+```
+
+`verdict` is one of `conflicts`, `compatible`, `duplicate`, or `depends_on`.
+`action` is one of `proceeding`, `rescoping`, `waiting`, or `abandoning`. The
+assessment is stored, linked in the graph, and appended to the event log, so a
+later reader sees not only that two intents overlapped but what was decided and
+why.
 
 The CLI string parser and MCP schema currently recognize these scope kinds:
 

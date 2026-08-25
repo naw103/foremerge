@@ -146,8 +146,8 @@ fm_curl \
     "summary": "Replace PaymentService with StripePaymentService",
     "rationale": "Introduce Stripe as a provider implementation",
     "scopes": [
-      {"kind": "symbol", "key": "PaymentService"},
-      {"kind": "contract", "key": "PaymentService"}
+      {"kind": "symbol", "key": "PaymentService", "operation": "replace"},
+      {"kind": "contract", "key": "PaymentService", "operation": "replace"}
     ],
     "depends_on": [],
     "metadata": {}
@@ -156,18 +156,63 @@ fm_curl \
 
 The response envelope contains:
 
+Each declared scope carries the operation the intent performs on it: `add`,
+`extend` or `modify`, which preserve what other work depends on, or `replace`,
+`remove`, `rename` or `migrate`, which do not.
+
+The response envelope contains:
+
 ```json
 {
   "ok": true,
   "data": {
     "intent": {},
-    "conflicts": []
+    "conflicts": [],
+    "related_work": [
+      {
+        "intent_id": "int_...",
+        "agent": "paypal-agent",
+        "summary": "Back PaymentService with an additional PayPal gateway",
+        "status": "CLAIMED",
+        "overlap": [
+          {
+            "scope": {"kind": "symbol", "key": "PaymentService"},
+            "your_operation": "replace",
+            "their_operation": "extend",
+            "interaction": "destructive_vs_additive",
+            "asserted": true
+          }
+        ],
+        "asserted": true
+      }
+    ],
+    "assessment_required": true,
+    "next": "Assess each entry in related_work ..."
   }
 }
 ```
 
 Conflict detection is part of publication, so a client does not need a second
 request to learn about existing incompatible work.
+
+`related_work` states what overlaps. Deciding what the overlap means is the
+caller's, recorded with `POST /v1/assessments`:
+
+```bash
+fm_curl \
+  -H 'content-type: application/json' \
+  -X POST "$FOREMERGE_URL/v1/assessments" \
+  -d '{
+    "agent_id": "agt_REPLACE_ME",
+    "intent_id": "int_REPLACE_ME",
+    "related_intent_id": "int_OTHER",
+    "verdict": "conflicts",
+    "rationale": "Their replacement removes the extension point this intent needs",
+    "action": "rescoping"
+  }' | jq .
+```
+
+`GET /v1/intents/{id}/assessments` reads them back.
 
 ## Claim semantic work
 

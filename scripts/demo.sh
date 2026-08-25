@@ -71,7 +71,7 @@ stripe_result="$({
     --agent "$stripe_agent" \
     --task replace-payments \
     --summary 'Replace PaymentService with StripePaymentService' \
-    --scope symbol:PaymentService
+    --scope symbol:PaymentService=replace
 })"
 printf '%s\n' "$stripe_result" | python3 -m json.tool
 stripe_intent="$(printf '%s\n' "$stripe_result" | json_get "json.load(sys.stdin)['data']['intent']['id']")"
@@ -82,7 +82,7 @@ paypal_result="$({
     --agent "$paypal_agent" \
     --task add-paypal \
     --summary 'Add PayPal support to PaymentService' \
-    --scope symbol:PaymentService
+    --scope symbol:PaymentService=extend
 })"
 printf '%s\n' "$paypal_result" | python3 -m json.tool
 conflict_id="$(printf '%s\n' "$paypal_result" | json_get "json.load(sys.stdin)['data']['conflicts'][0]['id']")"

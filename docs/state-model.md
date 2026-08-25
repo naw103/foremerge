@@ -33,7 +33,7 @@ An intent describes planned work before implementation finishes:
 - owning agent and task;
 - concise summary;
 - optional rationale;
-- semantic scopes;
+- semantic scopes, each carrying the operation the intent performs on it;
 - caller-supplied dependency identifiers;
 - free-form metadata;
 - lifecycle status.
@@ -46,6 +46,19 @@ intents, and an intent may have several claims and changesets.
 A claim associates an agent and intent with one semantic scope. Claims have a
 lease expiry and remain advisory. Two overlapping active claims may coexist;
 Foremerge reports the overlap so agents can coordinate.
+
+### Assessment
+
+An assessment records what one agent concluded about another agent's related
+intent: a verdict of `conflicts`, `compatible`, `duplicate` or `depends_on`, a
+rationale, and the action taken (`proceeding`, `rescoping`, `waiting` or
+`abandoning`).
+
+Foremerge states which scopes overlap and how the declared operations relate.
+Whether that constitutes a conflict is a judgement about intent, which the
+agent doing the work is better placed to make than any rule in the detector.
+Assessments are how that judgement becomes durable provenance rather than
+something that happened only inside one agent's context.
 
 ### ChangeSet
 

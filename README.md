@@ -67,11 +67,16 @@ These agents can work in different trees without touching the same line. The
 plans still collide: one removes the extension point while the other depends on
 it.
 
-Foremerge compares their declared `symbol:PaymentService` scope and intent
-language before implementation. Its deterministic `replace_vs_extend` rule
-raises a `HIGH` advisory and suggests coordinating on a stable abstraction such
-as `PaymentProvider`. That suggestion is explainable evidence, not an automatic
-architecture decision or a hard lock.
+Both agents declare the same `symbol:PaymentService` scope, one saying it will
+`replace` it and the other that it will `extend` it. Foremerge compares those
+two declarations before either writes code, raises a `HIGH` advisory, and
+suggests coordinating on a stable abstraction such as `PaymentProvider`. That
+suggestion is explainable evidence, not an automatic architecture decision or a
+hard lock.
+
+Because the operation is declared rather than read out of the summary, it does
+not matter how either agent phrased its plan. "Consolidate payments onto
+Stripe" and "Replace PaymentService with Stripe" reach the same verdict.
 
 Git remains the durable repository. Foremerge supplies the missing shared
 awareness above it.
@@ -186,7 +191,7 @@ STRIPE_RESULT=$(
     --agent "$STRIPE_AGENT" \
     --task "modernize-payments" \
     --summary "Replace PaymentService with StripePaymentService" \
-    --scope symbol:PaymentService
+    --scope symbol:PaymentService=replace
 )
 STRIPE_INTENT=$(printf '%s\n' "$STRIPE_RESULT" | jq -er '.data.intent.id')
 
@@ -202,15 +207,21 @@ PAYPAL_RESULT=$(
     --agent "$PAYPAL_AGENT" \
     --task "add-paypal" \
     --summary "Add PayPal support to PaymentService" \
-    --scope symbol:PaymentService
+    --scope symbol:PaymentService=extend
 )
 PAYPAL_INTENT=$(printf '%s\n' "$PAYPAL_RESULT" | jq -er '.data.intent.id')
 
 printf '%s\n' "$PAYPAL_RESULT" |
   jq '.data.conflicts[] | {kind, severity, scope, explanation, suggestion}'
+
+printf '%s\n' "$PAYPAL_RESULT" |
+  jq '.data.related_work[] | {agent, summary, asserted, overlap}'
 ```
 
-The last command prints the live finding from your local run. No files need to
+The first command prints the live finding from your local run. The second
+prints `related_work`: the other agent's intent and every overlapping scope
+with both declared operations. Foremerge states what overlaps; you decide what
+it means and record that with `foremerge assess record`. No files need to
 change first. Inspect the captured, clearly labeled transcript in
 [`examples/terminal-session.txt`](examples/terminal-session.txt).
 
@@ -322,12 +333,13 @@ Common commands:
 | Boundary | Command |
 | --- | --- |
 | Register provenance | `foremerge agent register --name NAME --model MODEL` |
-| Publish intent | `foremerge intent publish --agent ID --task TASK --summary TEXT --scope KIND:KEY` |
+| Publish intent | `foremerge intent publish --agent ID --task TASK --summary TEXT --scope KIND:KEY=OPERATION` |
 | Claim scope | `foremerge work claim --agent ID --intent ID --scope KIND:KEY` |
 | Start implementation | `foremerge work start INTENT_ID --agent AGENT_ID` |
 | Ask who is changing it | `foremerge work query --scope KIND:KEY` |
 | See what every agent is doing | `foremerge status` |
-| Preflight a plan | `foremerge conflicts check --intent TEXT --scope KIND:KEY` |
+| Preflight a plan | `foremerge conflicts check --intent TEXT --scope KIND:KEY=OPERATION` |
+| Record what you concluded | `foremerge assess record --agent ID --intent ID --related-intent-id ID --verdict V --rationale TEXT --action A` |
 | Send coordination | `foremerge coordinate send --from ID --to ID --message TEXT` |
 | Watch semantic events | `foremerge work watch --after-seq 0` |
 
@@ -423,7 +435,8 @@ adapters over the same database.
 | Tool | Purpose |
 | --- | --- |
 | `register_agent` | Record agent, model, capabilities, and worktree provenance |
-| `publish_intent` | Announce planned work and receive immediate conflicts |
+| `publish_intent` | Announce planned work, declare what it does to each scope, and receive conflicts plus related work to assess |
+| `record_assessment` | Record what you concluded about one related intent and what you will do |
 | `claim_work` | Create leased advisory claims on semantic scopes |
 | `query_work` | Find agents, intents, claims, ChangeSets, and conflicts |
 | `check_conflicts` | Check a published or provisional intent before code changes |
