@@ -600,6 +600,11 @@ pub struct StatusIntent {
     pub agent_id: String,
     pub agent_name: String,
     pub summary: String,
+    /// Set when this intent is in a working state but nothing is holding it:
+    /// every claim has lapsed and its agent has gone silent. The work is not
+    /// progressing and can be taken over with `foremerge work adopt`.
+    #[serde(default)]
+    pub stranded: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

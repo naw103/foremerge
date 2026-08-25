@@ -2464,6 +2464,19 @@ impl Foremerge {
                 });
             }
         }
+        let stale_agents: std::collections::HashSet<String> = agents
+            .iter()
+            .filter(|agent| agent.stale)
+            .map(|agent| agent.id.clone())
+            .collect();
+        let mut statement = tx.prepare(
+            "SELECT DISTINCT intent_id FROM claims
+             WHERE status = 'ACTIVE' AND lease_expires_at > ?1",
+        )?;
+        let intents_with_live_claims: std::collections::HashSet<String> = statement
+            .query_map([Utc::now().to_rfc3339()], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+        drop(statement);
         let agent_name = |agent_id: &str| {
             agent_names
                 .get(agent_id)
@@ -2499,6 +2512,14 @@ impl Foremerge {
                     agent_id: intent.agent_id.clone(),
                     agent_name: agent_name(&intent.agent_id),
                     summary: intent.summary.clone(),
+                    // An intent that says IN_PROGRESS while nothing holds it
+                    // and nobody is home is not in progress. Reporting it as
+                    // though it were is how a finished run still looked busy.
+                    stranded: matches!(
+                        intent.status.as_str(),
+                        "CLAIMED" | "IN_PROGRESS" | "PROVISIONAL"
+                    ) && stale_agents.contains(&intent.agent_id)
+                        && !intents_with_live_claims.contains(&intent.id),
                 })
                 .collect();
             if !members.is_empty() {
