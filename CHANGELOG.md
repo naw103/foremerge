@@ -9,6 +9,8 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-24
+
 ### Fixed
 
 - Validation now refuses to start when excluded generated files are already
@@ -198,7 +200,8 @@ changes when they are called out here with a migration note.
 - Apache-2.0 licensing, contribution and security policies, CI, release checks,
   limitations, roadmap, and a reproducible benchmark specification.
 
-[Unreleased]: https://github.com/naw103/foremerge/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/naw103/foremerge/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/naw103/foremerge/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/naw103/foremerge/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/naw103/foremerge/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/naw103/foremerge/releases/tag/v0.1.0

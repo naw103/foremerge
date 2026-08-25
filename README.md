@@ -11,7 +11,7 @@ above Git. Agents keep isolated worktrees while sharing intent, semantic
 claims, dependencies, provisional ChangeSets, decisions, validation, and
 provenance.
 
-> **Status:** Foremerge `0.3.0` is a pre-1.0, local-first MVP. The CLI, JSON API,
+> **Status:** Foremerge `0.3.1` is a pre-1.0, local-first MVP. The CLI, JSON API,
 > MCP server, SQLite store, deterministic conflict detector, and
 > verification-gated lifecycle are implemented. Public schemas may still
 > change. Shared multi-machine mode and published benchmark results do not yet

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Foremerge local JSON API
-  version: 0.3.0
+  version: 0.3.1
   description: >-
     Local-first semantic coordination API above Git. Successful responses use
     an ok/data envelope. All versioned routes require bearer authentication when
