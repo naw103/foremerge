@@ -166,9 +166,10 @@ worktrees, because dependency directories are usually gitignored and
 `git worktree add` will not create them.
 
 Use `setup codex`, `setup claude`, or `setup cursor` for one client. Setup
-preserves unrelated configuration (including key order in project MCP JSON) and
-refuses to replace a differing or stale skill or Foremerge MCP entry unless you
-explicitly pass `--force`. `setup all` attempts every client and reports each
+preserves unrelated configuration (including key order in project MCP JSON).
+Upgrading Foremerge refreshes its own unedited skill file in place, but a skill
+file you edited, or a differing Foremerge MCP entry, is never replaced unless
+you explicitly pass `--force`. `setup all` attempts every client and reports each
 result, exiting nonzero if any failed. The Codex MCP registration is user-level
 and points at one repository at a time; see
 [agent client setup](docs/agent-clients.md).
