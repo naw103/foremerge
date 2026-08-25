@@ -74,10 +74,32 @@ pub async fn run_stdio(service: Foremerge) -> anyhow::Result<()> {
 /// paste. The catalog is consulted rather than a hand-written list so the hint
 /// cannot drift as tools are added.
 fn interactive_parse_hint(input: &str) -> String {
-    let known = tool_catalog()
-        .iter()
-        .any(|tool| tool.get("name").and_then(Value::as_str) == Some(input));
-    if known {
+    let Some(tool) = tool_catalog()
+        .into_iter()
+        .find(|tool| tool.get("name").and_then(Value::as_str) == Some(input))
+    else {
+        return format!(
+            "This interface reads one JSON-RPC message per line, so \"{input}\" was not understood.\n\
+             If you meant to use Foremerge yourself, run `foremerge --help` instead."
+        );
+    };
+
+    // Most tools take arguments, so an empty-argument call would be rejected.
+    // Only offer a line to paste when that line actually works, which means
+    // the tool accepts no input at all. An empty `required` list is not enough:
+    // `check_conflicts` declares none yet still demands an intent at runtime.
+    let schema = tool.get("inputSchema");
+    let required: Vec<&str> = schema
+        .and_then(|schema| schema.get("required"))
+        .and_then(Value::as_array)
+        .map(|names| names.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let takes_no_input = schema
+        .and_then(|schema| schema.get("properties"))
+        .and_then(Value::as_object)
+        .is_some_and(|properties| properties.is_empty());
+
+    if takes_no_input {
         let call = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -90,9 +112,24 @@ fn interactive_parse_hint(input: &str) -> String {
              Reading the same state with `foremerge status` in another terminal is easier."
         );
     }
+
+    let schema_request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list",
+        "params": {}
+    });
+    let needs = if required.is_empty() {
+        "this one takes arguments".to_string()
+    } else {
+        format!("this one needs arguments: {}", required.join(", "))
+    };
     format!(
-        "This interface reads one JSON-RPC message per line, so \"{input}\" was not understood.\n\
-         If you meant to use Foremerge yourself, run `foremerge --help` instead."
+        "\"{input}\" is a real tool, but this interface reads JSON-RPC rather than bare\n\
+         tool names, and {needs}.\n\n\
+         To see its full schema, paste:\n\n    {schema_request}\n\n\
+         Driving the lifecycle by hand is rarely what you want. `foremerge --help` exposes\n\
+         the same operations as ordinary commands."
     )
 }
 
@@ -806,6 +843,65 @@ mod tests {
                 "{name} was not recognised"
             );
         }
+    }
+
+    /// The previous version of this test only checked that the offered line was
+    /// syntactically valid JSON, which it was, while being rejected at runtime
+    /// for every tool that takes required arguments. Execute it instead.
+    #[tokio::test]
+    async fn every_line_the_hint_offers_actually_succeeds() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        for tool in tool_catalog() {
+            let name = tool["name"].as_str().unwrap().to_string();
+            let required = tool
+                .get("inputSchema")
+                .and_then(|schema| schema.get("required"))
+                .and_then(Value::as_array)
+                .map(|names| names.len())
+                .unwrap_or(0);
+
+            let hint = interactive_parse_hint(&name);
+            let line = hint
+                .lines()
+                .find(|line| line.trim_start().starts_with('{'))
+                .unwrap_or_else(|| panic!("{name}: hint offered no request at all"));
+            let message: Value =
+                serde_json::from_str(line.trim()).expect("the offered line is valid JSON");
+
+            // A tools/call may only be offered when it needs no arguments.
+            if message["method"] == "tools/call" {
+                assert_eq!(
+                    required, 0,
+                    "{name} requires {required} argument(s) but was offered as a bare call"
+                );
+            }
+
+            let response = handle_message(&service, message)
+                .await
+                .unwrap_or_else(|| panic!("{name}: no response"));
+            assert!(
+                response.get("error").is_none(),
+                "{name}: offered line returned a protocol error: {response}"
+            );
+            assert!(
+                !response["result"]["isError"].as_bool().unwrap_or(false),
+                "{name}: offered line failed at runtime: {}",
+                response["result"]["structuredContent"]
+            );
+        }
+    }
+
+    #[test]
+    fn tools_needing_arguments_name_them_instead_of_offering_a_broken_call() {
+        // publish_intent requires agent_id, task and summary.
+        let hint = interactive_parse_hint("publish_intent");
+        for field in ["agent_id", "task", "summary"] {
+            assert!(hint.contains(field), "hint should name {field}:\n{hint}");
+        }
+        assert!(
+            !hint.contains("tools/call"),
+            "a tool needing arguments must not be offered as a call:\n{hint}"
+        );
     }
 
     #[test]
