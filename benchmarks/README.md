@@ -64,7 +64,11 @@ conceptual.
 2. Write each task as it would be presented to an agent; do not add hints only to
    the coordinated condition.
 3. Label the expected conflict independently with a second reviewer.
-4. Include a negative control when introducing a new detector rule.
+4. Include a negative control when introducing a new detector rule. The corpus
+   must reach at least three independent-work scenarios per conflict scenario
+   before any comparative result is published, because concurrent agent pairs
+   in real repositories are overwhelmingly independent and behaviour on
+   independent work decides whether people keep the tool switched on.
 5. Make every success criterion observable in events, process output, tests, or
    Git refs.
 6. Validate JSON syntax and run the executable benchmark corpus.
@@ -78,6 +82,12 @@ Result artifacts belong under `results/<date>-<runner-version>/` with the manife
 defined in the benchmark plan. A valid report states whether agents were
 scripted, simulated, or model-driven and identifies every model and source commit.
 
-Do not describe fixture success as proof of reduced engineering time. Comparative
-claims require paired repetitions, raw results, and the analysis described in the
-benchmark plan.
+Do not describe fixture success as proof of reduced engineering time. The three
+outcome claims the project intends to make, and what each requires before it may
+be stated, are defined in [`docs/benchmark-plan.md`](../docs/benchmark-plan.md).
+All three need the three-arm paired runner, which does not exist yet. Until it
+has produced published raw results, none of them may appear in launch material.
+
+In particular, no hours-saved figure may be published without a separate
+preregistered timed human study. Report conflict and discarded-line counts and
+let readers apply their own cost.
