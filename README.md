@@ -143,6 +143,23 @@ foremerge checks set test -- cargo test --all-targets
 foremerge doctor --client all
 ```
 
+Acceptance is verification-gated: Foremerge runs the check itself rather than
+taking an agent's word for it. Pick a check that is fast and that would actually
+catch a broken handoff, such as a build or a typecheck, rather than a full CI
+suite; this gate decides whether other agents may treat the work as done, and it
+does not replace CI. If this repository has nothing meaningful to verify, say so
+once rather than registering a check that always passes:
+
+```sh
+foremerge checks policy advisory
+```
+
+Work accepted that way is recorded as `UNVERIFIED` with the reason, so the audit
+trail never implies a check ran when none did. `foremerge doctor` reports
+whether the registered checks can actually run here, which matters in agent
+worktrees, because dependency directories are usually gitignored and
+`git worktree add` will not create them.
+
 Use `setup codex`, `setup claude`, or `setup cursor` for one client. Setup
 preserves unrelated configuration (including key order in project MCP JSON) and
 refuses to replace a differing or stale skill or Foremerge MCP entry unless you

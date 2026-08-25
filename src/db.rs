@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::Duration;
 use uuid::Uuid;
 
-const DATABASE_SCHEMA_VERSION: i64 = 4;
+const DATABASE_SCHEMA_VERSION: i64 = 5;
 // Event hashing is versioned independently from the mutable SQLite projection
 // schema. A database migration must not silently change the hash material for
 // otherwise identical events.
@@ -271,6 +271,8 @@ impl Store {
                 integration_commit TEXT,
                 supersedes_changeset_id TEXT REFERENCES changesets(id),
                 worktree TEXT,
+                acceptance_verification TEXT,
+                acceptance_reason TEXT,
                 fingerprint TEXT NOT NULL,
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL,
@@ -529,7 +531,12 @@ impl Store {
                 [],
             )?;
         }
-        for column in ["accepted_commit", "integration_commit"] {
+        for column in [
+            "accepted_commit",
+            "integration_commit",
+            "acceptance_verification",
+            "acceptance_reason",
+        ] {
             let exists: bool = conn.query_row(
                 "SELECT EXISTS(
                    SELECT 1 FROM pragma_table_info('changesets') WHERE name = ?1
@@ -577,7 +584,53 @@ impl Store {
         // an interrupted migration, so every intent is reprojected once.
         // Afterwards only intents with no projection at all need work, which is
         // the ordinary case of a store written by an older binary.
-        let mut statement = if stored_version < 3 {
+        // Schema 5 normalizes symbol scopes, discarding namespace and path
+        // prefixes so `App\\Services\\Report::render` and `Report::render` are
+        // one scope. Every canonical form stored under an older schema was
+        // computed by the old rule, so a store that kept them would have new
+        // rows that could never match old ones: exactly the silent
+        // non-detection this release fixes. The projection is therefore rebuilt
+        // from `intents.scopes_json`, which is the source of truth and is
+        // untouched by the change.
+        if stored_version < 5 {
+            conn.execute("DELETE FROM intent_scopes", [])?;
+            let mut statement = conn.prepare("SELECT id, scope_kind, scope_key FROM claims")?;
+            let claims = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(statement);
+            for (claim_id, kind, key) in claims {
+                let canonical = Scope::new(&kind, &key).canonical();
+                conn.execute(
+                    "UPDATE claims SET canonical_scope = ?2 WHERE id = ?1",
+                    params![claim_id, canonical],
+                )?;
+            }
+            // Two live claims on one intent can now share a canonical scope
+            // where they did not before. Keep the longest-lived and release the
+            // rest, so the intent does not appear to hold the same scope twice.
+            conn.execute(
+                "UPDATE claims SET status = 'RELEASED'
+                 WHERE status = 'ACTIVE' AND id NOT IN (
+                   SELECT id FROM claims c WHERE c.status = 'ACTIVE'
+                   AND c.lease_expires_at = (
+                     SELECT MAX(lease_expires_at) FROM claims d
+                     WHERE d.intent_id = c.intent_id
+                     AND d.canonical_scope = c.canonical_scope
+                     AND d.status = 'ACTIVE'
+                   )
+                   GROUP BY c.intent_id, c.canonical_scope
+                 )",
+                [],
+            )?;
+        }
+        let mut statement = if stored_version < 5 {
             conn.prepare("SELECT id, scopes_json FROM intents")?
         } else {
             conn.prepare(

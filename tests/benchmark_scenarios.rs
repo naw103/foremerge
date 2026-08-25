@@ -231,6 +231,7 @@ async fn run_validation_gate(scenario: &Scenario) {
                 AcceptRequest {
                     git_ref: None,
                     allow_high_conflicts: false,
+                    allow_unverified: false,
                     override_reason: None,
                 },
             )

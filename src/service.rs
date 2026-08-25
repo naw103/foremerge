@@ -1,9 +1,10 @@
+use crate::checks;
 use crate::conflict::{self, IntentCandidate};
 use crate::db::Store;
 use crate::git;
 use crate::model::*;
 use anyhow::{Context, Result, bail};
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -44,6 +45,99 @@ const NONTERMINAL_CHANGESET_STATES: &[&str] = &["PROVISIONAL", "VALIDATED", "ACC
 #[derive(Clone)]
 pub struct Foremerge {
     store: Store,
+}
+
+/// The three honest answers to "what did Foremerge verify about this work".
+pub const VERIFICATION_VERIFIED: &str = "VERIFIED";
+pub const VERIFICATION_FAILED: &str = "FAILED";
+pub const VERIFICATION_UNVERIFIED: &str = "UNVERIFIED";
+
+/// The repository's acceptance policy, read through a connection the caller
+/// already holds. `Foremerge::repository_common_dir` takes the store lock, so
+/// calling it from inside a locked block would deadlock.
+fn acceptance_policy(conn: &Connection) -> Result<checks::AcceptancePolicy> {
+    let common_dir: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'repository_common_dir'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(common_dir
+        .map(|dir| checks::acceptance_policy_at(&checks::registry_path(&PathBuf::from(dir))))
+        .unwrap_or_default())
+}
+
+/// Whether this repository opted in to the symbol-existence advisory.
+fn verify_symbol_scopes(conn: &Connection) -> Result<bool> {
+    let common_dir: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'repository_common_dir'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(common_dir
+        .map(|dir| checks::verify_symbol_scopes_at(&checks::registry_path(&PathBuf::from(dir))))
+        .unwrap_or(false))
+}
+
+/// Advisory notes for `symbol:` scopes whose name appears nowhere in the
+/// worktree. A warning, never a rejection: a scope may legitimately name
+/// something the agent is about to create.
+fn missing_symbol_warnings(worktree: &Option<String>, scopes: &[Scope]) -> Vec<String> {
+    let Some(worktree) = worktree.as_deref().map(PathBuf::from) else {
+        return Vec::new();
+    };
+    scopes
+        .iter()
+        .filter(|scope| scope.kind.eq_ignore_ascii_case("symbol"))
+        .filter_map(|scope| {
+            // The member is the part that has to exist; a container name alone
+            // is too generic to be evidence either way.
+            let member = scope.key.rsplit("::").next().unwrap_or(&scope.key).trim();
+            if member.is_empty() || git::tracked_content_contains(&worktree, member) {
+                return None;
+            }
+            Some(format!(
+                "scope `symbol:{}` names `{member}`, which appears nowhere in this worktree; if it is not something you are about to create, the symbol you actually edit is still unclaimed",
+                scope.key
+            ))
+        })
+        .collect()
+}
+
+/// What Foremerge actually knows about a ChangeSet, from the newest validation
+/// on record. A check that passed against a different fingerprint says nothing
+/// about this tree, so it counts as unverified rather than as evidence.
+fn verification_state(
+    conn: &Connection,
+    changeset_id: &str,
+    fingerprint: &str,
+) -> Result<(&'static str, Option<&'static str>)> {
+    let valid: Option<(bool, String)> = conn
+        .query_row(
+            "SELECT passed, fingerprint FROM validations WHERE changeset_id = ?1
+             ORDER BY run_at DESC LIMIT 1",
+            [changeset_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    Ok(match valid {
+        Some((true, recorded)) if recorded == fingerprint => (VERIFICATION_VERIFIED, None),
+        Some((false, recorded)) if recorded == fingerprint => (
+            VERIFICATION_FAILED,
+            Some("the registered check ran against this fingerprint and did not pass"),
+        ),
+        Some(_) => (
+            VERIFICATION_UNVERIFIED,
+            Some("the only validation on record was run against a different fingerprint"),
+        ),
+        None => (
+            VERIFICATION_UNVERIFIED,
+            Some("no verification check was run against this ChangeSet"),
+        ),
+    })
 }
 
 impl Foremerge {
@@ -302,8 +396,88 @@ impl Foremerge {
                 conflicts.push(persist_conflict(&tx, &detected, Some(&agent.id))?);
             }
         }
+        // Opt-in advisory: a scope naming a symbol that exists nowhere protects
+        // nothing, because the real symbol stays unclaimed while the agent
+        // believes it holds a reservation. Computed before commit so the read
+        // uses the same connection, but it never blocks the publish.
+        let warnings = if verify_symbol_scopes(&tx)? {
+            missing_symbol_warnings(&agent.worktree, &intent.scopes)
+        } else {
+            Vec::new()
+        };
         tx.commit()?;
-        Ok(PublishIntentOutcome { intent, conflicts })
+        Ok(PublishIntentOutcome {
+            intent,
+            conflicts,
+            warnings,
+        })
+    }
+
+    /// Transfer a stranded intent to another agent.
+    ///
+    /// An agent that dies mid-task leaves its intent owned by an agent that
+    /// will never return, and ownership is otherwise permanent, so the work
+    /// could only be duplicated. Adoption is deliberately narrow: it is refused
+    /// while any claim on the intent is still live, so it can never be used to
+    /// take work away from an agent that is simply busy. The expiry of every
+    /// claim is the evidence that the previous owner has stopped.
+    pub fn adopt_intent(&self, agent_id: &str, intent_id: &str, reason: &str) -> Result<Intent> {
+        let reason = reason.trim();
+        if reason.is_empty() {
+            bail!("INVALID_INPUT: adopting an intent requires a reason, which is recorded");
+        }
+        let mut conn = self.store.lock()?;
+        let tx = Store::immediate_tx(&mut conn)?;
+        let agent = agent_by_id(&tx, agent_id)?;
+        let intent = intent_by_id(&tx, intent_id)?;
+        if intent.agent_id == agent.id {
+            bail!("INVALID_INPUT: intent {intent_id} already belongs to this agent");
+        }
+        require_state(
+            &intent.status,
+            &["INTENT", "CLAIMED", "IN_PROGRESS", "PROVISIONAL"],
+            "adopt",
+        )?;
+        let now = Utc::now().to_rfc3339();
+        let live: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM claims
+             WHERE intent_id = ?1 AND status = 'ACTIVE' AND lease_expires_at > ?2",
+            params![intent_id, now],
+            |row| row.get(0),
+        )?;
+        if live > 0 {
+            bail!(
+                "FORBIDDEN: intent {intent_id} still holds {live} live claim(s); its owner has not stopped. Wait for the leases to expire, or ask that agent to discard the work."
+            );
+        }
+        let previous_owner = intent.agent_id.clone();
+        tx.execute(
+            "UPDATE intents SET agent_id = ?2 WHERE id = ?1 AND agent_id = ?3",
+            params![intent_id, agent.id, previous_owner],
+        )?;
+        // Expired claims belong to the agent that is gone. Release them
+        // explicitly so the audit trail shows the handover rather than leaving
+        // rows that read as another agent's holdings.
+        tx.execute(
+            "UPDATE claims SET status = 'RELEASED', released_at = ?2
+             WHERE intent_id = ?1 AND status = 'ACTIVE'",
+            params![intent_id, now],
+        )?;
+        Store::append_event(
+            &tx,
+            "intent.adopted",
+            "Intent",
+            intent_id,
+            Some(&agent.id),
+            &json!({
+                "previous_agent_id": previous_owner,
+                "adopted_by_agent_id": agent.id,
+                "reason": reason
+            }),
+        )?;
+        let adopted = intent_by_id(&tx, intent_id)?;
+        tx.commit()?;
+        Ok(adopted)
     }
 
     pub fn claim_work(&self, mut request: ClaimWorkRequest) -> Result<ClaimOutcome> {
@@ -316,9 +490,19 @@ impl Foremerge {
         let agent = agent_by_id(&tx, &request.agent_id)?;
         let intent = intent_by_id(&tx, &request.intent_id)?;
         if intent.agent_id != agent.id {
-            bail!("FORBIDDEN: an agent may only claim work for its own intent");
+            bail!(
+                "FORBIDDEN: an agent may only claim work for its own intent. If {owner} has stopped, adopt the intent first with `foremerge work adopt`, which is refused while any of its claims are still live.",
+                owner = intent.agent_id
+            );
         }
-        require_state(&intent.status, &["INTENT", "CLAIMED"], "claim work")?;
+        // IN_PROGRESS is claimable by the owner so that an agent whose work
+        // outlasts its lease can renew it. Without this a long task silently
+        // loses the very protection it asked for, with no way to hold it.
+        require_state(
+            &intent.status,
+            &["INTENT", "CLAIMED", "IN_PROGRESS"],
+            "claim work",
+        )?;
         let now = Utc::now();
         let expires = now + ChronoDuration::seconds(request.lease_seconds.clamp(60, 86_400) as i64);
         let mut claims = Vec::new();
@@ -339,33 +523,58 @@ impl Foremerge {
                 let warning = conflict::claim_overlap_conflict(&intent.id, &other_intent, &scope);
                 warnings.push(persist_conflict(&tx, &warning, Some(&agent.id))?);
             }
+            // Claiming a scope this intent already holds renews the lease in
+            // place. Stacking a second row would leave the same scope claimed
+            // twice, overstating what is held and making `status` misleading.
+            let existing_claim: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT id, created_at FROM claims
+                     WHERE intent_id = ?1 AND canonical_scope = ?2 AND status = 'ACTIVE'
+                     ORDER BY created_at DESC LIMIT 1",
+                    params![intent.id, scope.canonical()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let renewed = existing_claim.is_some();
             let claim = Claim {
-                id: id("clm"),
+                id: existing_claim
+                    .as_ref()
+                    .map(|(claim_id, _)| claim_id.clone())
+                    .unwrap_or_else(|| id("clm")),
                 agent_id: agent.id.clone(),
                 intent_id: intent.id.clone(),
                 scope: scope.clone(),
                 status: "ACTIVE".to_string(),
                 reason: request.reason.clone(),
                 lease_expires_at: expires.to_rfc3339(),
-                created_at: now.to_rfc3339(),
+                created_at: existing_claim
+                    .map(|(_, created_at)| created_at)
+                    .unwrap_or_else(|| now.to_rfc3339()),
             };
-            tx.execute(
-                "INSERT INTO claims(id, agent_id, intent_id, scope_kind, scope_key,
-                 canonical_scope, status, reason, lease_expires_at, created_at)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![
-                    claim.id,
-                    claim.agent_id,
-                    claim.intent_id,
-                    claim.scope.kind,
-                    claim.scope.key,
-                    claim.scope.canonical(),
-                    claim.status,
-                    claim.reason,
-                    claim.lease_expires_at,
-                    claim.created_at,
-                ],
-            )?;
+            if renewed {
+                tx.execute(
+                    "UPDATE claims SET lease_expires_at = ?2, reason = ?3 WHERE id = ?1",
+                    params![claim.id, claim.lease_expires_at, claim.reason],
+                )?;
+            } else {
+                tx.execute(
+                    "INSERT INTO claims(id, agent_id, intent_id, scope_kind, scope_key,
+                     canonical_scope, status, reason, lease_expires_at, created_at)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    params![
+                        claim.id,
+                        claim.agent_id,
+                        claim.intent_id,
+                        claim.scope.kind,
+                        claim.scope.key,
+                        claim.scope.canonical(),
+                        claim.status,
+                        claim.reason,
+                        claim.lease_expires_at,
+                        claim.created_at,
+                    ],
+                )?;
+            }
             let intent_node =
                 Store::upsert_node(&tx, "Intent", &intent.id, &intent.summary, &json!({}))?;
             let claim_node = Store::upsert_node(
@@ -798,6 +1007,8 @@ impl Foremerge {
             supersedes_changeset_id: None,
             fingerprint: snapshot.fingerprint,
             status: "PROVISIONAL".to_string(),
+            acceptance_verification: None,
+            acceptance_reason: None,
             created_at: now.clone(),
             updated_at: now.clone(),
             open_conflicts: None,
@@ -1420,10 +1631,17 @@ impl Foremerge {
         let changeset;
         let worktree;
         let dependency_refs;
+        let verification: &str;
+        let verification_reason: Option<&str>;
+        let mut accepted_reason: Option<String> = None;
         {
             let conn = self.store.lock()?;
             changeset = changeset_by_id(&conn, changeset_id)?;
-            require_state(&changeset.status, &["VALIDATED"], "accept")?;
+            // PROVISIONAL is accepted here as a *state*; whether it may
+            // actually be accepted is decided by the verification rules below,
+            // so that "nothing was verified" is a recordable outcome instead of
+            // an unreachable one.
+            require_state(&changeset.status, &["VALIDATED", "PROVISIONAL"], "accept")?;
             worktree = conn
                 .query_row(
                     "SELECT worktree FROM changesets WHERE id = ?1",
@@ -1432,21 +1650,40 @@ impl Foremerge {
                 )?
                 .map(PathBuf::from)
                 .ok_or_else(|| anyhow::anyhow!("INVALID_INPUT: ChangeSet has no worktree"))?;
-            let valid: Option<(bool, String)> = conn
-                .query_row(
-                    "SELECT passed, fingerprint FROM validations WHERE changeset_id = ?1
-                     ORDER BY run_at DESC LIMIT 1",
-                    [changeset_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()?;
-            match valid {
-                Some((true, fingerprint)) if fingerprint == changeset.fingerprint => {}
-                _ => {
-                    bail!(
-                        "CHECK_FAILED: no passing Foremerge validation for the current fingerprint"
-                    )
-                }
+            (verification, verification_reason) =
+                verification_state(&conn, changeset_id, &changeset.fingerprint)?;
+            if verification != VERIFICATION_VERIFIED {
+                let operator_reason = request
+                    .override_reason
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|reason| !reason.is_empty());
+                let policy = acceptance_policy(&conn)?;
+                // A failing check is evidence of breakage, not an absence of
+                // evidence, so policy alone never clears it.
+                let policy_allows = policy == checks::AcceptancePolicy::Advisory
+                    && verification == VERIFICATION_UNVERIFIED;
+                accepted_reason = match (request.allow_unverified, operator_reason, policy_allows) {
+                    (true, Some(reason), _) => Some(reason.to_string()),
+                    (true, None, _) => bail!(
+                        "INVALID_INPUT: accepting {verification} work requires an explicit reason; pass --override-reason to record why"
+                    ),
+                    (false, _, true) => verification_reason.map(str::to_string),
+                    // A failure and an absence need different advice: advisory
+                    // policy is the answer to "nothing to verify" and is never
+                    // the answer to "the check said no".
+                    (false, _, false) => {
+                        let remedy = if verification == VERIFICATION_FAILED {
+                            "Fix the failure and re-run the check, or record why it is being accepted anyway with `--allow-unverified --override-reason \"...\"`"
+                        } else {
+                            "Run a registered check against the current fingerprint, or, if this repository has nothing to verify, allow it once with `--allow-unverified --override-reason \"...\"` or for good with `foremerge checks policy advisory`"
+                        };
+                        bail!(
+                            "CHECK_FAILED: this ChangeSet is {verification} ({reason}). {remedy}",
+                            reason = verification_reason.unwrap_or("no validation on record")
+                        )
+                    }
+                };
             }
             let high: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM conflicts WHERE severity = 'HIGH'
@@ -1547,20 +1784,23 @@ impl Foremerge {
         let mut conn = self.store.lock()?;
         let tx = Store::immediate_tx(&mut conn)?;
         let fresh = changeset_by_id(&tx, changeset_id)?;
-        require_state(&fresh.status, &["VALIDATED"], "accept")?;
+        require_state(&fresh.status, &["VALIDATED", "PROVISIONAL"], "accept")?;
         let fresh_intent = intent_by_id(&tx, &fresh.intent_id)?;
-        require_state(&fresh_intent.status, &["VALIDATED"], "accept")?;
-        let valid: Option<(bool, String)> = tx
-            .query_row(
-                "SELECT passed, fingerprint FROM validations WHERE changeset_id = ?1
-                 ORDER BY run_at DESC LIMIT 1",
-                [changeset_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        match valid {
-            Some((true, fingerprint)) if fingerprint == fresh.fingerprint => {}
-            _ => bail!("CHECK_FAILED: no passing Foremerge validation for the current fingerprint"),
+        require_state(
+            &fresh_intent.status,
+            &["VALIDATED", "PROVISIONAL"],
+            "accept",
+        )?;
+        // Re-evaluated under the lock: the decision above was made before the
+        // transaction, so a validation could have landed or been superseded.
+        let (fresh_verification, _) = verification_state(&tx, changeset_id, &fresh.fingerprint)?;
+        if fresh_verification != verification {
+            bail!(
+                "CONFLICT: verification changed from {verification} to {fresh_verification} while accepting; retry"
+            );
+        }
+        if fresh_verification != VERIFICATION_VERIFIED && accepted_reason.is_none() {
+            bail!("CHECK_FAILED: no passing Foremerge validation for the current fingerprint");
         }
         let high: i64 = tx.query_row(
             "SELECT COUNT(*) FROM conflicts WHERE severity = 'HIGH'
@@ -1680,9 +1920,16 @@ impl Foremerge {
         let accepted_ref = git::create_accepted_ref(&worktree, changeset_id, &commit)?;
         let changed = tx.execute(
             "UPDATE changesets SET status = 'ACCEPTED', git_ref = ?2, accepted_commit = ?2,
-             integration_commit = NULL, updated_at = ?3
-             WHERE id = ?1 AND status = 'VALIDATED'",
-            params![changeset_id, commit, now],
+             integration_commit = NULL, acceptance_verification = ?4, acceptance_reason = ?5,
+             updated_at = ?3
+             WHERE id = ?1 AND status IN ('VALIDATED', 'PROVISIONAL')",
+            params![
+                changeset_id,
+                commit,
+                now,
+                verification,
+                accepted_reason.as_deref()
+            ],
         )?;
         if changed != 1 {
             bail!("STATE_RACE: ChangeSet changed while accepting it");
@@ -1692,7 +1939,7 @@ impl Foremerge {
             &tx,
             &changeset.intent_id,
             &changeset.agent_id,
-            "VALIDATED",
+            &fresh_intent.status,
             "ACCEPTED",
         )?;
         Store::append_event(
@@ -1701,10 +1948,14 @@ impl Foremerge {
             "ChangeSet",
             changeset_id,
             Some(&changeset.agent_id),
+            // The verification outcome rides in the immutable event too, so the
+            // audit trail states plainly what was and was not checked.
             &json!({
                 "git_ref": commit,
                 "accepted_commit": commit,
-                "accepted_ref": accepted_ref
+                "accepted_ref": accepted_ref,
+                "verification": verification,
+                "acceptance_reason": accepted_reason
             }),
         )?;
         tx.commit()?;
@@ -2189,11 +2440,27 @@ impl Foremerge {
             let agent = agent_by_id(&tx, agent_id)?;
             agent_names.insert(agent.id.clone(), agent.name.clone());
             if agent.status == "ACTIVE" {
+                // `last_seen_at` is maintained on the row but not carried on
+                // `Agent`, so it is read directly rather than widening a struct
+                // every other caller would then have to fill in.
+                let last_seen_at: String = tx.query_row(
+                    "SELECT last_seen_at FROM agents WHERE id = ?1",
+                    [&agent.id],
+                    |row| row.get(0),
+                )?;
+                let stale = DateTime::parse_from_rfc3339(&last_seen_at)
+                    .map(|seen| {
+                        Utc::now().signed_duration_since(seen).num_seconds()
+                            > AGENT_STALE_AFTER_SECONDS
+                    })
+                    .unwrap_or(false);
                 agents.push(StatusAgent {
                     id: agent.id,
                     name: agent.name,
                     model: agent.model,
                     worktree: agent.worktree,
+                    last_seen_at,
+                    stale,
                 });
             }
         }
@@ -2798,6 +3065,12 @@ pub fn validate_transition(from: &str, to: &str) -> Result<()> {
             | ("IN_PROGRESS", "PROVISIONAL")
             | ("PROVISIONAL", "VALIDATED")
             | ("VALIDATED", "ACCEPTED")
+            // Accepting straight from PROVISIONAL is how work with nothing to
+            // verify reaches a terminal state. It is not a way around the gate:
+            // acceptance still refuses unless the repository's policy permits
+            // unverified work or an operator records a reason, and the outcome
+            // is stored on the ChangeSet as UNVERIFIED or FAILED.
+            | ("PROVISIONAL", "ACCEPTED")
             | ("ACCEPTED", "COMMITTED")
     );
     if allowed {
@@ -2941,7 +3214,7 @@ fn changeset_by_id(conn: &Connection, id: &str) -> Result<ChangeSet> {
         "SELECT id, agent_id, task_id, intent_id, summary, files_json, symbols_json,
          contracts_json, dependencies_json, tests_json, decisions_json, provenance_json,
          base_ref, git_ref, accepted_commit, integration_commit, supersedes_changeset_id,
-         fingerprint, status, created_at, updated_at
+         fingerprint, status, acceptance_verification, acceptance_reason, created_at, updated_at
          FROM changesets WHERE id = ?1",
         [id],
         |row| {
@@ -2965,8 +3238,10 @@ fn changeset_by_id(conn: &Connection, id: &str) -> Result<ChangeSet> {
                 supersedes_changeset_id: row.get(16)?,
                 fingerprint: row.get(17)?,
                 status: row.get(18)?,
-                created_at: row.get(19)?,
-                updated_at: row.get(20)?,
+                acceptance_verification: row.get(19)?,
+                acceptance_reason: row.get(20)?,
+                created_at: row.get(21)?,
+                updated_at: row.get(22)?,
                 open_conflicts: None,
             })
         },
