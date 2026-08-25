@@ -11,8 +11,31 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # A tag that disagrees with the crate version would publish assets labelled
+  # one version containing a binary and an API contract that report another.
+  verify-version:
+    name: Tag matches crate version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Compare tag with Cargo package version
+        run: |
+          crate=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          if [ "$GITHUB_REF_NAME" != "v$crate" ]; then
+            echo "tag $GITHUB_REF_NAME does not match crate version $crate" >&2
+            exit 1
+          fi
+          echo "tag $GITHUB_REF_NAME matches crate version $crate"
+
   test:
     name: Test ${{ matrix.os }}
+    needs: verify-version
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:

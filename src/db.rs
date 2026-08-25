@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::Duration;
 use uuid::Uuid;
 
-const DATABASE_SCHEMA_VERSION: i64 = 3;
+const DATABASE_SCHEMA_VERSION: i64 = 4;
 // Event hashing is versioned independently from the mutable SQLite projection
 // schema. A database migration must not silently change the hash material for
 // otherwise identical events.
@@ -468,6 +468,22 @@ impl Store {
             CREATE TRIGGER IF NOT EXISTS events_no_delete
             BEFORE DELETE ON events
             BEGIN SELECT RAISE(ABORT, 'event log is append-only'); END;
+
+            -- INSERT OR REPLACE resolves against ANY unique key, deleting the
+            -- conflicting row, and that delete only fires the trigger above
+            -- when recursive_triggers is on, which is per-connection. This
+            -- table has three unique keys, so all three must be checked. On an
+            -- ordinary append NEW.seq is null (AUTOINCREMENT assigns it after
+            -- this trigger) and the other two are fresh, so nothing matches.
+            CREATE TRIGGER IF NOT EXISTS events_no_replace
+            BEFORE INSERT ON events
+            WHEN EXISTS(
+                SELECT 1 FROM events
+                WHERE seq = NEW.seq
+                   OR event_id = NEW.event_id
+                   OR event_hash = NEW.event_hash
+            )
+            BEGIN SELECT RAISE(ABORT, 'event log is append-only'); END;
             "#,
         )?;
         // The schema version the store was last written with. Absent means a
@@ -648,13 +664,19 @@ impl Store {
                 [],
             )?;
         }
-        if stored_version == 2 {
+        if stored_version < 4 {
             // Schema 2 minted a synthesized detection for every conflict on
             // every open, so conflicts that already had a native observation
             // carry a duplicate. Remove only those duplicates: a legacy row is
             // genuine when it is the conflict's sole observation. The
             // append-only trigger is dropped for the length of this repair and
             // restored inside the same transaction.
+            //
+            // Every store below schema 4 is swept, not just those stamped 2.
+            // Schema 2's migration was not transactional, so an upgrade killed
+            // between the backfill and the stamp left duplicates behind a
+            // version 1 stamp, and schema 3 repaired only stores stamped 2, so
+            // it could stamp such a store as 3 with its duplicates intact.
             conn.execute_batch("DROP TRIGGER IF EXISTS conflict_detections_no_delete;")?;
             // Only a byte-identical twin is a phantom. A legacy row that
             // differs from every native row is a genuine earlier observation,
@@ -1553,6 +1575,142 @@ mod schema_repair_tests {
             )
             .expect("read back");
         assert_eq!(passed, 0, "the failing result must survive every attempt");
+    }
+
+    /// Schema 2's migration was not transactional, so an interrupted upgrade
+    /// could leave duplicates behind a version 1 stamp, and the schema 3 repair
+    /// only swept stores stamped 2. Both that store and one already stamped 3
+    /// with duplicates intact must still be repaired.
+    #[test]
+    fn duplicates_are_repaired_from_any_pre_schema_4_stamp() {
+        for stamp in ["1", "3"] {
+            let store = Store::in_memory().expect("open store");
+            let conn = store.lock().expect("lock");
+            seed_intents(&conn);
+            seed_conflict(&conn, "cfl_dup", "2026-03-01T00:00:00Z");
+            seed_detection(
+                &conn,
+                "dtn_native_dup",
+                "cfl_dup",
+                "same",
+                "2026-03-01T00:00:00Z",
+            );
+            seed_detection(
+                &conn,
+                "dtn_legacy_cfl_dup",
+                "cfl_dup",
+                "same",
+                "2026-03-01T00:00:00Z",
+            );
+            seed_conflict(&conn, "cfl_real", "2026-01-01T00:00:00Z");
+            seed_detection(
+                &conn,
+                "dtn_legacy_cfl_real",
+                "cfl_real",
+                "early",
+                "2026-01-01T00:00:00Z",
+            );
+            seed_detection(
+                &conn,
+                "dtn_native_real",
+                "cfl_real",
+                "later",
+                "2026-02-01T00:00:00Z",
+            );
+            conn.execute(
+                "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+                [stamp],
+            )
+            .expect("stamp an earlier schema");
+
+            Store::migrate(&conn).expect("repair migration");
+
+            assert_eq!(
+                detection_ids(&conn, "cfl_dup"),
+                vec!["dtn_native_dup".to_string()],
+                "the identical twin must be removed from a store stamped {stamp}"
+            );
+            assert_eq!(
+                detection_ids(&conn, "cfl_real").len(),
+                2,
+                "a genuine earlier observation must survive in a store stamped {stamp}"
+            );
+        }
+    }
+
+    /// The event log has three unique keys, so a REPLACE resolving against any
+    /// one of them would delete a row without firing the delete trigger on a
+    /// connection that has not enabled recursive_triggers.
+    #[test]
+    fn events_reject_replacement_through_every_unique_key() {
+        let store = Store::in_memory().expect("open store");
+        let conn = store.lock().expect("lock");
+        conn.execute_batch("PRAGMA recursive_triggers = OFF;")
+            .expect("simulate an outside connection");
+        let tx = conn.unchecked_transaction().expect("transaction");
+        Store::append_event(
+            &tx,
+            "agent.registered",
+            "Agent",
+            "agt_x",
+            None,
+            &json!({ "original": true }),
+        )
+        .expect("append an event");
+        tx.commit().expect("commit the event");
+        let (seq, event_id, event_hash): (i64, String, String) = conn
+            .query_row(
+                "SELECT seq, event_id, event_hash FROM events ORDER BY seq DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read the event back");
+
+        // Each of these collides on a different unique key.
+        let collisions = [
+            (
+                seq.to_string(),
+                "evt_other".to_string(),
+                "hash_other".to_string(),
+            ),
+            (
+                "999".to_string(),
+                event_id.clone(),
+                "hash_other".to_string(),
+            ),
+            (
+                "999".to_string(),
+                "evt_other".to_string(),
+                event_hash.clone(),
+            ),
+        ];
+        for (seq_value, id_value, hash_value) in collisions {
+            let replaced = conn.execute(
+                "INSERT OR REPLACE INTO events(seq, event_id, schema_version, event_type,
+                 entity_type, entity_id, agent_id, payload_json, created_at, prev_hash, event_hash)
+                 VALUES(?1, ?2, 1, 'agent.registered', 'Agent', 'agt_x', NULL,
+                        '{\"tampered\":true}', '2026-01-01T00:00:00Z', 'GENESIS', ?3)",
+                params![seq_value, id_value, hash_value],
+            );
+            assert!(
+                replaced.is_err(),
+                "REPLACE colliding on ({seq_value}, {id_value}, {hash_value}) must be rejected"
+            );
+        }
+        let payload: String = conn
+            .query_row(
+                "SELECT payload_json FROM events WHERE seq = ?1",
+                [seq],
+                |row| row.get(0),
+            )
+            .expect("read payload");
+        assert!(
+            payload.contains("original"),
+            "the original event must survive"
+        );
+        // verify_event_chain takes the store lock, so release this guard first.
+        drop(conn);
+        assert!(store.verify_event_chain().expect("verify"), "chain intact");
     }
 
     #[test]
