@@ -27,10 +27,13 @@ Say you have two AI agents working on the same project at the same time. Each
 one gets its own copy of the code, so they never fight over files. Both finish.
 Both look correct. Then you find they undid each other's work.
 
-Git cannot warn you about that. Git notices a conflict only when two changes
-touch the same lines of the same file. If one agent deletes the function
-another agent is busy extending, those are different lines, so Git merges both
-happily and the result is broken.
+Git cannot warn you about that, because Git compares text and not intent. It
+will stop you when two agents edit the same part of the same file. What it
+cannot see is two edits that are each perfectly reasonable on their own and
+land in different files. If one agent moves every caller onto a new
+`StripePaymentService` while another adds PayPal support to the old
+`PaymentService`, nothing overlaps, so Git merges both without complaint and
+the PayPal work is left stranded on a class nothing calls any more.
 
 Foremerge fixes this by having agents announce what they are about to do,
 before they do it.
