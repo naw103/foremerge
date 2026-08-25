@@ -1,4 +1,4 @@
-use crate::model::{Event, EventChainAudit, Scope};
+use crate::model::{Event, EventChainAudit, Operation, Scope, ScopeClaim};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use rusqlite::{
@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::Duration;
 use uuid::Uuid;
 
-const DATABASE_SCHEMA_VERSION: i64 = 5;
+const DATABASE_SCHEMA_VERSION: i64 = 6;
 // Event hashing is versioned independently from the mutable SQLite projection
 // schema. A database migration must not silently change the hash material for
 // otherwise identical events.
@@ -231,8 +231,23 @@ impl Store {
                 scope_kind TEXT NOT NULL,
                 scope_key TEXT NOT NULL,
                 canonical_scope TEXT NOT NULL,
+                operation TEXT NOT NULL DEFAULT 'modify',
+                operation_inferred INTEGER NOT NULL DEFAULT 1,
                 PRIMARY KEY(intent_id, canonical_scope)
             );
+
+            CREATE TABLE IF NOT EXISTS assessments (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL REFERENCES agents(id),
+                intent_id TEXT NOT NULL REFERENCES intents(id),
+                related_intent_id TEXT NOT NULL REFERENCES intents(id),
+                verdict TEXT NOT NULL,
+                rationale TEXT NOT NULL,
+                action TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_assessments_intent
+              ON assessments(intent_id, related_intent_id);
             CREATE INDEX IF NOT EXISTS idx_intent_scopes_canonical
               ON intent_scopes(canonical_scope, intent_id);
 
@@ -630,7 +645,67 @@ impl Store {
                 [],
             )?;
         }
-        let mut statement = if stored_version < 5 {
+        // Schema 6 moves the operation an intent performs out of its prose and
+        // onto each declared scope. Rows written by an older build recorded
+        // only the scope, so the operation is recovered from the summary and
+        // marked inferred: that is the strongest claim the stored data
+        // supports, and an inferred operation never asserts a conflict.
+        if stored_version < 6 {
+            for (column, ddl) in [
+                (
+                    "operation",
+                    "ALTER TABLE intent_scopes ADD COLUMN operation TEXT NOT NULL DEFAULT 'modify'",
+                ),
+                (
+                    "operation_inferred",
+                    "ALTER TABLE intent_scopes ADD COLUMN operation_inferred INTEGER NOT NULL DEFAULT 1",
+                ),
+            ] {
+                let present: bool = conn.query_row(
+                    "SELECT EXISTS(
+                       SELECT 1 FROM pragma_table_info('intent_scopes') WHERE name = ?1
+                     )",
+                    [column],
+                    |row| row.get(0),
+                )?;
+                if !present {
+                    conn.execute(ddl, [])?;
+                }
+            }
+            let mut statement = conn.prepare("SELECT id, summary, scopes_json FROM intents")?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(statement);
+            for (intent_id, summary, scopes_json) in rows {
+                // Already migrated rows decode as claims and are left alone.
+                if serde_json::from_str::<Vec<ScopeClaim>>(&scopes_json).is_ok() {
+                    continue;
+                }
+                let scopes: Vec<Scope> = serde_json::from_str(&scopes_json)
+                    .with_context(|| format!("decode scopes for intent {intent_id}"))?;
+                let claims: Vec<ScopeClaim> = scopes
+                    .into_iter()
+                    .map(|scope| {
+                        let operation = crate::conflict::infer_operation(&summary, &scope)
+                            .unwrap_or(Operation::Modify);
+                        ScopeClaim::inferred(scope, operation)
+                    })
+                    .collect();
+                conn.execute(
+                    "UPDATE intents SET scopes_json = ?2 WHERE id = ?1",
+                    params![intent_id, serde_json::to_string(&claims)?],
+                )?;
+            }
+            conn.execute("DELETE FROM intent_scopes", [])?;
+        }
+        let mut statement = if stored_version < 6 {
             conn.prepare("SELECT id, scopes_json FROM intents")?
         } else {
             conn.prepare(
@@ -645,13 +720,21 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(statement);
         for (intent_id, scopes_json) in intent_scopes {
-            let scopes: Vec<Scope> = serde_json::from_str(&scopes_json)
+            let claims: Vec<ScopeClaim> = serde_json::from_str(&scopes_json)
                 .with_context(|| format!("decode scopes for intent {intent_id}"))?;
-            for scope in scopes {
+            for claim in claims {
                 conn.execute(
                     "INSERT OR IGNORE INTO intent_scopes(
-                     intent_id, scope_kind, scope_key, canonical_scope) VALUES(?1, ?2, ?3, ?4)",
-                    params![intent_id, scope.kind, scope.key, scope.canonical()],
+                     intent_id, scope_kind, scope_key, canonical_scope, operation,
+                     operation_inferred) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        intent_id,
+                        claim.scope.kind,
+                        claim.scope.key,
+                        claim.scope.canonical(),
+                        claim.operation.as_str(),
+                        claim.inferred,
+                    ],
                 )?;
             }
         }

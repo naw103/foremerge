@@ -147,7 +147,7 @@ pub async fn handle_message(service: &Foremerge, message: Value) -> Option<Value
                 "protocolVersion": if requested == CURRENT_PROTOCOL { CURRENT_PROTOCOL } else { LEGACY_PROTOCOL },
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": server_info(),
-                "instructions": "Publish intent and semantic scopes before editing, then claim and start work. Claims are advisory. Resolve durable HIGH conflicts, publish a clean ChangeSet, run a trusted named verification check, and accept before ordinary Git integration. Record the landing commit afterward."
+                "instructions": "Publish intent and the scopes you will change, declaring what you do to each, before editing. publish_intent returns related_work: assess each entry and call record_assessment before writing code. then claim and start work. Claims are advisory. Resolve durable HIGH conflicts, publish a clean ChangeSet, run a trusted named verification check, and accept before ordinary Git integration. Record the landing commit afterward."
             }))
         }
         "server/discover" => Ok(json!({
@@ -264,6 +264,15 @@ async fn call_tool(service: &Foremerge, params: Value) -> Result<Value, (i64, St
             mcp_blocking(move || {
                 parse::<PublishIntentRequest>(arguments)
                     .and_then(|request| service.publish_intent(request))
+                    .and_then(to_value)
+            })
+            .await
+        }
+        "record_assessment" => {
+            let service = service.clone();
+            mcp_blocking(move || {
+                parse::<RecordAssessmentRequest>(arguments)
+                    .and_then(|request| service.record_assessment(request))
                     .and_then(to_value)
             })
             .await
@@ -490,6 +499,31 @@ fn server_info() -> Value {
     json!({ "name": "foremerge", "version": env!("CARGO_PKG_VERSION") })
 }
 
+/// A scope an intent declares, together with what it will do to that scope.
+///
+/// The operation is required because the agent knows it and Foremerge cannot
+/// reliably recover it from prose. Declaring it is what lets a conflict be
+/// stated as fact rather than guessed from wording.
+fn scope_claim_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "kind": {
+                "type": "string",
+                "enum": ["symbol", "api", "schema", "config", "infra", "test", "migration", "env", "file", "component", "contract", "domain"]
+            },
+            "key": { "type": "string", "minLength": 1 },
+            "operation": {
+                "type": "string",
+                "enum": ["add", "extend", "modify", "replace", "remove", "rename", "migrate"],
+                "description": "What this intent does to this scope. add/extend/modify preserve what other work depends on; replace/remove/rename/migrate do not."
+            }
+        },
+        "required": ["kind", "key", "operation"],
+        "additionalProperties": false
+    })
+}
+
 fn scope_schema() -> Value {
     json!({
         "type": "object",
@@ -548,6 +582,7 @@ fn with_destructive_hint(mut definition: Value) -> Value {
 
 pub fn tool_catalog() -> Vec<Value> {
     let scope = scope_schema();
+    let scope_claim = scope_claim_schema();
     vec![
         tool(
             "accept_changeset",
@@ -570,7 +605,7 @@ pub fn tool_catalog() -> Vec<Value> {
                     "agent_id": { "type": "string" },
                     "intent_id": { "type": "string", "minLength": 1 },
                     "intent": { "type": "string", "minLength": 1 },
-                    "scopes": { "type": "array", "items": scope.clone(), "default": [] }
+                    "scopes": { "type": "array", "items": scope_claim.clone(), "default": [] }
                 }),
                 &[],
                 true,
@@ -711,13 +746,13 @@ pub fn tool_catalog() -> Vec<Value> {
         tool(
             "publish_intent",
             "Publish intent",
-            "Publish task intent, semantic scopes, and dependencies; immediately returns pre-code conflicts.",
+            "Publish task intent and the scopes it will change, declaring what it does to each. Returns related_work: other agents' active intents that touch yours, with the overlap stated as fact. Assess each one and call record_assessment before writing code.",
             json!({
                 "agent_id": { "type": "string" },
                 "task": { "type": "string", "minLength": 1 },
                 "summary": { "type": "string", "minLength": 1 },
                 "rationale": { "type": "string" },
-                "scopes": { "type": "array", "items": scope.clone(), "default": [] },
+                "scopes": { "type": "array", "items": scope_claim.clone(), "default": [] },
                 "depends_on": { "type": "array", "items": { "type": "string" }, "default": [] },
                 "metadata": { "type": "object", "default": {} }
             }),
@@ -738,6 +773,36 @@ pub fn tool_catalog() -> Vec<Value> {
             &[],
             true,
             true,
+        ),
+        tool(
+            "record_assessment",
+            "Record an assessment of related work",
+            "Record what you concluded about one entry from related_work. Foremerge states which scopes overlap and how the declared operations relate; deciding what that means is yours. Call this once per related intent before you write code.",
+            json!({
+                "agent_id": { "type": "string", "minLength": 1 },
+                "intent_id": { "type": "string", "minLength": 1 },
+                "related_intent_id": { "type": "string", "minLength": 1 },
+                "verdict": {
+                    "type": "string",
+                    "enum": ["conflicts", "compatible", "duplicate", "depends_on"],
+                    "description": "conflicts: the two plans cannot both land as written. compatible: they can. duplicate: the same work twice. depends_on: yours needs theirs to land first."
+                },
+                "rationale": { "type": "string", "minLength": 1 },
+                "action": {
+                    "type": "string",
+                    "enum": ["proceeding", "rescoping", "waiting", "abandoning"]
+                }
+            }),
+            &[
+                "agent_id",
+                "intent_id",
+                "related_intent_id",
+                "verdict",
+                "rationale",
+                "action",
+            ],
+            false,
+            false,
         ),
         tool(
             "record_commit",
@@ -951,6 +1016,7 @@ mod tests {
                 "publish_changeset",
                 "publish_intent",
                 "query_work",
+                "record_assessment",
                 "record_commit",
                 "register_agent",
                 "resolve_conflict",

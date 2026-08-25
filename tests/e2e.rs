@@ -362,7 +362,7 @@ fn create_active_test_work(cwd: &Path, name: &str, task: &str) -> (String, Strin
         &agent_id,
         task,
         "Coordinate a lifecycle race safely",
-        "symbol:RaceTarget",
+        "symbol:RaceTarget=extend",
     );
     claim_test_scope(cwd, &agent_id, &intent_id, "symbol:RaceTarget");
     start_test_work(cwd, &agent_id, &intent_id);
@@ -471,9 +471,9 @@ fn live_cli_detects_the_headline_conflict_before_any_changeset() {
             "--summary".to_string(),
             "Replace PaymentService with StripePaymentService".to_string(),
             "--scope".to_string(),
-            "symbol:PaymentService".to_string(),
+            "symbol:PaymentService=replace".to_string(),
             "--scope".to_string(),
-            "contract:payments.provider".to_string(),
+            "contract:payments.provider=replace".to_string(),
         ],
     );
     assert_eq!(first["data"]["conflicts"], json!([]));
@@ -491,9 +491,9 @@ fn live_cli_detects_the_headline_conflict_before_any_changeset() {
             "--summary".to_string(),
             "Add PayPal support to PaymentService".to_string(),
             "--scope".to_string(),
-            "symbol:PaymentService".to_string(),
+            "symbol:PaymentService=extend".to_string(),
             "--scope".to_string(),
-            "contract:payments.provider".to_string(),
+            "contract:payments.provider=extend".to_string(),
         ],
     );
 
@@ -502,7 +502,7 @@ fn live_cli_detects_the_headline_conflict_before_any_changeset() {
         .expect("publish_intent returns conflicts");
     let conflict = conflicts
         .iter()
-        .find(|value| value["kind"] == "replace_vs_extend")
+        .find(|value| value["kind"] == "destructive_vs_additive")
         .expect("replace-versus-extend conflict");
     assert_eq!(conflict["severity"], "HIGH");
     assert_eq!(conflict["evidence"]["detected_before_code"], true);
@@ -616,7 +616,7 @@ fn two_git_worktrees_resolve_one_common_coordination_database() {
             "--summary".to_string(),
             "Add audit entries to SharedLedger".to_string(),
             "--scope".to_string(),
-            "symbol:SharedLedger".to_string(),
+            "symbol:SharedLedger=extend".to_string(),
         ],
     );
     let published_id = published["data"]["intent"]["id"]
@@ -676,7 +676,7 @@ fn failed_validation_cannot_accept_or_change_the_git_target() {
             "--summary".to_string(),
             "Introduce PaymentProvider routing".to_string(),
             "--scope".to_string(),
-            "symbol:PaymentProvider".to_string(),
+            "symbol:PaymentProvider=extend".to_string(),
         ],
     );
     let intent_id = intent["data"]["intent"]["id"]
@@ -694,7 +694,7 @@ fn failed_validation_cannot_accept_or_change_the_git_target() {
             "--intent".to_string(),
             intent_id.clone(),
             "--scope".to_string(),
-            "symbol:PaymentProvider".to_string(),
+            "symbol:PaymentProvider=extend".to_string(),
         ],
     );
     cli_success(
@@ -1109,7 +1109,7 @@ fn publishing_from_claimed_implicitly_enters_provisional_without_panicking() {
             "--summary".to_string(),
             "Add an audit hook to Ledger".to_string(),
             "--scope".to_string(),
-            "symbol:Ledger".to_string(),
+            "symbol:Ledger=extend".to_string(),
         ],
     );
     let intent_id = intent["data"]["intent"]["id"]
@@ -1127,7 +1127,7 @@ fn publishing_from_claimed_implicitly_enters_provisional_without_panicking() {
             "--intent".to_string(),
             intent_id.clone(),
             "--scope".to_string(),
-            "symbol:Ledger".to_string(),
+            "symbol:Ledger=extend".to_string(),
         ],
     );
 
@@ -1272,14 +1272,14 @@ fn status_renders_one_screen_in_text_and_a_typed_json_envelope() {
         &stripe_id,
         "status-replace",
         "Replace PaymentService with StripePaymentService",
-        "symbol:PaymentService",
+        "symbol:PaymentService=replace",
     );
     let paypal_intent = publish_test_intent(
         &repo.root,
         &paypal_id,
         "status-extend",
         "Add PayPal support to PaymentService",
-        "symbol:PaymentService",
+        "symbol:PaymentService=extend",
     );
     claim_test_scope(
         &repo.root,
@@ -1322,7 +1322,7 @@ fn status_renders_one_screen_in_text_and_a_typed_json_envelope() {
         "Active claims (1)".to_string(),
         "symbol:PaymentService".to_string(),
         "Conflicts (1 open or coordinating)".to_string(),
-        "replace_vs_extend".to_string(),
+        "destructive_vs_additive".to_string(),
         "HIGH".to_string(),
         format!("stripe-status-agent ({stripe_intent})"),
         format!("paypal-status-agent ({paypal_intent})"),
@@ -1355,7 +1355,7 @@ fn status_renders_one_screen_in_text_and_a_typed_json_envelope() {
     assert_eq!(data["claims"][0]["agent_name"], "stripe-status-agent");
     assert_eq!(data["claims"][0]["scope"]["key"], "PaymentService");
     let conflict = &data["conflicts"][0];
-    assert_eq!(conflict["kind"], "replace_vs_extend");
+    assert_eq!(conflict["kind"], "destructive_vs_additive");
     assert_eq!(conflict["severity"], "HIGH");
     assert_eq!(conflict["status"], "OPEN");
     let mut parties = vec![
@@ -1470,6 +1470,7 @@ fn real_mcp_stdio_initializes_lists_tools_and_calls_one() {
             "publish_changeset",
             "publish_intent",
             "query_work",
+            "record_assessment",
             "record_commit",
             "register_agent",
             "resolve_conflict",
@@ -1617,7 +1618,7 @@ async fn mcp_exposes_the_complete_work_lifecycle_with_named_verification() {
             "agent_id": agent_id,
             "task": "mcp-lifecycle",
             "summary": "Extend CheckoutRouter with a stable retry policy",
-            "scopes": [{ "kind": "symbol", "key": "CheckoutRouter" }],
+            "scopes": [{ "kind": "symbol", "key": "CheckoutRouter" , "operation": "extend" }],
             "metadata": { "source": "e2e" }
         }),
     )
@@ -1637,7 +1638,7 @@ async fn mcp_exposes_the_complete_work_lifecycle_with_named_verification() {
         json!({
             "agent_id": agent_id,
             "intent_id": intent_id,
-            "scopes": [{ "kind": "symbol", "key": "CheckoutRouter" }]
+            "scopes": [{ "kind": "symbol", "key": "CheckoutRouter" , "operation": "extend" }]
         }),
     )
     .await;
@@ -1720,7 +1721,7 @@ async fn mcp_exposes_the_complete_work_lifecycle_with_named_verification() {
             "agent_id": agent_id,
             "task": "replace-payments",
             "summary": "Replace PaymentService with StripePaymentService",
-            "scopes": [{ "kind": "symbol", "key": "PaymentService" }]
+            "scopes": [{ "kind": "symbol", "key": "PaymentService" , "operation": "replace" }]
         }),
     )
     .await;
@@ -1733,7 +1734,7 @@ async fn mcp_exposes_the_complete_work_lifecycle_with_named_verification() {
             "agent_id": peer_id,
             "task": "extend-payments",
             "summary": "Add PayPal support to PaymentService",
-            "scopes": [{ "kind": "symbol", "key": "PaymentService" }]
+            "scopes": [{ "kind": "symbol", "key": "PaymentService" , "operation": "extend" }]
         }),
     )
     .await;
@@ -2500,14 +2501,14 @@ fn repeated_claim_overlap_warnings_use_the_persisted_conflict_and_graph_resoluti
         &first_agent,
         "first-claim",
         "Refactor the shared ledger",
-        "symbol:SharedLedger",
+        "symbol:SharedLedger=extend",
     );
     let second_intent = publish_test_intent(
         &repo.root,
         &second_agent,
         "second-claim",
         "Instrument the shared ledger",
-        "symbol:SharedLedger",
+        "symbol:SharedLedger=extend",
     );
 
     claim_test_scope(
@@ -2715,7 +2716,7 @@ fn acceptance_checks_dependencies_against_the_exact_candidate_commit() {
             "--summary".to_string(),
             "Build a candidate that declares the accepted dependency".to_string(),
             "--scope".to_string(),
-            "component:DependencyConsumer".to_string(),
+            "component:DependencyConsumer=extend".to_string(),
             "--depends-on".to_string(),
             dependency_intent.clone(),
         ],
@@ -2811,7 +2812,7 @@ fn default_store_rejects_changeset_worktrees_from_another_repository() {
         &registered_agent,
         "registered-cross-repository-attempt",
         "Keep the ChangeSet in the registered repository",
-        "component:RegisteredProjectWork",
+        "component:RegisteredProjectWork=extend",
     );
     claim_test_scope(
         &project.root,
@@ -2857,7 +2858,7 @@ fn default_store_rejects_changeset_worktrees_from_another_repository() {
         &no_worktree_agent,
         "no-worktree-cross-repository-attempt",
         "Use the default project database without registered worktree metadata",
-        "component:NoWorktreeProjectWork",
+        "component:NoWorktreeProjectWork=extend",
     );
     claim_test_scope(
         &project.root,
@@ -3020,7 +3021,7 @@ fn committed_dependency_keeps_its_original_accepted_ref_for_ancestry_checks() {
             "--summary".to_string(),
             "Build on the dependency candidate without its later integration commit".to_string(),
             "--scope".to_string(),
-            "component:AcceptedRefConsumer".to_string(),
+            "component:AcceptedRefConsumer=extend".to_string(),
             "--depends-on".to_string(),
             dependency_intent.clone(),
         ],
@@ -3208,7 +3209,7 @@ fn moved_dependency_ref_cannot_replace_the_pinned_accepted_commit() {
             "--summary".to_string(),
             "Reject a moved dependency ref".to_string(),
             "--scope".to_string(),
-            "component:TamperedRefConsumer".to_string(),
+            "component:TamperedRefConsumer=extend".to_string(),
             "--depends-on".to_string(),
             dependency_intent.clone(),
         ],
@@ -3308,9 +3309,9 @@ fn discarding_one_side_of_a_high_conflict_unblocks_the_survivor() {
             "--summary".to_string(),
             "Replace PaymentService with StripePaymentService".to_string(),
             "--scope".to_string(),
-            "symbol:PaymentService".to_string(),
+            "symbol:PaymentService=replace".to_string(),
             "--scope".to_string(),
-            "contract:payments.provider".to_string(),
+            "contract:payments.provider=replace".to_string(),
         ],
     );
     let survivor_intent = survivor_intent["data"]["intent"]["id"]
@@ -3330,9 +3331,9 @@ fn discarding_one_side_of_a_high_conflict_unblocks_the_survivor() {
             "--summary".to_string(),
             "Add PayPal support to PaymentService".to_string(),
             "--scope".to_string(),
-            "symbol:PaymentService".to_string(),
+            "symbol:PaymentService=extend".to_string(),
             "--scope".to_string(),
-            "contract:payments.provider".to_string(),
+            "contract:payments.provider=extend".to_string(),
         ],
     );
     let high_conflict = discarded_intent["data"]["conflicts"]
@@ -4390,7 +4391,7 @@ async fn mcp_resolve_conflict_is_limited_to_conflict_parties() {
             "agent_id": replacer_id,
             "task": "replace-payments",
             "summary": "Replace PaymentService with StripePaymentService",
-            "scopes": [{ "kind": "symbol", "key": "PaymentService" }]
+            "scopes": [{ "kind": "symbol", "key": "PaymentService" , "operation": "replace" }]
         }),
     )
     .await;
@@ -4402,7 +4403,7 @@ async fn mcp_resolve_conflict_is_limited_to_conflict_parties() {
             "agent_id": extender_id,
             "task": "extend-payments",
             "summary": "Add PayPal support to PaymentService",
-            "scopes": [{ "kind": "symbol", "key": "PaymentService" }]
+            "scopes": [{ "kind": "symbol", "key": "PaymentService" , "operation": "extend" }]
         }),
     )
     .await;
@@ -4672,7 +4673,7 @@ fn conflicts_check_rejects_an_intent_id_passed_as_intent_text() {
         &agent_id,
         "misparse-task",
         "Extend PaymentService with retries",
-        "symbol:PaymentService",
+        "symbol:PaymentService=extend",
     );
 
     let rejected = cli_failure(
@@ -4716,7 +4717,7 @@ fn intent_show_and_agent_list_expose_the_missing_read_surfaces() {
         &replacer,
         "replace-payments",
         "Replace PaymentService with StripePaymentService",
-        "symbol:PaymentService",
+        "symbol:PaymentService=replace",
     );
     let extend = cli_success(
         &repo.root,
@@ -4731,7 +4732,7 @@ fn intent_show_and_agent_list_expose_the_missing_read_surfaces() {
             "--summary".to_string(),
             "Add PayPal support to PaymentService".to_string(),
             "--scope".to_string(),
-            "symbol:PaymentService".to_string(),
+            "symbol:PaymentService=extend".to_string(),
         ],
     );
     let conflict_id = extend["data"]["conflicts"][0]["id"]
@@ -4756,7 +4757,7 @@ fn intent_show_and_agent_list_expose_the_missing_read_surfaces() {
     assert_eq!(shown["data"]["intent"]["status"], "INTENT");
     assert_eq!(
         shown["data"]["intent"]["scopes"][0],
-        json!({ "kind": "symbol", "key": "PaymentService" })
+        json!({ "kind": "symbol", "key": "PaymentService", "operation": "replace" })
     );
     assert_eq!(
         shown["data"]["agent"]["id"].as_str(),
@@ -4855,7 +4856,7 @@ fn later_conflicting_publish_surfaces_open_conflicts_to_the_earlier_publisher() 
         &first,
         "extend-payments",
         "Add PayPal support to PaymentService",
-        "symbol:PaymentService",
+        "symbol:PaymentService=extend",
     );
     claim_test_scope(&repo.root, &first, &first_intent, "symbol:PaymentService");
     start_test_work(&repo.root, &first, &first_intent);
@@ -4892,7 +4893,7 @@ fn later_conflicting_publish_surfaces_open_conflicts_to_the_earlier_publisher() 
             "--summary".to_string(),
             "Replace PaymentService with StripePaymentService".to_string(),
             "--scope".to_string(),
-            "symbol:PaymentService".to_string(),
+            "symbol:PaymentService=replace".to_string(),
         ],
     );
     let conflict_id = conflicting["data"]["conflicts"][0]["id"]
@@ -5045,7 +5046,7 @@ fn real_mcp_stdio_drives_the_lifecycle_through_named_verification_and_acceptance
             "agent_id": agent_id,
             "task": "stdio-lifecycle",
             "summary": "Drive the full lifecycle over the real stdio transport",
-            "scopes": [{ "kind": "symbol", "key": "StdioLifecycle" }]
+            "scopes": [{ "kind": "symbol", "key": "StdioLifecycle" , "operation": "extend" }]
         }),
     );
     let intent_id = published["intent"]["id"]
@@ -5060,7 +5061,7 @@ fn real_mcp_stdio_drives_the_lifecycle_through_named_verification_and_acceptance
         json!({
             "agent_id": agent_id,
             "intent_id": intent_id,
-            "scopes": [{ "kind": "symbol", "key": "StdioLifecycle" }]
+            "scopes": [{ "kind": "symbol", "key": "StdioLifecycle" , "operation": "extend" }]
         }),
     );
     let started = stdio_tool_call(

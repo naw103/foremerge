@@ -1,4 +1,4 @@
-use crate::model::{Conflict, Scope};
+use crate::model::{Conflict, Interaction, Operation, Scope, ScopeClaim, ScopeOverlapView};
 use chrono::Utc;
 use regex::Regex;
 use serde_json::json;
@@ -35,92 +35,40 @@ const SUBJECT_STOPLIST: &[&str] = &[
     "to", "update", "use", "we", "when", "while", "with", "yes",
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Operation {
-    Add,
-    Extend,
-    Modify,
-    Replace,
-    Rename,
-    Remove,
-    Migrate,
-    Unknown,
-}
-
-impl Operation {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Add => "add",
-            Self::Extend => "extend",
-            Self::Modify => "modify",
-            Self::Replace => "replace",
-            Self::Rename => "rename",
-            Self::Remove => "remove",
-            Self::Migrate => "migrate",
-            Self::Unknown => "unknown",
-        }
-    }
-
-    fn destructive(self) -> bool {
-        matches!(
-            self,
-            Self::Replace | Self::Rename | Self::Remove | Self::Migrate
-        )
-    }
-
-    fn additive(self) -> bool {
-        matches!(self, Self::Add | Self::Extend | Self::Modify)
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct IntentCandidate {
     pub id: String,
     pub summary: String,
-    pub scopes: Vec<Scope>,
+    pub scopes: Vec<ScopeClaim>,
 }
 
 #[derive(Debug, Clone)]
 struct Inference {
-    operation: Operation,
     subject: Option<String>,
     destination: Option<String>,
     added_variant: Option<String>,
-    confidence: f64,
 }
 
 fn infer(summary: &str, scopes: &[Scope]) -> Inference {
     if let Some(captures) = REPLACE_RE.captures(summary) {
         return Inference {
-            operation: Operation::Replace,
             subject: captures.get(1).map(|value| value.as_str().to_string()),
             destination: captures.get(2).map(|value| value.as_str().to_string()),
             added_variant: None,
-            confidence: 0.98,
         };
     }
     if let Some(captures) = ADD_SUPPORT_RE.captures(summary) {
         return Inference {
-            operation: Operation::Extend,
             subject: captures.get(2).map(|value| value.as_str().to_string()),
             destination: None,
             added_variant: captures.get(1).map(|value| value.as_str().to_string()),
-            confidence: 0.97,
         };
     }
 
-    let operation = classify_operation(summary);
-    let subject = select_subject(summary, scopes);
     Inference {
-        operation,
-        subject,
+        subject: select_subject(summary, scopes),
         destination: None,
         added_variant: None,
-        confidence: if operation == Operation::Unknown {
-            0.35
-        } else {
-            0.72
-        },
     }
 }
 
@@ -300,6 +248,24 @@ fn governed_phrase(summary: &str, operation: Operation) -> Option<Vec<String>> {
     Some(phrase)
 }
 
+/// Infer an operation from prose, for CLI callers who did not declare one.
+///
+/// A destructive reading is withdrawn when the verb governs only a peripheral
+/// artefact, or when the scope is merely a modifier inside the phrase it
+/// governs: "Delete the flaky ThumbnailCache benchmark test" destroys a test,
+/// not the cache. Such an intent still changes the scope, so it degrades to
+/// `Modify` rather than disappearing.
+pub fn infer_operation(summary: &str, scope: &Scope) -> Option<Operation> {
+    let operation = classify_operation(summary)?;
+    if operation.destructive()
+        && (destructive_object_is_peripheral(summary, operation)
+            || scope_is_modifier_in_object(summary, operation, scope))
+    {
+        return Some(Operation::Modify);
+    }
+    Some(operation)
+}
+
 /// Does the destructive verb govern only a peripheral artefact?
 ///
 /// `Delete the flaky ThumbnailCache benchmark test` destroys a test, not the
@@ -402,7 +368,7 @@ const OPERATION_BUCKETS: &[(Operation, &[&str])] = &[
     ),
 ];
 
-fn classify_operation(summary: &str) -> Operation {
+fn classify_operation(summary: &str) -> Option<Operation> {
     let lowered = summary.to_lowercase();
     let tokens: HashSet<&str> = lowered
         .split(|character: char| !character.is_ascii_alphanumeric())
@@ -412,10 +378,10 @@ fn classify_operation(summary: &str) -> Operation {
         if keywords.iter().any(|keyword| tokens.contains(keyword))
             || (*operation == Operation::Extend && lowered.contains("support"))
         {
-            return *operation;
+            return Some(*operation);
         }
     }
-    Operation::Unknown
+    None
 }
 
 /// Choose the fallback subject. Backticked spans are extracted first and are
@@ -522,123 +488,6 @@ fn jaccard(left: &HashSet<String>, right: &HashSet<String>) -> f64 {
     intersection / union
 }
 
-#[derive(Debug, Clone)]
-struct ScopeOverlap {
-    /// Best-overlapping scope declared by the source intent.
-    source: Scope,
-    /// Best-overlapping scope declared by the target intent.
-    target: Scope,
-    score: f64,
-    reason: String,
-}
-
-impl ScopeOverlap {
-    fn keys_differ(&self) -> bool {
-        !self.source.key.eq_ignore_ascii_case(&self.target.key)
-    }
-
-    /// Human-readable clause naming both sides when their keys differ, so
-    /// each agent can match the conflict against a scope it declared.
-    fn describe(&self) -> String {
-        if self.keys_differ() {
-            format!(
-                "`{}` overlaps `{}` ({})",
-                self.source.key, self.target.key, self.reason
-            )
-        } else {
-            format!("both rely on {}", self.reason)
-        }
-    }
-
-    /// The overlapping scope on whichever side has a migration-ordered kind
-    /// (`schema`, `migration`, `config`), independent of which intent is the
-    /// source. When both sides qualify, the canonically smaller scope wins so
-    /// the advice reads identically in either publish order.
-    /// Unordered canonical pair, identical for both publish orders of the
-    /// same two scopes, used to break score ties deterministically.
-    fn pair_key(&self) -> (String, String) {
-        let source = self.source.canonical();
-        let target = self.target.canonical();
-        if source <= target {
-            (source, target)
-        } else {
-            (target, source)
-        }
-    }
-
-    fn migration_scope(&self) -> Option<&Scope> {
-        let source_qualifies = MIGRATION_KINDS.contains(&self.source.kind.as_str());
-        let target_qualifies = MIGRATION_KINDS.contains(&self.target.kind.as_str());
-        match (source_qualifies, target_qualifies) {
-            (true, true) => {
-                if self.source.canonical() <= self.target.canonical() {
-                    Some(&self.source)
-                } else {
-                    Some(&self.target)
-                }
-            }
-            (true, false) => Some(&self.source),
-            (false, true) => Some(&self.target),
-            (false, false) => None,
-        }
-    }
-}
-
-/// Compare every explicit scope pair and keep the best tier, so an exact
-/// canonical match is never shadowed by an earlier-listed weak token overlap.
-fn scope_overlap(left: &[Scope], right: &[Scope]) -> Option<ScopeOverlap> {
-    let mut best: Option<ScopeOverlap> = None;
-    for first in left {
-        for second in right {
-            let candidate = if first.canonical() == second.canonical() {
-                Some(ScopeOverlap {
-                    source: first.clone(),
-                    target: second.clone(),
-                    score: 1.0,
-                    reason: "exact semantic scope".to_string(),
-                })
-            } else if first.key.eq_ignore_ascii_case(&second.key) {
-                Some(ScopeOverlap {
-                    source: first.clone(),
-                    target: second.clone(),
-                    score: 0.9,
-                    reason: "same semantic key across scope kinds".to_string(),
-                })
-            } else {
-                let similarity = jaccard(&tokenize(&first.key), &tokenize(&second.key));
-                (similarity >= 0.66).then(|| ScopeOverlap {
-                    source: first.clone(),
-                    target: second.clone(),
-                    score: 0.65 + similarity * 0.2,
-                    reason: "overlapping semantic scope tokens".to_string(),
-                })
-            };
-            if let Some(candidate) = candidate {
-                // Break score ties with an order-independent total order so the
-                // winning pair, and therefore the recorded scope and advice,
-                // cannot depend on which intent published first.
-                if best.as_ref().is_none_or(|current| {
-                    candidate.score > current.score
-                        || (candidate.score == current.score
-                            && candidate.pair_key() < current.pair_key())
-                }) {
-                    best = Some(candidate);
-                }
-            }
-        }
-    }
-    best
-}
-
-fn inferred_scope(left: &Inference, right: &Inference) -> Option<Scope> {
-    match (&left.subject, &right.subject) {
-        (Some(first), Some(second)) if first.eq_ignore_ascii_case(second) => {
-            Some(Scope::new("symbol", first))
-        }
-        _ => None,
-    }
-}
-
 /// Scope kinds where the right coordination advice is agreeing an explicit
 /// migration order rather than introducing a provider abstraction.
 const MIGRATION_KINDS: &[&str] = &["schema", "migration", "config"];
@@ -683,198 +532,249 @@ fn provider_suggestion(scope: &Scope, destructive: &Inference, additive: &Infere
     )
 }
 
-pub fn detect_pair(source: &IntentCandidate, target: &IntentCandidate) -> Vec<Conflict> {
-    let source_inference = infer(&source.summary, &source.scopes);
-    let target_inference = infer(&target.summary, &target.scopes);
-    let explicit_overlap = scope_overlap(&source.scopes, &target.scopes);
-    let inferred = inferred_scope(&source_inference, &target_inference);
-    let overlap = explicit_overlap.or_else(|| {
-        inferred.map(|scope| ScopeOverlap {
-            source: scope.clone(),
-            target: scope,
-            score: 0.78,
-            reason: "shared identifier inferred from intent".to_string(),
-        })
-    });
-    let summary_similarity = jaccard(&tokenize(&source.summary), &tokenize(&target.summary));
-    let mut results = Vec::new();
+/// Every scope both intents declare, paired with what each will do to it.
+///
+/// Two tiers, and the difference is what Foremerge is entitled to say. An
+/// exact canonical match between two *declared* operations is a fact, so the
+/// finding is asserted. A fuzzy key match, or an operation inferred from
+/// prose, is a candidate: it is surfaced for the calling agent to judge and
+/// never asserted, because the ambiguity Foremerge resolved to produce it is
+/// exactly the ambiguity it cannot resolve reliably.
+#[derive(Debug, Clone)]
+pub struct DeclaredOverlap {
+    pub source: ScopeClaim,
+    pub target: ScopeClaim,
+    pub interaction: Interaction,
+    pub asserted: bool,
+    pub score: f64,
+    pub reason: String,
+}
 
-    if let Some(overlap) = &overlap {
-        let scope = overlap.source.clone();
-        let scope_score = overlap.score;
-        let operations_collide = (source_inference.operation.destructive()
-            && target_inference.operation.additive())
-            || (target_inference.operation.destructive() && source_inference.operation.additive());
-        if operations_collide {
-            let (destructive, additive, destructive_scope, destructive_summary) =
-                if source_inference.operation.destructive() {
-                    (
-                        &source_inference,
-                        &target_inference,
-                        &overlap.source,
-                        source.summary.as_str(),
-                    )
-                } else {
-                    (
-                        &target_inference,
-                        &source_inference,
-                        &overlap.target,
-                        target.summary.as_str(),
-                    )
-                };
-            // A destructive verb that governs only a peripheral artefact does
-            // not threaten the shared scope. Report the overlap, but do not
-            // claim one agent is removing what the other is extending: that
-            // explanation would be false, and a false HIGH trains agents to
-            // ignore the severity that matters.
-            if destructive_object_is_peripheral(destructive_summary, destructive.operation)
-                || scope_is_modifier_in_object(
-                    destructive_summary,
-                    destructive.operation,
-                    destructive_scope,
-                )
-            {
-                results.push(make_conflict(
-                    "shared_semantic_scope",
-                    "MEDIUM",
-                    (scope_score * 0.7).min(0.8),
-                    source,
-                    target,
-                    Some(scope.clone()),
-                    format!(
-                        "Both intents reference `{}` ({}), but the {} applies to a peripheral artefact rather than to `{}` itself.",
-                        scope.key,
-                        overlap.describe(),
-                        destructive.operation.as_str(),
-                        scope.key
-                    ),
-                    "Confirm the peripheral change is not load-bearing for the other intent, then proceed. Claims remain advisory."
-                        .to_string(),
-                    json!({
-                        "rule": "FM-C003",
-                        "downgraded_from": "replace_vs_extend",
-                        "reason": "destructive verb does not govern the shared scope",
-                        "source_operation": source_inference.operation.as_str(),
-                        "target_operation": target_inference.operation.as_str(),
-                        "source_scope": overlap.source.canonical(),
-                        "target_scope": overlap.target.canonical(),
-                    }),
-                ));
-                return results;
-            }
-            let score =
-                (scope_score * destructive.confidence.min(additive.confidence) * 1.02).min(0.99);
-            let suggestion = if let Some(migration) = overlap.migration_scope() {
-                migration_order_suggestion(migration)
-            } else {
-                provider_suggestion(destructive_scope, destructive, additive)
-            };
-            results.push(make_conflict(
-                "replace_vs_extend",
-                "HIGH",
-                score,
-                source,
-                target,
-                Some(scope.clone()),
-                format!(
-                    "One intent will {} `{}` while the other will {} it; {}.",
-                    destructive.operation.as_str(),
-                    destructive
-                        .subject
-                        .as_deref()
-                        .unwrap_or(&destructive_scope.key),
-                    additive.operation.as_str(),
-                    overlap.describe()
-                ),
-                suggestion,
-                json!({
-                    "rule": "FM-C001",
-                    "source_operation": source_inference.operation.as_str(),
-                    "target_operation": target_inference.operation.as_str(),
-                    "overlap": overlap.reason,
-                    "source_scope": overlap.source.canonical(),
-                    "target_scope": overlap.target.canonical(),
-                    "detected_before_code": true,
-                }),
-            ));
-            return results;
+impl DeclaredOverlap {
+    fn keys_differ(&self) -> bool {
+        !self
+            .source
+            .scope
+            .key
+            .eq_ignore_ascii_case(&self.target.scope.key)
+    }
+
+    fn describe(&self) -> String {
+        if self.keys_differ() {
+            format!(
+                "`{}` overlaps `{}` ({})",
+                self.source.scope.key, self.target.scope.key, self.reason
+            )
+        } else {
+            format!("both declare {}", self.reason)
         }
+    }
 
-        if source_inference.operation.destructive()
-            && target_inference.operation.destructive()
-            && source_inference.destination != target_inference.destination
-        {
-            let explanation = if overlap.keys_differ() {
-                format!(
-                    "Both intents destructively change `{}` (overlapping `{}`), but they point toward different outcomes.",
-                    overlap.source.key, overlap.target.key
-                )
+    fn pair_key(&self) -> (String, String) {
+        let source = self.source.scope.canonical();
+        let target = self.target.scope.canonical();
+        if source <= target {
+            (source, target)
+        } else {
+            (target, source)
+        }
+    }
+
+    fn migration_scope(&self) -> Option<&Scope> {
+        let source_qualifies = MIGRATION_KINDS.contains(&self.source.scope.kind.as_str());
+        let target_qualifies = MIGRATION_KINDS.contains(&self.target.scope.kind.as_str());
+        match (source_qualifies, target_qualifies) {
+            (true, true) => {
+                if self.source.scope.canonical() <= self.target.scope.canonical() {
+                    Some(&self.source.scope)
+                } else {
+                    Some(&self.target.scope)
+                }
+            }
+            (true, false) => Some(&self.source.scope),
+            (false, true) => Some(&self.target.scope),
+            (false, false) => None,
+        }
+    }
+}
+
+/// Pair every declared scope on one side with every declared scope on the
+/// other, keeping only pairs that overlap, strongest first.
+pub fn declared_overlaps(left: &[ScopeClaim], right: &[ScopeClaim]) -> Vec<DeclaredOverlap> {
+    let mut found: Vec<DeclaredOverlap> = Vec::new();
+    for first in left {
+        for second in right {
+            let (score, reason, exact) = if first.scope.canonical() == second.scope.canonical() {
+                (1.0, "the same semantic scope", true)
+            } else if first.scope.key.eq_ignore_ascii_case(&second.scope.key) {
+                (0.9, "the same semantic key across scope kinds", false)
             } else {
-                format!(
-                    "Both intents destructively change `{}`, but they point toward different outcomes.",
-                    scope.key
+                let similarity = jaccard(&tokenize(&first.scope.key), &tokenize(&second.scope.key));
+                if similarity < 0.66 {
+                    continue;
+                }
+                (
+                    0.65 + similarity * 0.2,
+                    "overlapping semantic scope tokens",
+                    false,
                 )
             };
-            let suggestion = if let Some(migration) = overlap.migration_scope() {
+            let Some(interaction) = Interaction::classify(first.operation, second.operation) else {
+                continue;
+            };
+            found.push(DeclaredOverlap {
+                source: first.clone(),
+                target: second.clone(),
+                interaction,
+                // Only an exact scope match between two declared operations is
+                // a fact this detector may state on its own authority.
+                asserted: exact && !first.inferred && !second.inferred,
+                score,
+                reason: reason.to_string(),
+            });
+        }
+    }
+    found.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.pair_key().cmp(&b.pair_key()))
+    });
+    found
+}
+
+/// Coordination advice for one overlap. The verdict comes from the declared
+/// operations; the prose is read only to name things helpfully, so a bad
+/// reading costs a vaguer suggestion rather than a wrong severity.
+fn suggestion_for(
+    overlap: &DeclaredOverlap,
+    source: &IntentCandidate,
+    target: &IntentCandidate,
+) -> String {
+    match overlap.interaction {
+        Interaction::DestructiveVsAdditive => {
+            if let Some(migration) = overlap.migration_scope() {
+                return migration_order_suggestion(migration);
+            }
+            let (destructive_summary, additive_summary, destructive_scope) =
+                if overlap.source.operation.destructive() {
+                    (&source.summary, &target.summary, &overlap.source.scope)
+                } else {
+                    (&target.summary, &source.summary, &overlap.target.scope)
+                };
+            provider_suggestion(
+                destructive_scope,
+                &infer(destructive_summary, &[]),
+                &infer(additive_summary, &[]),
+            )
+        }
+        Interaction::DivergentRewrite => {
+            if let Some(migration) = overlap.migration_scope() {
                 migration_order_suggestion(migration)
             } else {
                 format!(
                     "Choose one target design for `{}` and record the decision before either agent continues.",
-                    scope.key
+                    overlap.source.scope.key
                 )
-            };
-            results.push(make_conflict(
-                "divergent_replacement",
-                "HIGH",
-                (scope_score * 0.94).min(0.97),
-                source,
-                target,
-                Some(scope.clone()),
-                explanation,
-                suggestion,
-                json!({
-                    "rule": "FM-C002",
-                    "source_destination": source_inference.destination,
-                    "target_destination": target_inference.destination,
-                    "source_scope": overlap.source.canonical(),
-                    "target_scope": overlap.target.canonical(),
-                }),
-            ));
-            return results;
+            }
         }
-
-        if source_inference.operation == Operation::Modify
-            || target_inference.operation == Operation::Modify
-            || (source_inference.operation.additive() && target_inference.operation.additive())
-        {
-            results.push(make_conflict(
-                "shared_semantic_scope",
-                "MEDIUM",
-                (scope_score * 0.76).min(0.86),
-                source,
-                target,
-                Some(scope.clone()),
-                format!(
-                    "Both intents change `{}` ({}); their implementations may depend on the same contract.",
-                    scope.key,
-                    overlap.describe()
-                ),
-                "Coordinate before publishing ChangeSets: exchange the proposed contract and dependency order. Claims remain advisory and both agents may continue.".to_string(),
-                json!({
-                    "rule": "FM-C003",
-                    "source_operation": source_inference.operation.as_str(),
-                    "target_operation": target_inference.operation.as_str(),
-                    "source_scope": overlap.source.canonical(),
-                    "target_scope": overlap.target.canonical(),
-                }),
-            ));
+        Interaction::SharedContract => {
+            "Coordinate before publishing ChangeSets: exchange the proposed contract and dependency order. Claims remain advisory and both agents may continue."
+                .to_string()
         }
     }
+}
 
-    let same_operation = source_inference.operation == target_inference.operation
-        && source_inference.operation != Operation::Unknown;
+fn explain(overlap: &DeclaredOverlap) -> String {
+    let source_operation = overlap.source.operation.as_str();
+    let target_operation = overlap.target.operation.as_str();
+    let key = &overlap.source.scope.key;
+    match overlap.interaction {
+        Interaction::DestructiveVsAdditive => {
+            let (destructive, additive) = if overlap.source.operation.destructive() {
+                (source_operation, target_operation)
+            } else {
+                (target_operation, source_operation)
+            };
+            format!(
+                "One intent will {destructive} `{key}` while the other will {additive} it; {}.",
+                overlap.describe()
+            )
+        }
+        Interaction::DivergentRewrite => format!(
+            "Both intents will {source_operation} `{key}` ({}), so they point toward different outcomes.",
+            overlap.describe()
+        ),
+        Interaction::SharedContract => format!(
+            "Both intents change `{key}` ({}); their implementations may depend on the same contract.",
+            overlap.describe()
+        ),
+    }
+}
+
+/// Severity for one overlap.
+///
+/// An asserted overlap takes the interaction's own severity, because both
+/// agents declared what they will do and the collision follows from those
+/// declarations. Anything unasserted is capped below HIGH: a fuzzy scope match
+/// or a prose-inferred operation is a reason to look, not a reason to stop.
+fn severity_for(overlap: &DeclaredOverlap) -> &'static str {
+    let declared = overlap.interaction.severity();
+    if overlap.asserted || declared != "HIGH" {
+        declared
+    } else {
+        "MEDIUM"
+    }
+}
+
+pub fn detect_pair(source: &IntentCandidate, target: &IntentCandidate) -> Vec<Conflict> {
+    let mut results = Vec::new();
+    let overlaps = declared_overlaps(&source.scopes, &target.scopes);
+
+    // Report the strongest interaction per canonical scope pair, so an intent
+    // declaring several related scopes does not produce a wall of findings.
+    let mut reported: HashSet<(String, String)> = HashSet::new();
+    for overlap in &overlaps {
+        if !reported.insert(overlap.pair_key()) {
+            continue;
+        }
+        let rule = match overlap.interaction {
+            Interaction::DestructiveVsAdditive => "FM-C001",
+            Interaction::DivergentRewrite => "FM-C002",
+            Interaction::SharedContract => "FM-C003",
+        };
+        results.push(make_conflict(
+            overlap.interaction.as_str(),
+            severity_for(overlap),
+            (overlap.score * 0.97).min(0.99),
+            source,
+            target,
+            Some(overlap.source.scope.clone()),
+            explain(overlap),
+            suggestion_for(overlap, source, target),
+            json!({
+                "rule": rule,
+                "source_operation": overlap.source.operation.as_str(),
+                "target_operation": overlap.target.operation.as_str(),
+                "source_scope": overlap.source.scope.canonical(),
+                "target_scope": overlap.target.scope.canonical(),
+                "source_operation_inferred": overlap.source.inferred,
+                "target_operation_inferred": overlap.target.inferred,
+                "asserted": overlap.asserted,
+                "overlap": overlap.reason,
+                "detected_before_code": true,
+            }),
+        ));
+    }
+
+    // Duplicated work is never asserted: whether two intents are the same work
+    // is a judgement about goals, which is the caller's to make.
+    let summary_similarity = jaccard(&tokenize(&source.summary), &tokenize(&target.summary));
+    let same_operation = overlaps
+        .first()
+        .is_some_and(|overlap| overlap.source.operation == overlap.target.operation);
     if summary_similarity >= 0.62
-        || (same_operation && overlap.is_some() && summary_similarity > 0.42)
+        || (same_operation && !overlaps.is_empty() && summary_similarity > 0.42)
     {
         results.push(make_conflict(
             "duplicate_work",
@@ -882,7 +782,7 @@ pub fn detect_pair(source: &IntentCandidate, target: &IntentCandidate) -> Vec<Co
             (0.55 + summary_similarity * 0.4).min(0.96),
             source,
             target,
-            overlap.as_ref().map(|value| value.source.clone()),
+            overlaps.first().map(|overlap| overlap.source.scope.clone()),
             "The two intents have substantially similar goals and may be solving the same work twice."
                 .to_string(),
             "Coordinate ownership: compare intended outcomes and either split the scope or pick one implementation owner."
@@ -890,14 +790,29 @@ pub fn detect_pair(source: &IntentCandidate, target: &IntentCandidate) -> Vec<Co
             json!({
                 "rule": "FM-C004",
                 "summary_jaccard": summary_similarity,
-                "source_operation": source_inference.operation.as_str(),
-                "target_operation": target_inference.operation.as_str(),
-                "source_scope": overlap.as_ref().map(|value| value.source.canonical()),
-                "target_scope": overlap.as_ref().map(|value| value.target.canonical()),
+                "asserted": false,
+                "source_scope": overlaps.first().map(|overlap| overlap.source.scope.canonical()),
+                "target_scope": overlaps.first().map(|overlap| overlap.target.scope.canonical()),
             }),
         ));
     }
     results
+}
+
+/// The factual view of one overlap, for the `related_work` response.
+pub fn overlap_views(source: &[ScopeClaim], target: &[ScopeClaim]) -> Vec<ScopeOverlapView> {
+    let mut seen = HashSet::new();
+    declared_overlaps(source, target)
+        .into_iter()
+        .filter(|overlap| seen.insert(overlap.pair_key()))
+        .map(|overlap| ScopeOverlapView {
+            scope: overlap.source.scope.clone(),
+            your_operation: overlap.source.operation,
+            their_operation: overlap.target.operation,
+            interaction: overlap.interaction,
+            asserted: overlap.asserted,
+        })
+        .collect()
 }
 
 pub fn claim_overlap_conflict(
@@ -908,12 +823,12 @@ pub fn claim_overlap_conflict(
     let source = IntentCandidate {
         id: source_intent_id.to_string(),
         summary: "semantic claim".to_string(),
-        scopes: vec![scope.clone()],
+        scopes: vec![ScopeClaim::new(scope.clone(), Operation::Modify)],
     };
     let target = IntentCandidate {
         id: target_intent_id.to_string(),
         summary: "existing semantic claim".to_string(),
-        scopes: vec![scope.clone()],
+        scopes: vec![ScopeClaim::new(scope.clone(), Operation::Modify)],
     };
     make_conflict(
         "overlapping_claim",
@@ -967,35 +882,94 @@ fn make_conflict(
 mod tests {
     use super::*;
 
-    fn candidate(id: &str, summary: &str, scopes: &[&str]) -> IntentCandidate {
+    fn claim(value: &str, operation: Operation) -> ScopeClaim {
+        ScopeClaim::new(Scope::parse(value).unwrap(), operation)
+    }
+
+    fn candidate(id: &str, summary: &str, scopes: Vec<ScopeClaim>) -> IntentCandidate {
         IntentCandidate {
             id: id.to_string(),
             summary: summary.to_string(),
-            scopes: scopes
-                .iter()
-                .map(|value| Scope::parse(value).unwrap())
-                .collect(),
+            scopes,
         }
     }
 
     #[test]
-    fn payment_service_conflict_is_high_and_suggests_provider() {
+    fn declared_replace_against_declared_extend_is_asserted_high() {
         let replace = candidate(
             "a",
             "Replace PaymentService with StripePaymentService",
-            &["symbol:PaymentService"],
+            vec![claim("symbol:PaymentService", Operation::Replace)],
         );
         let extend = candidate(
             "b",
             "Add PayPal support to PaymentService",
-            &["symbol:PaymentService"],
+            vec![claim("symbol:PaymentService", Operation::Extend)],
         );
         let conflicts = detect_pair(&extend, &replace);
         assert_eq!(conflicts[0].severity, "HIGH");
-        assert_eq!(conflicts[0].kind, "replace_vs_extend");
+        assert_eq!(conflicts[0].kind, "destructive_vs_additive");
+        assert_eq!(conflicts[0].evidence["asserted"], true);
         assert!(conflicts[0].suggestion.contains("PaymentProvider"));
-        assert!(conflicts[0].suggestion.contains("StripePaymentProvider"));
-        assert!(conflicts[0].suggestion.contains("PayPalPaymentProvider"));
+    }
+
+    /// The point of the redesign: wording carries no weight once the operation
+    /// is declared, so a phrasing no keyword list knows still collides.
+    #[test]
+    fn paraphrased_wording_does_not_change_a_declared_verdict() {
+        let replace = candidate(
+            "a",
+            "Consolidate all payment handling onto Stripe",
+            vec![claim("symbol:PaymentService", Operation::Replace)],
+        );
+        let extend = candidate(
+            "b",
+            "Back PaymentService with an additional PayPal gateway",
+            vec![claim("symbol:PaymentService", Operation::Extend)],
+        );
+        let conflicts = detect_pair(&replace, &extend);
+        assert_eq!(conflicts[0].severity, "HIGH");
+        assert_eq!(conflicts[0].kind, "destructive_vs_additive");
+    }
+
+    /// An operation Foremerge guessed is never allowed to stop an agent.
+    #[test]
+    fn an_inferred_operation_is_capped_below_high() {
+        let inferred = candidate(
+            "a",
+            "Delete the flaky ThumbnailCache benchmark test",
+            vec![ScopeClaim::inferred(
+                Scope::parse("component:ThumbnailCache").unwrap(),
+                Operation::Remove,
+            )],
+        );
+        let extend = candidate(
+            "b",
+            "Add TTL-based expiry to ThumbnailCache",
+            vec![claim("component:ThumbnailCache", Operation::Extend)],
+        );
+        let conflicts = detect_pair(&inferred, &extend);
+        assert_eq!(conflicts[0].severity, "MEDIUM");
+        assert_eq!(conflicts[0].evidence["asserted"], false);
+    }
+
+    /// A fuzzy scope match is a reason to look, not a reason to stop.
+    #[test]
+    fn a_fuzzy_scope_match_is_never_asserted() {
+        let replace = candidate(
+            "a",
+            "Replace the ledger service",
+            vec![claim("symbol:CreditLedgerService", Operation::Replace)],
+        );
+        let extend = candidate(
+            "b",
+            "Extend the credit ledger with promotional credits",
+            vec![claim("symbol:CreditLedger", Operation::Extend)],
+        );
+        let conflicts = detect_pair(&replace, &extend);
+        assert_eq!(conflicts[0].kind, "destructive_vs_additive");
+        assert_eq!(conflicts[0].severity, "MEDIUM");
+        assert_eq!(conflicts[0].evidence["asserted"], false);
     }
 
     #[test]
@@ -1003,14 +977,67 @@ mod tests {
         let first = candidate(
             "a",
             "Add PayPal support to PaymentService",
-            &["symbol:PaymentService"],
+            vec![claim("symbol:PaymentService", Operation::Extend)],
         );
         let second = candidate(
             "b",
             "Add avatar upload to UserProfile",
-            &["api:POST /avatar"],
+            vec![claim("api:POST /avatar", Operation::Add)],
         );
         assert!(detect_pair(&first, &second).is_empty());
+    }
+
+    #[test]
+    fn two_destructive_operations_are_a_divergent_rewrite() {
+        let first = candidate(
+            "a",
+            "Rewrite PaymentService on Stripe",
+            vec![claim("symbol:PaymentService", Operation::Replace)],
+        );
+        let second = candidate(
+            "b",
+            "Rewrite PaymentService on Adyen",
+            vec![claim("symbol:PaymentService", Operation::Replace)],
+        );
+        let conflicts = detect_pair(&first, &second);
+        assert_eq!(conflicts[0].kind, "divergent_rewrite");
+        assert_eq!(conflicts[0].severity, "HIGH");
+    }
+
+    #[test]
+    fn two_additive_operations_share_a_contract() {
+        let first = candidate(
+            "a",
+            "Add promotional credits",
+            vec![claim("symbol:CreditLedger", Operation::Extend)],
+        );
+        let second = candidate(
+            "b",
+            "Add referral credits",
+            vec![claim("symbol:CreditLedger", Operation::Extend)],
+        );
+        let conflicts = detect_pair(&first, &second);
+        assert_eq!(conflicts[0].kind, "shared_contract");
+        assert_eq!(conflicts[0].severity, "MEDIUM");
+    }
+
+    #[test]
+    fn a_migration_scope_gets_ordering_advice_rather_than_a_provider() {
+        let drop_column = candidate(
+            "a",
+            "Drop the legacy users.email column",
+            vec![claim("schema:users.email", Operation::Remove)],
+        );
+        let extend = candidate(
+            "b",
+            "Extend users.email validation with stricter normalization",
+            vec![claim("schema:users.email", Operation::Extend)],
+        );
+        let conflicts = detect_pair(&drop_column, &extend);
+        assert_eq!(conflicts[0].kind, "destructive_vs_additive");
+        assert_eq!(conflicts[0].severity, "HIGH");
+        assert!(conflicts[0].suggestion.contains("migration order"));
+        assert!(!conflicts[0].suggestion.contains("Provider"));
     }
 
     #[test]
@@ -1018,77 +1045,99 @@ mod tests {
         let first = candidate(
             "a",
             "Add retry support to BillingClient",
-            &["symbol:BillingClient"],
+            vec![claim("symbol:BillingClient", Operation::Extend)],
         );
         let second = candidate(
             "b",
             "Implement retry support for BillingClient",
-            &["symbol:BillingClient"],
+            vec![claim("symbol:BillingClient", Operation::Extend)],
         );
         let conflicts = detect_pair(&first, &second);
         let duplicate = conflicts
             .iter()
             .find(|conflict| conflict.kind == "duplicate_work")
             .expect("duplicate_work finding");
+        assert_eq!(duplicate.evidence["asserted"], false);
         assert!(duplicate.suggestion.to_lowercase().contains("coordinate"));
     }
 
     #[test]
-    fn sentence_starters_are_not_extracted_as_subjects() {
-        let migrate = candidate(
-            "a",
-            "Centralize credit ledger arithmetic into a new service and migrate callers. No schema changes; behavior preserved.",
-            &["symbol:CreditLedgerService"],
+    fn overlap_views_state_both_declared_operations() {
+        let views = overlap_views(
+            &[claim("symbol:PaymentService", Operation::Extend)],
+            &[claim("symbol:PaymentService", Operation::Replace)],
         );
-        let extend = candidate(
-            "b",
-            "Extend the credit ledger with promotional credits",
-            &["symbol:CreditLedger"],
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].your_operation, Operation::Extend);
+        assert_eq!(views[0].their_operation, Operation::Replace);
+        assert_eq!(views[0].interaction, Interaction::DestructiveVsAdditive);
+        assert!(views[0].asserted);
+    }
+
+    // --- prose inference, which now only serves CLI callers ---
+
+    #[test]
+    fn inference_withdraws_a_destructive_reading_of_a_peripheral_artefact() {
+        let cache = Scope::parse("component:ThumbnailCache").unwrap();
+        assert_eq!(
+            infer_operation("Delete the flaky ThumbnailCache benchmark test", &cache),
+            Some(Operation::Modify)
         );
-        let conflicts = detect_pair(&migrate, &extend);
-        assert_eq!(conflicts[0].kind, "replace_vs_extend");
-        assert!(!conflicts[0].explanation.contains("`No`"));
-        assert!(!conflicts[0].explanation.contains("No`"));
-        assert!(!conflicts[0].suggestion.contains("NoProvider"));
-        assert!(!conflicts[0].suggestion.contains("`No`"));
-        assert!(conflicts[0].explanation.contains("CreditLedgerService"));
+        assert_eq!(
+            infer_operation(
+                "Retire the obsolete feature flag guarding ThumbnailCache",
+                &cache
+            ),
+            Some(Operation::Modify)
+        );
     }
 
     #[test]
-    fn destructive_keywords_win_over_earlier_additive_words() {
-        let inference = infer("Add promotional credits, then migrate callers", &[]);
-        assert_eq!(inference.operation, Operation::Migrate);
-        assert!(inference.operation.destructive());
-    }
-
-    #[test]
-    fn additive_phrasing_of_a_destructive_migration_still_gates() {
-        let drop_column = candidate(
-            "a",
-            "Add a migration to drop the legacy users.email column",
-            &["schema:users.email"],
+    fn inference_withdraws_a_destructive_reading_when_the_scope_is_a_modifier() {
+        let cache = Scope::parse("component:ThumbnailCache").unwrap();
+        assert_eq!(
+            infer_operation(
+                "Move the ThumbnailCache eviction loop into a background task",
+                &cache
+            ),
+            Some(Operation::Modify)
         );
-        let extend = candidate(
-            "b",
-            "Extend users.email validation with stricter normalization",
-            &["schema:users.email"],
+    }
+
+    #[test]
+    fn inference_keeps_a_destructive_reading_that_governs_the_scope() {
+        assert_eq!(
+            infer_operation(
+                "Add a migration to drop the legacy users.email column",
+                &Scope::parse("schema:users.email").unwrap()
+            ),
+            Some(Operation::Remove)
         );
-        let conflicts = detect_pair(&drop_column, &extend);
-        assert_eq!(conflicts[0].kind, "replace_vs_extend");
-        assert_eq!(conflicts[0].severity, "HIGH");
-        assert_eq!(conflicts[0].evidence["rule"], "FM-C001");
-        assert!(conflicts[0].suggestion.contains("migration order"));
-        assert!(!conflicts[0].suggestion.contains("Provider"));
+        assert_eq!(
+            infer_operation(
+                "Replace PaymentService with StripePaymentService",
+                &Scope::parse("symbol:PaymentService").unwrap()
+            ),
+            Some(Operation::Replace)
+        );
     }
 
     #[test]
-    fn add_support_phrasing_classifies_extend() {
-        let inference = infer("Add support for exporting invoices as CSV", &[]);
-        assert_eq!(inference.operation, Operation::Extend);
+    fn inference_returns_nothing_for_wording_it_does_not_know() {
+        // "cut over" is ordinary English for a replacement and is not in the
+        // vocabulary. Widening the list would only move the boundary, which is
+        // why the declared operation exists.
+        assert_eq!(
+            infer_operation(
+                "Cut PaymentService over to Stripe exclusively",
+                &Scope::parse("symbol:PaymentService").unwrap()
+            ),
+            None
+        );
     }
 
     #[test]
-    fn camel_case_identifiers_require_two_humps_or_backticks() {
+    fn subject_selection_still_names_things_for_suggestions() {
         assert_eq!(
             infer("Update PaymentService for the new flow", &[])
                 .subject
@@ -1100,19 +1149,17 @@ mod tests {
             None
         );
         assert_eq!(
-            infer("Update the `Invoice` model rendering", &[])
+            infer("Rework billing::Ledger rounding", &[])
                 .subject
                 .as_deref(),
-            Some("Invoice")
+            Some("billing::Ledger")
         );
         assert_eq!(
-            infer("Then update the invoice rendering", &[]).subject,
-            None
+            infer("Update the `invoice_totals` rollup logic", &[])
+                .subject
+                .as_deref(),
+            Some("invoice_totals")
         );
-    }
-
-    #[test]
-    fn uppercase_noise_tokens_are_not_subjects() {
         assert_eq!(
             infer(
                 "Migrate rate limiting into the new GatewayService (tracked in JIRA_1234)",
@@ -1121,176 +1168,6 @@ mod tests {
             .subject
             .as_deref(),
             Some("GatewayService")
-        );
-        assert_eq!(
-            infer("Ship the Q3_2026 rollout checklist", &[]).subject,
-            None
-        );
-    }
-
-    #[test]
-    fn subject_prefers_a_declared_scope_key() {
-        let scopes = vec![Scope::parse("symbol:CreditLedger").unwrap()];
-        assert_eq!(
-            infer("Fix JIRA_1234 by extending CreditLedger", &scopes)
-                .subject
-                .as_deref(),
-            Some("CreditLedger")
-        );
-        assert_eq!(
-            infer(
-                "Extend CreditLedger and refresh BillingReport styling",
-                &scopes
-            )
-            .subject
-            .as_deref(),
-            Some("CreditLedger")
-        );
-    }
-
-    #[test]
-    fn backticked_lowercase_identifiers_are_subjects() {
-        assert_eq!(
-            infer("Update the `invoice_totals` rollup logic", &[])
-                .subject
-                .as_deref(),
-            Some("invoice_totals")
-        );
-    }
-
-    #[test]
-    fn module_qualified_tokens_are_subjects() {
-        assert_eq!(
-            infer("Rework billing::Ledger rounding", &[])
-                .subject
-                .as_deref(),
-            Some("billing::Ledger")
-        );
-    }
-
-    #[test]
-    fn migration_advice_is_publish_order_independent() {
-        let schema_side = candidate(
-            "a",
-            "Centralize credit ledger arithmetic and migrate callers",
-            &["schema:credit_ledger"],
-        );
-        let symbol_side = candidate(
-            "b",
-            "Extend the credit ledger with promotional credits",
-            &["symbol:CreditLedger"],
-        );
-        let forward = detect_pair(&schema_side, &symbol_side);
-        let reverse = detect_pair(&symbol_side, &schema_side);
-        assert_eq!(forward[0].kind, "replace_vs_extend");
-        assert_eq!(reverse[0].kind, "replace_vs_extend");
-        assert!(forward[0].suggestion.contains("migration order"));
-        assert_eq!(forward[0].suggestion, reverse[0].suggestion);
-        assert!(!reverse[0].suggestion.contains("Provider"));
-    }
-
-    #[test]
-    fn fallback_explanation_names_the_destructive_side_scope() {
-        let extend = candidate(
-            "a",
-            "Extend the credit ledger with promotional credits",
-            &["symbol:CreditLedger"],
-        );
-        let migrate = candidate(
-            "b",
-            "Centralize credit ledger arithmetic into a new service and migrate callers. No schema changes; behavior preserved.",
-            &["symbol:CreditLedgerService"],
-        );
-        let conflicts = detect_pair(&extend, &migrate);
-        assert_eq!(conflicts[0].kind, "replace_vs_extend");
-        assert!(
-            conflicts[0]
-                .explanation
-                .contains("will migrate `CreditLedgerService`")
-        );
-        assert!(conflicts[0].suggestion.contains("CreditLedgerProvider"));
-    }
-
-    #[test]
-    fn exact_scope_match_beats_earlier_token_overlap() {
-        let left = vec![
-            Scope::parse("symbol:CreditLedgerService").unwrap(),
-            Scope::parse("schema:users.email").unwrap(),
-        ];
-        let right = vec![
-            Scope::parse("symbol:CreditLedger").unwrap(),
-            Scope::parse("schema:users.email").unwrap(),
-        ];
-        let overlap = scope_overlap(&left, &right).expect("overlap");
-        assert_eq!(overlap.score, 1.0);
-        assert_eq!(overlap.reason, "exact semantic scope");
-        assert_eq!(overlap.source.canonical(), "schema:users.email");
-        assert_eq!(overlap.target.canonical(), "schema:users.email");
-    }
-
-    #[test]
-    fn schema_conflicts_suggest_migration_order() {
-        let rename = candidate(
-            "a",
-            "Rename users.email to users.primary_email and update the public user contract",
-            &["schema:users.email", "contract:api.User.email"],
-        );
-        let index = candidate(
-            "b",
-            "Add a unique index and normalization migration for users.email",
-            &["schema:users.email", "migration:users-email-unique"],
-        );
-        let conflicts = detect_pair(&rename, &index);
-        assert_eq!(conflicts[0].kind, "replace_vs_extend");
-        assert_eq!(conflicts[0].severity, "HIGH");
-        assert!(conflicts[0].suggestion.contains("migration order"));
-        assert!(!conflicts[0].suggestion.contains("Provider"));
-    }
-
-    #[test]
-    fn token_overlap_evidence_names_both_scopes() {
-        let migrate = candidate(
-            "a",
-            "Centralize credit ledger arithmetic into a new service and migrate callers",
-            &["symbol:CreditLedgerService"],
-        );
-        let extend = candidate(
-            "b",
-            "Extend the credit ledger with promotional credits",
-            &["symbol:CreditLedger"],
-        );
-        let conflicts = detect_pair(&migrate, &extend);
-        assert_eq!(conflicts[0].kind, "replace_vs_extend");
-        assert_eq!(
-            conflicts[0].evidence["source_scope"],
-            "symbol:creditledgerservice"
-        );
-        assert_eq!(conflicts[0].evidence["target_scope"], "symbol:creditledger");
-        assert!(conflicts[0].explanation.contains("CreditLedgerService"));
-        assert!(conflicts[0].explanation.contains("overlaps `CreditLedger`"));
-    }
-
-    #[test]
-    fn multi_scope_ties_resolve_identically_in_both_publish_orders() {
-        let rename = candidate(
-            "a",
-            "Rename users.email to users.primary_email across PaymentService",
-            &["schema:users.email", "symbol:PaymentService"],
-        );
-        let extend = candidate(
-            "b",
-            "Extend PaymentService with stricter users.email validation",
-            &["symbol:PaymentService", "schema:users.email"],
-        );
-        let forward = detect_pair(&rename, &extend);
-        let reverse = detect_pair(&extend, &rename);
-        assert_eq!(forward[0].kind, "replace_vs_extend");
-        assert_eq!(forward[0].kind, reverse[0].kind);
-        assert_eq!(forward[0].suggestion, reverse[0].suggestion);
-        assert!(forward[0].suggestion.contains("migration order"));
-        assert_eq!(
-            forward[0].scope.as_ref().map(Scope::canonical),
-            reverse[0].scope.as_ref().map(Scope::canonical),
         );
     }
 }

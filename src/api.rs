@@ -184,6 +184,8 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/intents", post(publish_intent))
         .route("/v1/intents/{id}", get(get_intent))
         .route("/v1/claims", post(claim_work))
+        .route("/v1/assessments", post(record_assessment))
+        .route("/v1/intents/{id}/assessments", get(list_assessments))
         .route("/v1/work", get(query_work))
         .route("/v1/work/{id}/start", post(start_work))
         .route("/v1/work/{id}/discard", post(discard_work))
@@ -415,6 +417,30 @@ async fn get_intent(
     let service = state.service;
     Ok(success(
         api_blocking(move || service.show_intent(&id)).await?,
+    ))
+}
+
+async fn record_assessment(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    ApiJson(request): ApiJson<RecordAssessmentRequest>,
+) -> ApiResult<Assessment> {
+    authorize(&state, &headers)?;
+    let service = state.service;
+    Ok(success(
+        api_blocking(move || service.record_assessment(request)).await?,
+    ))
+}
+
+async fn list_assessments(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Vec<Assessment>> {
+    authorize(&state, &headers)?;
+    let service = state.service;
+    Ok(success(
+        api_blocking(move || service.list_assessments(&id)).await?,
     ))
 }
 

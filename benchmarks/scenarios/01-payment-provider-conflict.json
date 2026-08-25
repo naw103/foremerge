@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "payment-provider-replace-versus-extend",
   "title": "Payment service replacement collides with provider extension",
   "category": "intent-conflict",
@@ -12,11 +12,13 @@
       "scopes": [
         {
           "kind": "symbol",
-          "key": "PaymentService"
+          "key": "PaymentService",
+          "operation": "replace"
         },
         {
           "kind": "contract",
-          "key": "payments.provider"
+          "key": "payments.provider",
+          "operation": "replace"
         }
       ]
     },
@@ -27,11 +29,13 @@
       "scopes": [
         {
           "kind": "symbol",
-          "key": "PaymentService"
+          "key": "PaymentService",
+          "operation": "extend"
         },
         {
           "kind": "contract",
-          "key": "payments.provider"
+          "key": "payments.provider",
+          "operation": "extend"
         }
       ]
     }

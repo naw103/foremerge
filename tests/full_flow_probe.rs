@@ -1,36 +1,32 @@
-//! What does an agent ACTUALLY receive end to end? Registers two agents,
-//! publishes both intents, then has both claim their scopes, exactly as a
-//! real coordinated run would. Prints every warning either agent sees.
+//! What two agents actually exchange, end to end.
+//!
+//! Registers both agents, publishes both intents, claims both sets of scopes,
+//! and prints everything either agent receives, including the `related_work`
+//! the second publisher is asked to assess. A single detector call cannot show
+//! this, and reading one is how the claim path went unexamined for so long.
 
 use foremerge::model::*;
 use foremerge::{Foremerge, Store};
 
-fn scope(kind: &str, key: &str) -> Scope {
-    Scope {
-        kind: kind.into(),
-        key: key.into(),
-    }
+fn claim(value: &str, operation: Operation) -> ScopeClaim {
+    ScopeClaim::new(Scope::parse(value).unwrap(), operation)
 }
 
-fn run(label: &str, a: (&str, &str, Vec<Scope>), b: (&str, &str, Vec<Scope>)) {
+fn run(label: &str, first: (&str, &str, Vec<ScopeClaim>), second: (&str, &str, Vec<ScopeClaim>)) {
     let service = Foremerge::new(Store::in_memory().unwrap());
-    let mut seen: Vec<(String, String, String)> = Vec::new();
+    println!("\n--- {label} ---");
 
-    for (who, task, summary, scopes) in [
-        ("agent-a", a.0, a.1, a.2.clone()),
-        ("agent-b", b.0, b.1, b.2.clone()),
-    ] {
+    let mut published = Vec::new();
+    for (name, (task, summary, scopes)) in [("agent-a", first), ("agent-b", second)] {
         let agent = service
             .register_agent(RegisterAgentRequest {
-                name: who.into(),
+                name: name.into(),
                 model: Some("probe".into()),
                 capabilities: vec![],
                 worktree: None,
             })
-            .unwrap()
-            .agent;
-
-        let published = service
+            .unwrap();
+        let outcome = service
             .publish_intent(PublishIntentRequest {
                 agent_id: agent.id.clone(),
                 task: task.into(),
@@ -41,109 +37,109 @@ fn run(label: &str, a: (&str, &str, Vec<Scope>), b: (&str, &str, Vec<Scope>)) {
                 metadata: serde_json::json!({}),
             })
             .unwrap();
-        for c in &published.conflicts {
-            seen.push((format!("{who} publish"), c.severity.clone(), c.kind.clone()));
+
+        for conflict in &outcome.conflicts {
+            println!(
+                "  {name} publish  {:<7} {}",
+                conflict.severity, conflict.kind
+            );
+        }
+        for related in &outcome.related_work {
+            println!(
+                "  {name} related  {} ({}) asserted={}",
+                related.agent, related.summary, related.asserted
+            );
+            for view in &related.overlap {
+                println!(
+                    "      {} : you {} / they {} -> {}",
+                    view.scope.canonical(),
+                    view.your_operation.as_str(),
+                    view.their_operation.as_str(),
+                    view.interaction.as_str()
+                );
+            }
+        }
+        if outcome.assessment_required {
+            println!(
+                "  {name} must assess {} item(s)",
+                outcome.related_work.len()
+            );
         }
 
         let claimed = service
             .claim_work(ClaimWorkRequest {
-                agent_id: agent.id,
-                intent_id: published.intent.id,
-                scopes,
+                agent_id: agent.id.clone(),
+                intent_id: outcome.intent.id.clone(),
+                scopes: scopes.iter().map(|claim| claim.scope.clone()).collect(),
                 reason: None,
                 lease_seconds: 3600,
             })
             .unwrap();
-        for c in &claimed.warnings {
-            seen.push((format!("{who} claim"), c.severity.clone(), c.kind.clone()));
+        for warning in &claimed.warnings {
+            println!("  {name} claim    {:<7} {}", warning.severity, warning.kind);
         }
+        published.push((agent, outcome));
     }
 
-    println!("\n--- {label} ---");
-    if seen.is_empty() {
-        println!("  (no warning of any kind)");
-    }
-    for (stage, severity, kind) in seen {
-        println!("  {:<16} {:<7} {}", stage, severity, kind);
+    // The second publisher closes the loop by recording what it concluded.
+    let (agent, outcome) = published.pop().unwrap();
+    if let Some(related) = outcome.related_work.first() {
+        let assessment = service
+            .record_assessment(RecordAssessmentRequest {
+                agent_id: agent.id,
+                intent_id: outcome.intent.id.clone(),
+                related_intent_id: related.intent_id.clone(),
+                verdict: AssessmentVerdict::Conflicts,
+                rationale: "The other intent removes the extension point this one needs".into(),
+                action: AssessmentAction::Rescoping,
+            })
+            .unwrap();
+        println!(
+            "  agent-b assessed {} -> {} / {}",
+            related.intent_id,
+            assessment.verdict.as_str(),
+            assessment.action.as_str()
+        );
     }
 }
 
 #[test]
 fn full_flow_probe() {
     let pay = vec![
-        scope("symbol", "PaymentService"),
-        scope("contract", "payments.provider"),
+        claim("symbol:PaymentService", Operation::Replace),
+        claim("contract:payments.provider", Operation::Replace),
     ];
-
+    let pay_extend = vec![
+        claim("symbol:PaymentService", Operation::Extend),
+        claim("contract:payments.provider", Operation::Extend),
+    ];
     run(
-        "A1 REAL CONFLICT, in-vocab wording (your demo)",
+        "REAL CONFLICT, declared operations",
         (
             "Modernize payments",
-            "Replace PaymentService with StripePaymentService",
-            pay.clone(),
+            "Consolidate all payment handling onto Stripe",
+            pay,
         ),
         (
             "Add payment option",
-            "Add PayPal support to PaymentService",
-            pay.clone(),
+            "Back PaymentService with a PayPal gateway",
+            pay_extend,
         ),
     );
 
+    let cache_modify = vec![claim("component:ThumbnailCache", Operation::Modify)];
+    let cache_extend = vec![claim("component:ThumbnailCache", Operation::Extend)];
     run(
-        "A2 SAME REAL CONFLICT, reworded",
-        (
-            "Modernize payments",
-            "Consolidate all payment handling onto Stripe in PaymentService",
-            pay.clone(),
-        ),
-        (
-            "Add payment option",
-            "Back PaymentService with an additional PayPal gateway",
-            pay.clone(),
-        ),
-    );
-
-    run(
-        "A3 SAME REAL CONFLICT, reworded again",
-        (
-            "Modernize payments",
-            "Cut PaymentService over to Stripe exclusively",
-            pay.clone(),
-        ),
-        (
-            "Add payment option",
-            "Teach PaymentService to accept PayPal payments",
-            pay.clone(),
-        ),
-    );
-
-    let cache = vec![scope("component", "ThumbnailCache")];
-
-    run(
-        "B1 NO CONFLICT, harmless work, same scope",
+        "COMPATIBLE WORK, same scope",
         (
             "Clean up tests",
             "Delete the flaky ThumbnailCache benchmark test",
-            cache.clone(),
+            cache_modify,
         ),
         (
             "Bound the cache",
             "Implement a size limit for ThumbnailCache",
-            cache.clone(),
-        ),
-    );
-
-    run(
-        "B2 NO CONFLICT, harmless work, DISJOINT scopes",
-        (
-            "Clean up tests",
-            "Delete the flaky ThumbnailCache benchmark test",
-            vec![scope("file", "tests/thumbnail_bench.rs")],
-        ),
-        (
-            "Bound the cache",
-            "Implement a size limit for ThumbnailCache",
-            vec![scope("symbol", "ThumbnailCache")],
+            cache_extend,
         ),
     );
     println!();

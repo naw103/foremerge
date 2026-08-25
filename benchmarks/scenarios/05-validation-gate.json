@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "failed-payment-validation-gate",
   "title": "A failing candidate must not change the target ref",
   "category": "verification-gate",
@@ -12,11 +12,13 @@
       "scopes": [
         {
           "kind": "symbol",
-          "key": "PaymentProvider"
+          "key": "PaymentProvider",
+          "operation": "modify"
         },
         {
           "kind": "test",
-          "key": "payment_provider_default"
+          "key": "payment_provider_default",
+          "operation": "modify"
         }
       ],
       "candidate": {

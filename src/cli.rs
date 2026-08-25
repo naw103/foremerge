@@ -83,6 +83,9 @@ enum Commands {
     /// Check, list, and resolve intent conflicts.
     #[command(subcommand)]
     Conflicts(ConflictCommand),
+    /// Record and read assessments of related work.
+    #[command(subcommand)]
+    Assess(AssessCommand),
     /// Publish, inspect, validate, accept, and commit ChangeSets.
     #[command(subcommand)]
     Changeset(ChangeSetCommand),
@@ -350,6 +353,35 @@ enum ConflictCommand {
         /// ids (msg_*) that produced the agreement.
         #[arg(long)]
         rationale: String,
+    },
+}
+
+/// Foremerge states which scopes overlap and how the declared operations
+/// relate. What that means for the work is the agent's judgement, and
+/// recording it is what turns that judgement into provenance.
+#[derive(Debug, Subcommand)]
+enum AssessCommand {
+    /// Record what this agent concluded about one related intent.
+    Record {
+        #[arg(long)]
+        agent_id: String,
+        #[arg(long)]
+        intent_id: String,
+        #[arg(long)]
+        related_intent_id: String,
+        /// conflicts, compatible, duplicate, or depends_on.
+        #[arg(long)]
+        verdict: String,
+        #[arg(long)]
+        rationale: String,
+        /// proceeding, rescoping, waiting, or abandoning.
+        #[arg(long)]
+        action: String,
+    },
+    /// List every assessment recorded for one intent.
+    List {
+        #[arg(long)]
+        intent_id: String,
     },
 }
 
@@ -899,9 +931,9 @@ async fn execute_service(
         }) => serde_json::to_value(service.publish_intent(PublishIntentRequest {
             agent_id,
             task,
+            scopes: parse_scope_claims(&scopes, &summary)?,
             summary,
             rationale,
-            scopes: parse_scopes(&scopes)?,
             depends_on,
             metadata: serde_json::from_str(&metadata).context("parse --metadata-json")?,
         })?)?,
@@ -969,9 +1001,31 @@ async fn execute_service(
         }) => serde_json::to_value(service.check_conflicts(ConflictCheckRequest {
             agent_id,
             intent_id,
+            scopes: parse_scope_claims(&scopes, intent.as_deref().unwrap_or_default())?,
             intent,
-            scopes: parse_scopes(&scopes)?,
         })?)?,
+        Commands::Assess(AssessCommand::Record {
+            agent_id,
+            intent_id,
+            related_intent_id,
+            verdict,
+            rationale,
+            action,
+        }) => serde_json::to_value(
+            service.record_assessment(RecordAssessmentRequest {
+                agent_id,
+                intent_id,
+                related_intent_id,
+                verdict: serde_json::from_value(serde_json::json!(verdict))
+                    .context("--verdict must be conflicts, compatible, duplicate, or depends_on")?,
+                rationale,
+                action: serde_json::from_value(serde_json::json!(action))
+                    .context("--action must be proceeding, rescoping, waiting, or abandoning")?,
+            })?,
+        )?,
+        Commands::Assess(AssessCommand::List { intent_id }) => {
+            serde_json::to_value(service.list_assessments(&intent_id)?)?
+        }
         Commands::Conflicts(ConflictCommand::List { status }) => {
             serde_json::to_value(service.list_conflicts(status.as_deref())?)?
         }
@@ -1135,6 +1189,34 @@ async fn execute_service(
 
 fn parse_scopes(values: &[String]) -> Result<Vec<Scope>> {
     values.iter().map(|value| Scope::parse(value)).collect()
+}
+
+/// Parse `KIND:KEY=OPERATION`, the form an intent declares.
+///
+/// The operation may be omitted, in which case it is inferred from the
+/// summary and marked as inferred. Agents always declare it; the inference
+/// exists so a person typing at a terminal is not forced to. An inferred
+/// operation never produces an asserted conflict, so the cost of omitting it
+/// is a weaker signal rather than a wrong one.
+fn parse_scope_claims(values: &[String], summary: &str) -> Result<Vec<ScopeClaim>> {
+    values
+        .iter()
+        .map(|value| {
+            let (scope_text, operation) = match value.rsplit_once('=') {
+                Some((scope_text, operation)) => (scope_text, Some(operation)),
+                None => (value.as_str(), None),
+            };
+            let scope = Scope::parse(scope_text)?;
+            match operation {
+                Some(operation) => Ok(ScopeClaim::new(scope, Operation::parse(operation)?)),
+                None => {
+                    let inferred = crate::conflict::infer_operation(summary, &scope)
+                        .unwrap_or(Operation::Modify);
+                    Ok(ScopeClaim::inferred(scope, inferred))
+                }
+            }
+        })
+        .collect()
 }
 
 fn scope_text(scope: &Scope) -> String {

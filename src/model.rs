@@ -106,6 +106,266 @@ fn normalize_symbol_key(key: &str) -> String {
         .join("::")
 }
 
+/// What an intent will do to one semantic scope.
+///
+/// Declared by the agent rather than inferred from its prose. The agent
+/// already knows which it means, and English paraphrase is not recoverable by
+/// keyword matching: "consolidate onto Stripe", "cut over to Stripe" and
+/// "replace with Stripe" are one operation written three ways, and a fixed
+/// vocabulary will always be one phrasing behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Operation {
+    /// Introduce something that did not exist.
+    Add,
+    /// Widen an existing thing while preserving what depends on it.
+    Extend,
+    /// Change behaviour without removing an extension point.
+    Modify,
+    /// Substitute a different implementation for this one.
+    Replace,
+    /// Delete this thing.
+    Remove,
+    /// Change this thing's name or address.
+    Rename,
+    /// Move this thing to a new representation, ordered against its readers.
+    Migrate,
+}
+
+impl Operation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Extend => "extend",
+            Self::Modify => "modify",
+            Self::Replace => "replace",
+            Self::Remove => "remove",
+            Self::Rename => "rename",
+            Self::Migrate => "migrate",
+        }
+    }
+
+    pub const ALL: &'static [Operation] = &[
+        Self::Add,
+        Self::Extend,
+        Self::Modify,
+        Self::Replace,
+        Self::Remove,
+        Self::Rename,
+        Self::Migrate,
+    ];
+
+    /// Removes or relocates what other work may depend on.
+    pub fn destructive(self) -> bool {
+        matches!(
+            self,
+            Self::Replace | Self::Remove | Self::Rename | Self::Migrate
+        )
+    }
+
+    /// Preserves what other work depends on.
+    pub fn additive(self) -> bool {
+        matches!(self, Self::Add | Self::Extend | Self::Modify)
+    }
+
+    pub fn parse(value: &str) -> anyhow::Result<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|operation| operation.as_str().eq_ignore_ascii_case(value.trim()))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "INVALID_INPUT: unknown operation '{value}'; use one of {}",
+                    Self::ALL
+                        .iter()
+                        .map(|operation| operation.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+    }
+}
+
+/// A semantic scope together with what the declaring intent will do to it.
+///
+/// An intent commonly treats its scopes differently, replacing one while
+/// adding another, so the operation belongs here rather than on the intent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScopeClaim {
+    #[serde(flatten)]
+    pub scope: Scope,
+    pub operation: Operation,
+    /// True when the operation was inferred from prose instead of declared,
+    /// which happens only for CLI callers who did not pass `--operation`.
+    /// An inferred operation never produces an asserted conflict.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inferred: bool,
+}
+
+impl ScopeClaim {
+    pub fn new(scope: Scope, operation: Operation) -> Self {
+        Self {
+            scope,
+            operation,
+            inferred: false,
+        }
+    }
+
+    pub fn inferred(scope: Scope, operation: Operation) -> Self {
+        Self {
+            scope,
+            operation,
+            inferred: true,
+        }
+    }
+
+    pub fn normalized(&self) -> anyhow::Result<Self> {
+        Ok(Self {
+            scope: self.scope.normalized()?,
+            operation: self.operation,
+            inferred: self.inferred,
+        })
+    }
+}
+
+/// How two declared operations on the same scope relate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Interaction {
+    /// One intent removes or relocates what the other is building on.
+    DestructiveVsAdditive,
+    /// Both intents replace the same thing, toward different designs.
+    DivergentRewrite,
+    /// Both intents grow the same thing and must agree on its shape.
+    SharedContract,
+}
+
+impl Interaction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DestructiveVsAdditive => "destructive_vs_additive",
+            Self::DivergentRewrite => "divergent_rewrite",
+            Self::SharedContract => "shared_contract",
+        }
+    }
+
+    /// The factual relationship between two declared operations. Returns
+    /// `None` when the pair implies no interaction worth surfacing.
+    pub fn classify(left: Operation, right: Operation) -> Option<Self> {
+        if (left.destructive() && right.additive()) || (right.destructive() && left.additive()) {
+            return Some(Self::DestructiveVsAdditive);
+        }
+        if left.destructive() && right.destructive() {
+            return Some(Self::DivergentRewrite);
+        }
+        Some(Self::SharedContract)
+    }
+
+    /// Severity for an interaction both sides declared. Inferred operations
+    /// are capped separately by the detector and never reach HIGH.
+    pub fn severity(self) -> &'static str {
+        match self {
+            Self::DestructiveVsAdditive | Self::DivergentRewrite => "HIGH",
+            Self::SharedContract => "MEDIUM",
+        }
+    }
+}
+
+/// One overlapping scope between two intents, stated as fact.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopeOverlapView {
+    pub scope: Scope,
+    pub your_operation: Operation,
+    pub their_operation: Operation,
+    pub interaction: Interaction,
+    /// False when either side's operation was inferred from prose.
+    pub asserted: bool,
+}
+
+/// Another agent's active intent surfaced for the caller to assess.
+///
+/// Foremerge retrieves candidates and states what overlaps; the calling agent
+/// decides what it means and records that decision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelatedWork {
+    pub intent_id: String,
+    pub agent_id: String,
+    pub agent: String,
+    pub task: String,
+    pub summary: String,
+    pub status: String,
+    pub overlap: Vec<ScopeOverlapView>,
+    /// Why this intent was surfaced when no operation pair asserts a conflict,
+    /// for example similar wording that may indicate duplicated work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why_surfaced: Option<String>,
+    /// True when at least one overlap is a declared operation pair, so
+    /// Foremerge is stating a conflict rather than offering a candidate.
+    pub asserted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordAssessmentRequest {
+    pub agent_id: String,
+    pub intent_id: String,
+    pub related_intent_id: String,
+    pub verdict: AssessmentVerdict,
+    pub rationale: String,
+    pub action: AssessmentAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssessmentVerdict {
+    Conflicts,
+    Compatible,
+    Duplicate,
+    DependsOn,
+}
+
+impl AssessmentVerdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Conflicts => "conflicts",
+            Self::Compatible => "compatible",
+            Self::Duplicate => "duplicate",
+            Self::DependsOn => "depends_on",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssessmentAction {
+    Proceeding,
+    Rescoping,
+    Waiting,
+    Abandoning,
+}
+
+impl AssessmentAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Proceeding => "proceeding",
+            Self::Rescoping => "rescoping",
+            Self::Waiting => "waiting",
+            Self::Abandoning => "abandoning",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Assessment {
+    pub id: String,
+    pub agent_id: String,
+    pub intent_id: String,
+    pub related_intent_id: String,
+    pub verdict: AssessmentVerdict,
+    pub rationale: String,
+    pub action: AssessmentAction,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterAgentRequest {
     pub name: String,
@@ -151,7 +411,7 @@ pub struct PublishIntentRequest {
     #[serde(default)]
     pub rationale: Option<String>,
     #[serde(default)]
-    pub scopes: Vec<Scope>,
+    pub scopes: Vec<ScopeClaim>,
     #[serde(default)]
     pub depends_on: Vec<String>,
     #[serde(default = "empty_object")]
@@ -166,7 +426,7 @@ pub struct Intent {
     pub task: String,
     pub summary: String,
     pub rationale: Option<String>,
-    pub scopes: Vec<Scope>,
+    pub scopes: Vec<ScopeClaim>,
     pub depends_on: Vec<String>,
     pub metadata: Value,
     pub status: String,
@@ -191,6 +451,15 @@ pub struct IntentDetail {
 pub struct PublishIntentOutcome {
     pub intent: Intent,
     pub conflicts: Vec<Conflict>,
+    /// Other active intents that touch this one, with the overlap stated as
+    /// fact. The caller is expected to assess each and record what it decided.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_work: Vec<RelatedWork>,
+    /// True while any surfaced item has not yet been assessed by this agent.
+    #[serde(default)]
+    pub assessment_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
     /// Advisory notes about the intent itself, as opposed to conflicts with
     /// other agents. Empty unless a repository opts in to extra checking.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -267,7 +536,7 @@ pub struct ConflictCheckRequest {
     #[serde(default)]
     pub intent: Option<String>,
     #[serde(default)]
-    pub scopes: Vec<Scope>,
+    pub scopes: Vec<ScopeClaim>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

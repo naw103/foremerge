@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "independent-docs-and-thumbnail-cache",
   "title": "Independent work should proceed without a conflict warning",
   "category": "negative-control",
@@ -12,11 +12,13 @@
       "scopes": [
         {
           "kind": "file",
-          "key": "CONTRIBUTING.md"
+          "key": "CONTRIBUTING.md",
+          "operation": "extend"
         },
         {
           "kind": "domain",
-          "key": "developer-documentation"
+          "key": "developer-documentation",
+          "operation": "extend"
         }
       ]
     },
@@ -27,11 +29,13 @@
       "scopes": [
         {
           "kind": "component",
-          "key": "ThumbnailCache"
+          "key": "ThumbnailCache",
+          "operation": "add"
         },
         {
           "kind": "config",
-          "key": "media.thumbnail_cache"
+          "key": "media.thumbnail_cache",
+          "operation": "add"
         }
       ]
     }

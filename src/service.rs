@@ -361,11 +361,19 @@ impl Foremerge {
                 intent.updated_at,
             ],
         )?;
-        for scope in &intent.scopes {
+        for claim in &intent.scopes {
             tx.execute(
-                "INSERT INTO intent_scopes(intent_id, scope_kind, scope_key, canonical_scope)
-                 VALUES(?1, ?2, ?3, ?4)",
-                params![intent.id, scope.kind, scope.key, scope.canonical()],
+                "INSERT INTO intent_scopes(intent_id, scope_kind, scope_key, canonical_scope,
+                                           operation, operation_inferred)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    intent.id,
+                    claim.scope.kind,
+                    claim.scope.key,
+                    claim.scope.canonical(),
+                    claim.operation.as_str(),
+                    claim.inferred,
+                ],
             )?;
         }
 
@@ -419,25 +427,54 @@ impl Foremerge {
         };
         let candidates = active_candidates(&tx, Some(&intent.id))?;
         let mut conflicts = Vec::new();
+        let mut related_work = Vec::new();
         for candidate in candidates {
-            for mut detected in conflict::detect_pair(&source, &candidate) {
+            let detected = conflict::detect_pair(&source, &candidate);
+            let overlap = conflict::overlap_views(&source.scopes, &candidate.scopes);
+            if !detected.is_empty() || !overlap.is_empty() {
+                related_work.push(related_work_view(&tx, &candidate, overlap, &detected)?);
+            }
+            for mut detected in detected {
                 detected.source_intent_id = Some(intent.id.clone());
                 conflicts.push(persist_conflict(&tx, &detected, Some(&agent.id))?);
             }
         }
+        // Strongest first, so an agent reading top-down sees asserted
+        // collisions before candidates it merely ought to look at.
+        related_work.sort_by(|a, b| {
+            b.asserted
+                .cmp(&a.asserted)
+                .then_with(|| b.overlap.len().cmp(&a.overlap.len()))
+                .then_with(|| a.intent_id.cmp(&b.intent_id))
+        });
         // Opt-in advisory: a scope naming a symbol that exists nowhere protects
         // nothing, because the real symbol stays unclaimed while the agent
         // believes it holds a reservation. Computed before commit so the read
         // uses the same connection, but it never blocks the publish.
         let warnings = if verify_symbol_scopes(&tx)? {
-            missing_symbol_warnings(&agent.worktree, &intent.scopes)
+            missing_symbol_warnings(
+                &agent.worktree,
+                &intent
+                    .scopes
+                    .iter()
+                    .map(|claim| claim.scope.clone())
+                    .collect::<Vec<_>>(),
+            )
         } else {
             Vec::new()
         };
         tx.commit()?;
+        let assessment_required = !related_work.is_empty();
+        let next = assessment_required.then(|| {
+            "Assess each entry in related_work against your own plan and call record_assessment for each before you write code. Foremerge states what overlaps; deciding what it means is yours."
+                .to_string()
+        });
         Ok(PublishIntentOutcome {
             intent,
             conflicts,
+            related_work,
+            assessment_required,
+            next,
             warnings,
         })
     }
@@ -509,11 +546,143 @@ impl Foremerge {
         Ok(adopted)
     }
 
+    /// Record what this agent concluded about one piece of related work.
+    ///
+    /// Foremerge states which scopes overlap and how the declared operations
+    /// relate. Whether that constitutes a conflict, a duplicate, a dependency
+    /// or nothing at all is a judgement about intent, and the agent doing the
+    /// work is better placed to make it than any rule here. Recording the
+    /// judgement turns it into provenance: a later reader sees not only that
+    /// two intents overlapped but what the agent decided and why.
+    pub fn record_assessment(&self, request: RecordAssessmentRequest) -> Result<Assessment> {
+        if request.rationale.trim().is_empty() {
+            bail!("INVALID_INPUT: record_assessment requires a rationale");
+        }
+        if request.intent_id == request.related_intent_id {
+            bail!("INVALID_INPUT: an intent cannot be assessed against itself");
+        }
+        let mut conn = self.store.lock()?;
+        let tx = Store::immediate_tx(&mut conn)?;
+        let agent = agent_by_id(&tx, &request.agent_id)?;
+        let intent = intent_by_id(&tx, &request.intent_id)?;
+        let related = intent_by_id(&tx, &request.related_intent_id)?;
+        if intent.agent_id != agent.id {
+            bail!("FORBIDDEN: an agent may only assess related work for its own intent");
+        }
+        let assessment = Assessment {
+            id: id("asm"),
+            agent_id: agent.id.clone(),
+            intent_id: intent.id.clone(),
+            related_intent_id: related.id.clone(),
+            verdict: request.verdict,
+            rationale: request.rationale.trim().to_string(),
+            action: request.action,
+            created_at: Utc::now().to_rfc3339(),
+        };
+        tx.execute(
+            "INSERT INTO assessments(id, agent_id, intent_id, related_intent_id, verdict,
+                                     rationale, action, created_at)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                assessment.id,
+                assessment.agent_id,
+                assessment.intent_id,
+                assessment.related_intent_id,
+                assessment.verdict.as_str(),
+                assessment.rationale,
+                assessment.action.as_str(),
+                assessment.created_at,
+            ],
+        )?;
+        let intent_node = Store::upsert_node(
+            &tx,
+            "Intent",
+            &intent.id,
+            &intent.summary,
+            &serde_json::to_value(&intent)?,
+        )?;
+        let related_node = Store::upsert_node(
+            &tx,
+            "Intent",
+            &related.id,
+            &related.summary,
+            &serde_json::to_value(&related)?,
+        )?;
+        Store::link_nodes(
+            &tx,
+            &intent_node,
+            &related_node,
+            "ASSESSED",
+            &json!({
+                "verdict": assessment.verdict.as_str(),
+                "action": assessment.action.as_str(),
+            }),
+        )?;
+        Store::append_event(
+            &tx,
+            "intent.assessed",
+            "Intent",
+            &intent.id,
+            Some(&agent.id),
+            &serde_json::to_value(&assessment)?,
+        )?;
+        tx.commit()?;
+        Ok(assessment)
+    }
+
+    /// Every assessment this intent has recorded, oldest first.
+    pub fn list_assessments(&self, intent_id: &str) -> Result<Vec<Assessment>> {
+        let conn = self.store.lock()?;
+        let mut statement = conn.prepare(
+            "SELECT id, agent_id, intent_id, related_intent_id, verdict, rationale, action,
+                    created_at FROM assessments WHERE intent_id = ?1 ORDER BY created_at, id",
+        )?;
+        let rows = statement
+            .query_map([intent_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(
+                |(
+                    id,
+                    agent_id,
+                    intent_id,
+                    related_intent_id,
+                    verdict,
+                    rationale,
+                    action,
+                    created_at,
+                )| {
+                    Ok(Assessment {
+                        id,
+                        agent_id,
+                        intent_id,
+                        related_intent_id,
+                        verdict: serde_json::from_value(json!(verdict))?,
+                        rationale,
+                        action: serde_json::from_value(json!(action))?,
+                        created_at,
+                    })
+                },
+            )
+            .collect()
+    }
+
     pub fn claim_work(&self, mut request: ClaimWorkRequest) -> Result<ClaimOutcome> {
         if request.scopes.is_empty() {
             bail!("INVALID_INPUT: claim_work requires at least one semantic scope");
         }
-        request.scopes = normalize_scopes(request.scopes)?;
+        request.scopes = normalize_plain_scopes(request.scopes)?;
         let mut conn = self.store.lock()?;
         let tx = Store::immediate_tx(&mut conn)?;
         let agent = agent_by_id(&tx, &request.agent_id)?;
@@ -2594,7 +2763,7 @@ impl Foremerge {
             intent
                 .scopes
                 .iter()
-                .map(|scope| format!("{}:{}", scope.kind, scope.key))
+                .map(|claim| format!("{}:{}", claim.scope.kind, claim.scope.key))
                 .collect::<Vec<_>>()
         };
         let mut conflicts = Vec::new();
@@ -3141,8 +3310,56 @@ fn require_state(current: &str, expected: &[&str], action: &str) -> Result<()> {
     }
 }
 
-fn normalize_scopes(scopes: Vec<Scope>) -> Result<Vec<Scope>> {
+fn normalize_scopes(scopes: Vec<ScopeClaim>) -> Result<Vec<ScopeClaim>> {
+    scopes.into_iter().map(|claim| claim.normalized()).collect()
+}
+
+/// Claims name a scope without restating what the intent does to it, because
+/// the intent already declared that.
+fn normalize_plain_scopes(scopes: Vec<Scope>) -> Result<Vec<Scope>> {
     scopes.into_iter().map(|scope| scope.normalized()).collect()
+}
+
+/// Build the caller-facing view of one related intent.
+///
+/// Everything here is either stored fact or a comparison of two declared
+/// operations. Nothing in this view interprets what the overlap means: that
+/// is the calling agent's job, recorded through `record_assessment`.
+fn related_work_view(
+    conn: &Connection,
+    candidate: &IntentCandidate,
+    overlap: Vec<ScopeOverlapView>,
+    detected: &[Conflict],
+) -> Result<RelatedWork> {
+    let intent = intent_by_id(conn, &candidate.id)?;
+    let agent = agent_by_id(conn, &intent.agent_id)?;
+    let asserted = overlap.iter().any(|view| view.asserted);
+    let why_surfaced = if asserted {
+        None
+    } else if detected
+        .iter()
+        .any(|conflict| conflict.kind == "duplicate_work")
+    {
+        Some("similar wording, which may indicate the same work twice".to_string())
+    } else if overlap.is_empty() {
+        Some("related to your intent".to_string())
+    } else {
+        Some(
+            "a related semantic scope, or an operation inferred from prose rather than declared"
+                .to_string(),
+        )
+    };
+    Ok(RelatedWork {
+        intent_id: intent.id,
+        agent_id: agent.id,
+        agent: agent.name,
+        task: intent.task,
+        summary: intent.summary,
+        status: intent.status,
+        overlap,
+        why_surfaced,
+        asserted,
+    })
 }
 
 fn canonical_path(path: &std::path::Path) -> PathBuf {
@@ -3437,7 +3654,10 @@ mod tests {
                     task: format!("{} task", agent.name),
                     summary: summary.into(),
                     rationale: None,
-                    scopes: vec![Scope::new("symbol", "PaymentService")],
+                    scopes: vec![ScopeClaim::new(
+                        Scope::new("symbol", "PaymentService"),
+                        Operation::Modify,
+                    )],
                     depends_on: vec![],
                     metadata: json!({}),
                 })
@@ -3494,7 +3714,10 @@ mod tests {
                 task: "invalid scope".into(),
                 summary: "Exercise the typed API boundary".into(),
                 rationale: None,
-                scopes: vec![Scope::new("made-up-kind", "PaymentService")],
+                scopes: vec![ScopeClaim::new(
+                    Scope::new("made-up-kind", "PaymentService"),
+                    Operation::Modify,
+                )],
                 depends_on: vec![],
                 metadata: json!({}),
             })
@@ -3558,7 +3781,7 @@ mod tests {
                     task: format!("{} task", agent.name),
                     summary: format!("{} intent", agent.name),
                     rationale: None,
-                    scopes: vec![scope],
+                    scopes: vec![ScopeClaim::new(scope, Operation::Modify)],
                     depends_on: vec![],
                     metadata: json!({}),
                 })
@@ -3635,7 +3858,7 @@ mod tests {
                     task: format!("{} task", agent.name),
                     summary: format!("{} intent", agent.name),
                     rationale: None,
-                    scopes: vec![scope],
+                    scopes: vec![ScopeClaim::new(scope, Operation::Modify)],
                     depends_on: vec![],
                     metadata: json!({}),
                 })
@@ -3753,7 +3976,7 @@ mod tests {
                     summary: task.clone(),
                     task,
                     rationale: None,
-                    scopes: vec![scope],
+                    scopes: vec![ScopeClaim::new(scope, Operation::Modify)],
                     depends_on: vec![],
                     metadata: json!({}),
                 })

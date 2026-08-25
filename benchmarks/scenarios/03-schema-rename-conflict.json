@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "schema-rename-versus-index",
   "title": "Column rename collides with an index on the old schema",
   "category": "schema-conflict",
@@ -12,11 +12,13 @@
       "scopes": [
         {
           "kind": "schema",
-          "key": "users.email"
+          "key": "users.email",
+          "operation": "rename"
         },
         {
           "kind": "contract",
-          "key": "api.User.email"
+          "key": "api.User.email",
+          "operation": "rename"
         }
       ]
     },
@@ -27,11 +29,13 @@
       "scopes": [
         {
           "kind": "schema",
-          "key": "users.email"
+          "key": "users.email",
+          "operation": "extend"
         },
         {
           "kind": "migration",
-          "key": "users-email-unique"
+          "key": "users-email-unique",
+          "operation": "add"
         }
       ]
     }

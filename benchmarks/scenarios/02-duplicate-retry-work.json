@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "duplicate-api-retry-policy",
   "title": "Two agents independently implement the same retry policy",
   "category": "duplicate-work",
@@ -12,11 +12,13 @@
       "scopes": [
         {
           "kind": "component",
-          "key": "ApiClient"
+          "key": "ApiClient",
+          "operation": "extend"
         },
         {
           "kind": "config",
-          "key": "api.retry_policy"
+          "key": "api.retry_policy",
+          "operation": "add"
         }
       ]
     },
@@ -27,11 +29,13 @@
       "scopes": [
         {
           "kind": "component",
-          "key": "ApiClient"
+          "key": "ApiClient",
+          "operation": "extend"
         },
         {
           "kind": "config",
-          "key": "api.retry_policy"
+          "key": "api.retry_policy",
+          "operation": "add"
         }
       ]
     }

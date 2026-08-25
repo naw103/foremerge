@@ -19,7 +19,7 @@ struct ScenarioAgent {
     label: String,
     task: String,
     intent: String,
-    scopes: Vec<Scope>,
+    scopes: Vec<ScopeClaim>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -186,7 +186,11 @@ async fn run_validation_gate(scenario: &Scenario) {
         .claim_work(ClaimWorkRequest {
             agent_id: agent.id.clone(),
             intent_id: intent.id.clone(),
-            scopes: input.scopes.clone(),
+            scopes: input
+                .scopes
+                .iter()
+                .map(|claim| claim.scope.clone())
+                .collect(),
             reason: None,
             lease_seconds: 3600,
         })
