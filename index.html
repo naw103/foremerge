@@ -8,7 +8,7 @@
 <meta property="og:title" content="Foremerge">
 <meta property="og:description" content="Catch intent conflicts before code conflicts. The open-source coordination protocol for coding agents, built above Git.">
 <meta property="og:type" content="website">
-<meta property="og:url" content="https://naw103.github.io/foremerge/">
+<meta property="og:url" content="https://foremerge.com/">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M8 4v13c0 4 3 7 8 7h3' fill='none' stroke='%23a489e8' stroke-width='3.2' stroke-linecap='round'/%3E%3Ccircle cx='8' cy='6' r='3.4' fill='%23a489e8'/%3E%3Ccircle cx='8' cy='26' r='3.4' fill='%236fbf87'/%3E%3Ccircle cx='24' cy='24' r='3.4' fill='%23e0756b'/%3E%3Cpath d='M8 10v12' stroke='%236fbf87' stroke-width='3.2' stroke-linecap='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <style>
@@ -239,7 +239,7 @@
       <a class="btn primary" href="https://github.com/naw103/foremerge">View on GitHub</a>
       <a class="btn" href="https://github.com/naw103/foremerge/blob/main/docs/mcp-setup.md">MCP setup</a>
     </div>
-    <div class="install mono"><span class="p">$ </span>curl -fsSL https://naw103.github.io/foremerge/install.sh | sh</div>
+    <div class="install mono"><span class="p">$ </span>curl -fsSL https://foremerge.com/install.sh | sh</div>
 
     <div class="terminal" role="img" aria-label="Terminal session where two agents publish conflicting intents and Foremerge reports a HIGH replace_vs_extend conflict before any code exists">
       <div class="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="title mono">two clean worktrees, zero lines changed</span></div>
@@ -301,7 +301,7 @@
           <p>Run it from inside the repository you want to coordinate. Change the check in step 4 to whatever this repository's real test command is.</p>
           <div class="prompt-box" id="agent-prompt"><button class="copy" type="button" data-copy="agent-prompt">Copy</button><strong>Set up Foremerge in this repository so we can coordinate parallel agents.</strong>
 
-1. Install it:   curl -fsSL https://naw103.github.io/foremerge/install.sh | sh
+1. Install it:   curl -fsSL https://foremerge.com/install.sh | sh
 2. Initialize:   foremerge init
 3. Wire this client and any others in use:  foremerge setup all
 4. Register the check I should be validated against, for example:
@@ -316,7 +316,7 @@
         <div>
           <h3>Or install it yourself</h3>
           <p>A checksum-verified binary for macOS and Linux, or from crates.io if you have Rust. Windows binaries are on the releases page.</p>
-          <div class="cmd" id="cmd-install"><button class="copy" type="button" data-copy="cmd-install">Copy</button><span class="p">$ </span>curl -fsSL https://naw103.github.io/foremerge/install.sh | sh</div>
+          <div class="cmd" id="cmd-install"><button class="copy" type="button" data-copy="cmd-install">Copy</button><span class="p">$ </span>curl -fsSL https://foremerge.com/install.sh | sh</div>
           <div class="cmd" id="cmd-cargo" style="margin-top:.6rem"><button class="copy" type="button" data-copy="cmd-cargo">Copy</button><span class="p">$ </span>cargo install --locked foremerge</div>
         </div>
       </div>
@@ -447,5 +447,6 @@ document.querySelectorAll('.copy').forEach(function (button) {
   });
 });
 </script>
+<!-- Cloudflare Web Analytics --><script type='module' src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "af31c304d4194ed7965efda16e6426f5"}'></script><!-- End Cloudflare Web Analytics -->
 </body>
 </html>
