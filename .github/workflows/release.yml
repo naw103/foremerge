@@ -4,8 +4,10 @@ on:
   push:
     tags: ["v*"]
 
+# Read by default. Only the publish job may write, and only after the release
+# environment's approval gate is satisfied.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -134,6 +136,11 @@ jobs:
     name: Publish GitHub release
     needs: build
     runs-on: ubuntu-latest
+    # Requires an approval in the protected `release` environment, so a pushed
+    # tag builds and tests but cannot publish on its own.
+    environment: release
+    permissions:
+      contents: write
     timeout-minutes: 10
     steps:
       - name: Check out source

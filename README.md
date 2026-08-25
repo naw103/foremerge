@@ -46,6 +46,32 @@ command uses the shown `jq` filter; output is abridged for readability._
 
 ## Quickstart: first conflict in under five minutes
 
+### Let your coding agent do it
+
+Paste this into Claude Code, Codex, or Cursor from inside the repository you
+want to coordinate:
+
+```text
+Set up Foremerge in this repository so we can coordinate parallel agents.
+
+1. Install it:      curl -fsSL https://naw103.github.io/foremerge/install.sh | sh
+2. Initialize:      foremerge init
+3. Wire this client and any others in use: foremerge setup all
+4. Register the check I should be validated against, for example:
+                    foremerge checks set test -- cargo test --all-targets
+5. Confirm:         foremerge doctor --client all
+
+Then read the Foremerge skill that step 3 installed for this client and follow
+it from now on: publish your intent with semantic scopes before editing, claim
+the scope, and check for conflicts before you start.
+```
+
+Adjust step 4 to whatever this repository's real test command is. Step 3 asks
+the client to enable an MCP server, so it will prompt you before doing so, and
+the Codex registration is user level and points at one repository at a time.
+
+### Or do it yourself
+
 You need a recent Git and `jq`. Install a prebuilt, checksum-verified release
 binary (macOS and Linux; the script installs to `~/.local/bin`):
 

@@ -142,6 +142,12 @@ repository-local `foremerge` runtime directory reset; they are not an upgrade
 compatibility promise. Tagged-release schema changes will carry migrations and
 changelog guidance.
 
+Migrations run automatically on open, in one transaction, and only forward. A
+build refuses to open a store stamped with a schema newer than it understands
+rather than migrating it backwards, so upgrading one worktree's binary while
+another still runs an older one will make the older one fail closed. Upgrade
+every agent on a shared repository together.
+
 ## What Foremerge does not replace
 
 - code review and architecture ownership;

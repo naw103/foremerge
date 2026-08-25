@@ -11,6 +11,19 @@ changes when they are called out here with a migration note.
 
 ## [0.3.1] - 2026-08-24
 
+Opening a store with this release migrates it to database schema 4. The upgrade
+is automatic and one way: it repairs the duplicate detection rows that earlier
+schemas could write, completes any partially written scope projection, and
+stamps the new version. Schema 4 sweeps stores stamped 1, 2, or 3, because an
+interrupted upgrade could leave duplicates behind any of them. Observations that
+genuinely differ are preserved. An older Foremerge build will refuse to open a
+schema 4 store rather than migrate it backwards.
+
+### Added
+
+- The release workflow refuses a tag that disagrees with the crate version, and
+  publication requires an approval in the protected `release` environment.
+
 ### Fixed
 
 - Validation now refuses to start when excluded generated files are already
@@ -32,13 +45,13 @@ changes when they are called out here with a migration note.
   previously left the `intent_scopes` projection partially written, and the
   per-intent skip guard then treated the partial intent as done forever, so the
   intent silently disappeared from scope queries with no error. The migration is
-  now all or nothing, and schema 3 reprojects every intent once to repair stores
-  already damaged this way.
+  now all or nothing, and the upgrade reprojects every intent once to repair
+  stores already damaged this way.
 - One-time backfills are gated on the stored schema version instead of running
   on every `Store::open`. Schema 2 re-ran them on every process start, which
   minted a duplicate synthesized detection for every conflict that already had a
   native one: two immutable observations for a single detection, and an
-  occurrence table that disagreed with the event log. Schema 3 removes those
+  occurrence table that disagreed with the event log. The upgrade removes those
   duplicates on first open, keeping genuine legacy rows where they are a
   conflict's only observation. Gating also removes a full rescan of `intents`,
   `conflicts`, and `validations` from every CLI invocation.
@@ -56,10 +69,22 @@ changes when they are called out here with a migration note.
   is refused with `UNSUPPORTED_SCHEMA` instead of being migrated backwards and
   restamped. A malformed value is reported as `CORRUPT_STORE` rather than
   silently reading as zero, which would have rerun every one-time backfill.
-- The schema 3 repair removes only a byte-identical duplicate observation. The
-  previous condition deleted any synthesized row whenever a native one existed
+- The duplicate repair removes only a byte-identical duplicate observation. An
+  earlier condition deleted any synthesized row whenever a native one existed
   for the same conflict, which destroyed a genuine earlier observation that a
   later redetection happened to follow.
+- The event log rejects `INSERT OR REPLACE`. It had guards against `UPDATE` and
+  `DELETE`, but a replace deletes the conflicting row first, and that delete
+  only fires the guard when `recursive_triggers` is on, which is a
+  per-connection setting any other SQLite client can ignore. Unlike the other
+  record tables, `events` has three unique keys, so the guard checks `seq`,
+  `event_id`, and `event_hash`.
+- The duplicate repair now sweeps every store below the current schema rather
+  than only those stamped with the schema that introduced the duplicates. That
+  earlier migration was not transactional, so an upgrade interrupted between the
+  backfill and the version stamp left duplicates behind an older stamp, and a
+  repair keyed to one exact stamp could restamp such a store with its duplicates
+  intact.
 - The documented daemon shutdown grace is now a process-exit bound. The daemon
   builds and owns its Tokio runtime, so when the 30 second HTTP grace expires it
   abandons the remaining requests (terminating the validation subprocess trees

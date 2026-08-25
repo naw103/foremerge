@@ -4,7 +4,7 @@ Foremerge is building the smallest credible coordination layer above Git. The
 roadmap is ordered by evidence and interoperability, not dates. Items are plans,
 not promises, unless a release note marks them shipped.
 
-## Shipped local proof (through 0.3.0)
+## Shipped local proof (through 0.3.1)
 
 The current local release establishes the core thesis on one developer machine:
 
