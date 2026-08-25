@@ -2,13 +2,42 @@ use crate::model::*;
 use crate::{Foremerge, checks};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::io::IsTerminal;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const CURRENT_PROTOCOL: &str = "2026-07-28";
 const LEGACY_PROTOCOL: &str = "2025-11-25";
 
+/// Shown once when a person runs `foremerge mcp` in a terminal.
+///
+/// Coding agents launch this command with a pipe on stdin, so they never see
+/// this. It goes to stderr because stdout carries the protocol.
+const INTERACTIVE_NOTICE: &str = "\
+foremerge mcp is a machine interface. It speaks JSON-RPC over stdin and stdout and is
+meant to be launched by a coding agent, not typed at directly. It is now waiting for a
+message on stdin, which is normal.
+
+To wire it into Claude Code, Codex, or Cursor instead:
+
+    foremerge setup all
+
+To read coordination state yourself, use the ordinary CLI:
+
+    foremerge status
+    foremerge agent list
+    foremerge --help
+
+Press Ctrl-C to exit.
+";
+
 pub async fn run_stdio(service: Foremerge) -> anyhow::Result<()> {
     let stdin = tokio::io::stdin();
+    // A terminal on stdin means a person is here, not a client. Real clients
+    // get byte-identical behaviour because their stdin is a pipe.
+    let interactive = std::io::stdin().is_terminal();
+    if interactive {
+        eprint!("{INTERACTIVE_NOTICE}");
+    }
     let mut lines = BufReader::new(stdin).lines();
     let mut stdout = tokio::io::stdout();
     while let Some(line) = lines.next_line().await? {
@@ -17,11 +46,16 @@ pub async fn run_stdio(service: Foremerge) -> anyhow::Result<()> {
         }
         let response = match serde_json::from_str::<Value>(&line) {
             Ok(message) => handle_message(&service, message).await,
-            Err(error) => Some(jsonrpc_error(
-                Value::Null,
-                -32700,
-                &format!("parse error: {error}"),
-            )),
+            Err(error) => {
+                if interactive {
+                    eprintln!("\n{}", interactive_parse_hint(line.trim()));
+                }
+                Some(jsonrpc_error(
+                    Value::Null,
+                    -32700,
+                    &format!("parse error: {error}"),
+                ))
+            }
         };
         if let Some(response) = response {
             let mut encoded = serde_json::to_vec(&response)?;
@@ -31,6 +65,35 @@ pub async fn run_stdio(service: Foremerge) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Explains a parse failure to a person typing at the terminal.
+///
+/// Typing a bare tool name is the likely mistake, because tool names are what
+/// the agent-facing documentation shows, so that case gets the exact line to
+/// paste. The catalog is consulted rather than a hand-written list so the hint
+/// cannot drift as tools are added.
+fn interactive_parse_hint(input: &str) -> String {
+    let known = tool_catalog()
+        .iter()
+        .any(|tool| tool.get("name").and_then(Value::as_str) == Some(input));
+    if known {
+        let call = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": input, "arguments": {} }
+        });
+        return format!(
+            "\"{input}\" is a real tool, but this interface reads JSON-RPC rather than bare\n\
+             tool names. The equivalent line to paste is:\n\n    {call}\n\n\
+             Reading the same state with `foremerge status` in another terminal is easier."
+        );
+    }
+    format!(
+        "This interface reads one JSON-RPC message per line, so \"{input}\" was not understood.\n\
+         If you meant to use Foremerge yourself, run `foremerge --help` instead."
+    )
 }
 
 pub async fn handle_message(service: &Foremerge, message: Value) -> Option<Value> {
@@ -719,6 +782,45 @@ pub fn tool_catalog() -> Vec<Value> {
 mod tests {
     use super::*;
     use crate::Store;
+
+    #[test]
+    fn a_bare_tool_name_is_answered_with_the_line_that_would_have_worked() {
+        let hint = interactive_parse_hint("list_agents");
+        // The pasteable line has to be a real request, not prose about one.
+        let line = hint
+            .lines()
+            .find(|line| line.trim_start().starts_with('{'))
+            .expect("hint offers a JSON-RPC line");
+        let parsed: Value = serde_json::from_str(line.trim()).expect("the line is valid JSON");
+        assert_eq!(parsed["method"], "tools/call");
+        assert_eq!(parsed["params"]["name"], "list_agents");
+    }
+
+    #[test]
+    fn every_catalog_tool_is_recognised_by_the_hint() {
+        // Guards against the hint drifting as tools are added or renamed.
+        for tool in tool_catalog() {
+            let name = tool["name"].as_str().unwrap();
+            assert!(
+                interactive_parse_hint(name).contains("is a real tool"),
+                "{name} was not recognised"
+            );
+        }
+    }
+
+    #[test]
+    fn unrecognised_input_is_pointed_at_the_command_line_interface() {
+        let hint = interactive_parse_hint("hello");
+        assert!(hint.contains("foremerge --help"));
+        assert!(!hint.contains("is a real tool"));
+    }
+
+    #[test]
+    fn terminal_guidance_carries_no_em_dashes() {
+        assert!(!INTERACTIVE_NOTICE.contains('\u{2014}'));
+        assert!(!interactive_parse_hint("list_agents").contains('\u{2014}'));
+        assert!(!interactive_parse_hint("hello").contains('\u{2014}'));
+    }
 
     #[tokio::test]
     async fn lists_the_complete_lifecycle_tools_in_deterministic_order() {
