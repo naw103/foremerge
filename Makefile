@@ -30,6 +30,9 @@ benchmarks: ## Execute all five committed benchmark scenarios
 query-benchmark: ## Run the optimized query harness at documented scales
 	$(CARGO) run --release --example query_benchmark -- 500 5000 20000
 
+query-smoke: ## Execute the query harness once, the way CI does
+	$(CARGO) run --quiet --example query_benchmark -- 200
+
 doc: ## Build documentation and fail on warnings
 	RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --all-features --no-deps
 
@@ -44,7 +47,9 @@ msrv: ## Run clippy and tests on the pinned MSRV toolchain, as CI does
 	rustup run $(MSRV) $(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
 	rustup run $(MSRV) $(CARGO) test --workspace --all-targets --all-features
 
-verify: fmt-check check clippy test doc ## Run the local release gate
+verify: fmt-check check clippy test query-smoke doc ## Run the local release gate
+# `query-smoke` is here because `cargo test` only ever *compiles* the example.
+# A schema change broke its seed and every local gate stayed green while CI failed.
 
 clean: ## Remove Cargo build output
 	$(CARGO) clean

@@ -107,8 +107,9 @@ fn seed(database: &Path, size: usize) -> anyhow::Result<()> {
              VALUES(?1, 'agt_benchmark', ?2, ?3, NULL, ?4, '[]', '{}', ?5, ?6, ?6)",
         )?;
         let mut scopes = tx.prepare_cached(
-            "INSERT INTO intent_scopes(intent_id, scope_kind, scope_key, canonical_scope)
-             VALUES(?1, 'symbol', ?2, ?3)",
+            "INSERT INTO intent_scopes(intent_id, scope_kind, scope_key, canonical_scope,
+                                        precise_scope)
+             VALUES(?1, 'symbol', ?2, ?3, ?4)",
         )?;
         for index in 0..size {
             let task_id = format!("tsk_{index:08}");
@@ -124,12 +125,16 @@ fn seed(database: &Path, size: usize) -> anyhow::Result<()> {
             } else {
                 format!("Unrelated{index}")
             };
-            // Intents store `ScopeClaim`, not bare `Scope`. Seeding the old shape
-            // made every read of this fixture fail on the missing operation.
-            // `modify`, inferred, matches what `intent_scopes` defaults to for
-            // rows that predate declared operations.
+            // One `Scope` builds both the stored JSON and the projection row, so
+            // the fixture derives its identities exactly as the service does.
+            // Hand-writing the canonical string here is what let this seed drift
+            // out of step with the schema twice: once on the missing operation,
+            // once on the precise scope. Intents store `ScopeClaim`, not a bare
+            // `Scope`, and `modify`/inferred matches what `intent_scopes`
+            // defaults to for rows that predate declared operations.
+            let scope = Scope::new("symbol", &scope_key);
             let scopes_json = serde_json::to_string(&[ScopeClaim {
-                scope: Scope::new("symbol", &scope_key),
+                scope: scope.clone(),
                 operation: Operation::Modify,
                 inferred: true,
             }])?;
@@ -154,7 +159,8 @@ fn seed(database: &Path, size: usize) -> anyhow::Result<()> {
             scopes.execute(params![
                 intent_id,
                 scope_key,
-                format!("symbol:{}", scope_key.to_lowercase()),
+                scope.canonical(),
+                scope.precise(),
             ])?;
         }
     }
