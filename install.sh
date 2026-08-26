@@ -70,6 +70,20 @@ mkdir -p "$INSTALL_DIR"
 install -m 755 foremerge "$INSTALL_DIR/foremerge"
 
 say "Installed $("$INSTALL_DIR/foremerge" --version) to $INSTALL_DIR/foremerge"
+
+# `fmg` is the same program under a short name. Releases before it existed have
+# no such file, so this stays quiet rather than failing on an older --version.
+if [ -f fmg ]; then
+  if [ -e "$INSTALL_DIR/fmg" ] || ! command -v fmg >/dev/null 2>&1; then
+    install -m 755 fmg "$INSTALL_DIR/fmg"
+    say "Installed the short name fmg to $INSTALL_DIR/fmg"
+  else
+    # Something else already answers to fmg. Leave it alone and say so, rather
+    # than shadowing a program the user installed on purpose.
+    say "Skipped the short name fmg: $(command -v fmg) already exists."
+    say "  Foremerge is still installed as foremerge."
+  fi
+fi
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
   *) say "Note: $INSTALL_DIR is not on your PATH. Add it, for example:"
