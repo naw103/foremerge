@@ -126,6 +126,8 @@ binary (macOS and Linux; the script installs to `~/.local/bin`):
 curl -fsSL https://foremerge.com/install.sh | sh
 ```
 
+This installs two commands: `foremerge`, and `fmg` as a shorter alias for it.
+
 Or build from source with Rust 1.85+: `cargo install --locked --git
 https://github.com/naw103/foremerge foremerge`, or `cargo install --locked
 --path .` from a checkout. Windows binaries are on the
@@ -138,9 +140,11 @@ foremerge doctor
 ```
 
 Every command is also available as `fmg`, the same binary under a shorter name,
-so `fmg status` and `foremerge status` do the same thing. `cargo install` and
-the release archives carry both names, starting with the first release that
-includes them. The `curl` install script does not install the short name yet.
+so `fmg status` and `foremerge status` do the same thing. The installer, the
+release archives and `cargo install` all carry both names from 0.4.0 onward.
+Examples here spell out `foremerge`; use whichever you prefer. If something
+else on your PATH already answers to `fmg`, the installer leaves it alone and
+says so rather than shadowing it.
 
 Install the native skill and MCP entry for any clients used in this repository,
 then define the trusted checks agents may request by name:
