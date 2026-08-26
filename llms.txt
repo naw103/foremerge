@@ -1,0 +1,12 @@
+# Foremerge
+> Coordination protocol for coding agents, built above Git. Agents publish
+> intent and claim semantic scopes with declared operations before writing
+> code; deterministic rules raise findings when plans collide. One Rust
+> binary, local-first, Apache-2.0.
+## Docs
+- [README](https://github.com/naw103/foremerge#readme)
+- [MCP setup](https://github.com/naw103/foremerge/blob/main/docs/mcp-setup.md)
+- [Conflict detection](https://github.com/naw103/foremerge/blob/main/docs/conflict-detection.md)
+- [Limitations](https://github.com/naw103/foremerge/blob/main/docs/limitations.md)
+## Install
+- `curl -fsSL https://foremerge.com/install.sh | sh` or `cargo install foremerge`
