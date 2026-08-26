@@ -110,9 +110,16 @@ a mood, and never a second accent. Keep it under 5% of any surface.
 | Panel | `#161B20` | Cards and code blocks on ink |
 | Line | `#262D33` | Hairlines on ink, 1px, never 2 |
 | Ash | `#8A9199` | Secondary text on ink |
+| Green bright | `#5FB47C` | Green lightened for display type and code on ink, 7.4:1 |
 
 Dark is the default for anything terminal-adjacent: the site, OG cards, CLI
 docs. Three steps only on dark, ground then panel then line.
+
+Green has two values for the same reason signal does. `#3E8E5A` is the status
+value and the only green that makes a claim; `#5FB47C` is that green lightened
+for display type and for code on ink, where the deep value falls to 4.31:1 on
+panel and under the floor. Never use the bright value on a status chip, and
+never use the deep value for large type on dark.
 
 **Severity.** Severity is the only place color makes a claim.
 

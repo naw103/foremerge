@@ -16,7 +16,7 @@ above Git. Agents keep isolated worktrees while sharing intent, semantic
 claims, dependencies, provisional ChangeSets, decisions, validation, and
 provenance.
 
-| [**Tell your agent to install it**](#quickstart-first-conflict-in-under-five-minutes) | → | **Done** | → | **See collisions before they land** |
+| [**Tell your agent to install**](#quickstart-first-conflict-in-under-five-minutes) | → | **Done** | → | **See collisions before they land** |
 | :---: | :---: | :---: | :---: | :---: |
 | Paste one line into Claude Code, Codex, or Cursor | | It installs Foremerge and wires itself up | | Every agent sees what the others are about to change, even in separate worktrees |
 
