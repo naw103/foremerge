@@ -219,7 +219,10 @@
   .honest li::marker { color: var(--amber); }
 
   .steps { counter-reset: step; display: flex; flex-direction: column; gap: 1.1rem; margin-top: 1.8rem; }
-  .step { display: grid; grid-template-columns: 2rem 1fr; gap: 1rem; align-items: start; }
+  .step { display: grid; grid-template-columns: 2rem minmax(0, 1fr); gap: 1rem; align-items: start; }
+  /* Without this the item keeps `min-width: auto` and refuses to shrink
+     below its widest command, which is what overflowed the page. */
+  .step > * { min-width: 0; }
   .step::before {
     counter-increment: step; content: counter(step);
     font: 500 0.82rem/1.9 var(--mono); color: var(--ash);
@@ -266,6 +269,16 @@
   @media (max-width: 760px) {
     .flow { grid-template-columns: 1fr; gap: 0.5rem; }
     .flow-arrow { transform: rotate(90deg); justify-self: center; }
+  }
+  @media (max-width: 600px) {
+    /* Wrap rather than scroll: the whole command stays readable and the COPY
+       button stays where it was put. */
+    .cmd, .install { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: visible; }
+    .cmd { padding-right: 1rem; padding-top: 2.4rem; }
+    .copy { top: .5rem; right: .5rem; }
+    /* The nav ran past the right edge before it was allowed to wrap. */
+    nav { flex-wrap: wrap; row-gap: .6rem; }
+    nav .links { gap: 1rem; flex-wrap: wrap; }
   }
   @media (prefers-reduced-motion: reduce) { a.flow-node { transition: none; } }
 
