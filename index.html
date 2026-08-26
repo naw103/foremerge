@@ -44,6 +44,9 @@
     --amber: #E8A33D;      /* MEDIUM, PROVISIONAL. Never means error */
     --green: #3E8E5A;      /* RESOLVED, VALIDATED. Earned, never assumed */
     --green-deep: #2F7A4B; /* ACCEPTED */
+    --green-bright: #5FB47C;/* green lightened for display type and code on ink,
+                              7.4:1. Status chips keep --green, which is the
+                              value that makes the claim. */
 
     --sans: "Space Grotesk", system-ui, sans-serif;
     --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
@@ -70,8 +73,9 @@
 
   /* --- Navigation ---------------------------------------------------- */
   nav { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1.4rem 0 0; }
-  /* Lockup at 26px height: above the 24px minimum, so the wordmark stays legible. */
-  .lockup { display: block; height: 26px; width: auto; }
+  /* Lockup at 44px. Well clear of the 24px floor, and the exclusion zone of
+     one lens height (7/48 of the mark) is covered by the nav gap and padding. */
+  .lockup { display: block; height: 44px; width: auto; }
   nav .links { display: flex; gap: 1.4rem; font-size: 0.9rem; }
   nav .links a { color: var(--ash); }
   nav .links a:hover, nav .links a:focus-visible { color: var(--paper); }
@@ -85,6 +89,11 @@
     font-size: clamp(2.6rem, 6.4vw, 4.75rem); line-height: 0.95;
     color: var(--paper); margin: 0 0 1.4rem; text-wrap: balance; max-width: 17ch;
   }
+  /* The headline names the two things the product sits between. Signal is the
+     finding Foremerge raises; green is the merge that stays clean because of
+     it. Both are brand hexes, and this is the one headline that gets them. */
+  .hero h1 .hl-signal { color: var(--signal); }
+  .hero h1 .hl-clean { color: var(--green-bright); }
   .hero p.sub { font-size: 1.29rem; line-height: 1.55; color: var(--mist); max-width: 58ch; margin: 0 0 2rem; }
   .hero p.sub strong { font-family: var(--sans); font-weight: 500; letter-spacing: -0.02em; color: var(--paper); }
 
@@ -126,8 +135,11 @@
   .t-cmd { color: var(--paper); }
   .t-prompt, .t-com { color: var(--slate); }
   .t-com { font-style: italic; }
-  .t-key { color: var(--ash); }
-  .t-str { color: var(--mist); }
+  /* Syntax highlighting, not severity: these colour the shape of the JSON so
+     the finding is readable at a glance. Signal stays reserved for the
+     severity value itself, which is the only claim the block makes. */
+  .t-key { color: var(--amber); }
+  .t-str { color: var(--green-bright); }
   .t-high { color: var(--signal); font-weight: 500; }
 
   /* --- Sections -------------------------------------------------------- */
@@ -168,7 +180,7 @@
   .agent .intent { font-family: var(--sans); font-size: 1rem; font-weight: 500; letter-spacing: -0.02em; color: var(--paper); }
   .agent .scope { margin-top: 0.8rem; font-size: 0.78rem; }
   .scope-chip { font-family: var(--mono); background: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 0.14em 0.5em; color: var(--paper); }
-  .scope-chip .kind { color: var(--ash); }
+  .scope-chip .kind { color: var(--amber); }
 
   /* The one finding on the page. Signal carries HIGH and nothing else. */
   .finding { border: 1px solid rgba(255,106,44,0.32); background: rgba(255,106,44,0.05); border-radius: 8px; padding: 1.2rem 1.4rem; margin-top: 1rem; }
@@ -197,14 +209,14 @@
 
   .tools { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 0.8rem; margin-top: 2rem; }
   .tool { display: flex; flex-direction: column; gap: 0.35rem; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 1rem 1.1rem; }
-  .tool .name { font-family: var(--mono); font-size: 0.82rem; color: var(--paper); }
+  .tool .name { font-family: var(--mono); font-size: 0.82rem; color: var(--signal-link); }
   .tool .what { font-size: 0.86rem; color: var(--mist); }
 
   /* Limitations are information, not alarm - so no amber, no signal. */
-  .honest { border-left: 1px solid var(--line); padding-left: 1.4rem; margin-top: 2rem; }
+  .honest { border-left: 2px solid var(--amber); padding-left: 1.4rem; margin-top: 2rem; }
   .honest ul { margin: 0.8rem 0 0; padding-left: 1.1rem; color: var(--mist); max-width: 68ch; }
   .honest li { margin: 0.5rem 0; font-size: 0.95rem; }
-  .honest li::marker { color: var(--slate); }
+  .honest li::marker { color: var(--amber); }
 
   .steps { counter-reset: step; display: flex; flex-direction: column; gap: 1.1rem; margin-top: 1.8rem; }
   .step { display: grid; grid-template-columns: 2rem 1fr; gap: 1rem; align-items: start; }
@@ -290,7 +302,7 @@
   </nav>
 
   <header class="hero">
-    <h1>Catch intent conflicts before code conflicts.</h1>
+    <h1>Catch <span class="hl-signal">intent conflicts</span> before <span class="hl-clean">code conflicts</span>.</h1>
     <p class="sub">Foremerge is the open-source coordination protocol for coding agents, built <strong>above Git</strong>. Claude Code in one worktree, Codex in another: agents from any provider share intent, semantic claims, dependencies, provisional ChangeSets, decisions, and verification through one store, so plans collide in a queryable database, not in your merge.</p>
     <div class="cta">
       <a class="btn signal" href="#quickstart">Quickstart</a>
@@ -299,25 +311,28 @@
     </div>
     <div class="install mono"><span class="p">$ </span>curl -fsSL https://foremerge.com/install.sh | sh</div>
 
-    <div class="terminal" role="img" aria-label="Terminal session where two agents publish conflicting intents and Foremerge reports a HIGH replace_vs_extend conflict before any code exists">
+    <div class="terminal" role="img" aria-label="Terminal session where two agents publish conflicting intents and Foremerge reports a HIGH destructive_vs_additive conflict before any code exists">
       <div class="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="title mono">two clean worktrees, zero lines changed</span></div>
 <pre><span class="t-com"># Agent A announces its plan</span>
 <span class="t-prompt">$</span> <span class="t-cmd">foremerge --json intent publish --agent "$STRIPE_AGENT" \
+    --task modernize-payments \
     --summary "Replace PaymentService with StripePaymentService" \
-    --scope symbol:PaymentService</span>
+    --scope symbol:PaymentService=replace</span>
 
 <span class="t-com"># Agent B announces a plan of its own</span>
 <span class="t-prompt">$</span> <span class="t-cmd">foremerge --json intent publish --agent "$PAYPAL_AGENT" \
+    --task add-paypal \
     --summary "Add PayPal support to PaymentService" \
-    --scope symbol:PaymentService</span>
+    --scope symbol:PaymentService=extend | jq '.data.conflicts[0]'</span>
 {
-  <span class="t-key">"kind"</span>: <span class="t-str">"replace_vs_extend"</span>,
+  <span class="t-key">"kind"</span>: <span class="t-str">"destructive_vs_additive"</span>,
   <span class="t-key">"severity"</span>: <span class="t-high">"HIGH"</span>,
   <span class="t-key">"explanation"</span>: <span class="t-str">"One intent will replace `PaymentService` while the
-                  other will extend it; both rely on exact semantic scope."</span>,
+                  other will extend it; both declare the same semantic scope."</span>,
   <span class="t-key">"suggestion"</span>: <span class="t-str">"Coordinate on a stable `PaymentProvider` contract first,
                  then implement StripePaymentProvider and PayPalPaymentProvider
-                 behind it and migrate callers deliberately."</span>
+                 behind it and migrate callers deliberately. This is a
+                 heuristic suggestion, not an automatic design decision."</span>
 }</pre>
     </div>
 
@@ -400,7 +415,7 @@
       <span class="sev">
         <!-- severity -->
         <svg class="icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><g stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"><path d="M12 4l8 15H4z"/><path d="M12 10v3.5"/><circle cx="12" cy="16.4" r="1.2" fill="currentColor" stroke="none"/></g></svg>
-        HIGH · replace_vs_extend · rule FM-C001
+        HIGH · destructive_vs_additive · rule FM-C001
       </span>
       <p>One agent removes the extension point the other depends on. No overlapping lines, no diff, nothing for Git to flag until both implementations exist and the rework is expensive. Foremerge compares declared scopes and intent language <strong>before implementation</strong> and raises an explainable, advisory finding. No hard locks, no LLM in the detection path.</p>
     </div>
