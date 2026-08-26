@@ -1,11 +1,8 @@
-<h1>
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://foremerge.com/brand/png/lockup-horizontal-dark.png">
-    <img src="https://foremerge.com/brand/png/lockup-horizontal-light.png" alt="Foremerge" width="240">
-  </picture>
-</h1>
+<h1>Foremerge</h1>
 
-**Catch intent conflicts before code conflicts.**
+<p align="center">
+  <img src="docs/assets/foremerge-readme-banner.png" alt="Foremerge: Catch intent conflicts before code conflicts" width="100%">
+</p>
 
 [![CI](https://github.com/naw103/foremerge/actions/workflows/ci.yml/badge.svg)](https://github.com/naw103/foremerge/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/foremerge.svg)](https://crates.io/crates/foremerge)
