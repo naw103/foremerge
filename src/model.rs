@@ -74,6 +74,36 @@ impl Scope {
         };
         format!("{}:{}", self.kind.to_lowercase(), key)
     }
+
+    /// The strictest identity for a scope: everything [`Scope::canonical`]
+    /// keeps, plus the namespace or path prefix it discards.
+    ///
+    /// `canonical` deliberately reduces `App\Billing\Report::render` to
+    /// `report::render` so differently qualified names still meet. That is the
+    /// right net for *finding* an overlap and the wrong one for *asserting*
+    /// one: `App\Billing\Report::render` and `App\Admin\Report::render` reduce
+    /// to the same name while naming unrelated code, and an asserted HIGH
+    /// finding blocks acceptance rather than merely warning. A detector
+    /// stating a conflict on its own authority compares this; a match on
+    /// `canonical` alone is a fuzzy alias and stays advisory.
+    ///
+    /// Separators are still folded together, because `App\Services\Report`,
+    /// `app/services/Report` and `app.services.Report` name one thing. Only
+    /// the discarding of prefixes is undone.
+    pub fn precise(&self) -> String {
+        let key = if self.kind.eq_ignore_ascii_case("symbol") {
+            self.key
+                .split("::")
+                .map(str::trim)
+                .filter(|segment| !segment.is_empty())
+                .map(|segment| segment.replace(['\\', '/'], ".").to_lowercase())
+                .collect::<Vec<_>>()
+                .join("::")
+        } else {
+            self.key.to_lowercase()
+        };
+        format!("{}:{}", self.kind.to_lowercase(), key)
+    }
 }
 
 /// Reduce a symbol key to `container::member`, or `member` when it has no
@@ -814,7 +844,13 @@ pub struct DoctorReport {
     pub api_bind: String,
     pub token_configured: bool,
     pub mcp_transport: String,
+    /// Whether the installation itself works: store, event chain, Git, clients.
     pub ready: bool,
+    /// Whether work could actually be accepted here. Separate from `ready`
+    /// because a perfectly healthy installation under a strict policy with no
+    /// runnable check can never accept a ChangeSet, and reporting only `ready`
+    /// made that look fine.
+    pub acceptance_ready: bool,
     pub next_step: String,
     /// Per-client integration diagnostics; present only when the doctor run
     /// was asked to inspect specific clients.

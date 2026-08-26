@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::Duration;
 use uuid::Uuid;
 
-const DATABASE_SCHEMA_VERSION: i64 = 6;
+const DATABASE_SCHEMA_VERSION: i64 = 9;
 // Event hashing is versioned independently from the mutable SQLite projection
 // schema. A database migration must not silently change the hash material for
 // otherwise identical events.
@@ -226,14 +226,20 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_intents_agent_status_created
               ON intents(agent_id, status, created_at DESC, id DESC);
 
+            -- `canonical_scope` is the lossy alias two agents can meet on, so
+            -- it is a search index and never an identity: `App\Billing\Report`
+            -- and `App\Admin\Report` share one, and an intent may legitimately
+            -- declare both. Uniqueness belongs to `precise_scope`, which keeps
+            -- the namespace the alias discards.
             CREATE TABLE IF NOT EXISTS intent_scopes (
                 intent_id TEXT NOT NULL REFERENCES intents(id),
                 scope_kind TEXT NOT NULL,
                 scope_key TEXT NOT NULL,
                 canonical_scope TEXT NOT NULL,
+                precise_scope TEXT NOT NULL,
                 operation TEXT NOT NULL DEFAULT 'modify',
                 operation_inferred INTEGER NOT NULL DEFAULT 1,
-                PRIMARY KEY(intent_id, canonical_scope)
+                PRIMARY KEY(intent_id, precise_scope)
             );
 
             CREATE TABLE IF NOT EXISTS assessments (
@@ -257,7 +263,13 @@ impl Store {
                 intent_id TEXT NOT NULL REFERENCES intents(id),
                 scope_kind TEXT NOT NULL,
                 scope_key TEXT NOT NULL,
+                -- As on `intent_scopes`: the canonical alias is the advisory
+                -- overlap net two agents can meet on, never an identity. A
+                -- claim is renewed by its precise scope, so one intent can hold
+                -- `App\Billing\Report::render` and `App\Admin\Report::render`
+                -- as two claims rather than one that overwrites the other.
                 canonical_scope TEXT NOT NULL,
+                precise_scope TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL,
                 reason TEXT,
                 lease_expires_at TEXT NOT NULL,
@@ -265,6 +277,10 @@ impl Store {
                 released_at TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_claims_scope ON claims(canonical_scope, status);
+            -- `idx_claims_precise` is created by the migration, not here. This
+            -- batch runs before it against a store that may predate
+            -- `precise_scope`, where `CREATE TABLE IF NOT EXISTS` is a no-op and
+            -- indexing a column the existing table lacks fails the open.
             CREATE INDEX IF NOT EXISTS idx_claims_intent ON claims(intent_id, status);
 
             CREATE TABLE IF NOT EXISTS changesets (
@@ -607,6 +623,50 @@ impl Store {
         // non-detection this release fixes. The projection is therefore rebuilt
         // from `intents.scopes_json`, which is the source of truth and is
         // untouched by the change.
+        // Claims gain the same precise identity, and older rows are backfilled
+        // from the scope they already store. Renewal matched on the canonical
+        // alias, so a second claim on a differently namespaced symbol with the
+        // same short name renewed the first instead of being recorded: the
+        // response carried two claims sharing one id while the table kept only
+        // the first scope and the graph showed only the second.
+        let has_claim_precise: bool = conn.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM pragma_table_info('claims') WHERE name = 'precise_scope'
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_claim_precise {
+            conn.execute(
+                "ALTER TABLE claims ADD COLUMN precise_scope TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+        {
+            let mut statement = conn
+                .prepare("SELECT id, scope_kind, scope_key FROM claims WHERE precise_scope = ''")?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(statement);
+            for (claim_id, kind, key) in rows {
+                conn.execute(
+                    "UPDATE claims SET precise_scope = ?2 WHERE id = ?1",
+                    params![claim_id, Scope::new(&kind, &key).precise()],
+                )?;
+            }
+        }
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_claims_precise
+             ON claims(intent_id, precise_scope, status)",
+            [],
+        )?;
         if stored_version < 5 {
             conn.execute("DELETE FROM intent_scopes", [])?;
             let mut statement = conn.prepare("SELECT id, scope_kind, scope_key FROM claims")?;
@@ -627,9 +687,16 @@ impl Store {
                     params![claim_id, canonical],
                 )?;
             }
-            // Two live claims on one intent can now share a canonical scope
-            // where they did not before. Keep the longest-lived and release the
-            // rest, so the intent does not appear to hold the same scope twice.
+            // Two live claims on one intent can share a scope after this
+            // recompute where they did not before. Keep the longest-lived and
+            // release the rest, so the intent does not appear to hold one scope
+            // twice.
+            //
+            // Keyed on the precise scope, not the canonical alias. On the alias
+            // this released claims that are not duplicates at all:
+            // `App\Billing\Report::render` and `App\Admin\Report::render`
+            // reduce to one alias, so upgrading silently dropped a live claim
+            // on unrelated code.
             conn.execute(
                 "UPDATE claims SET status = 'RELEASED'
                  WHERE status = 'ACTIVE' AND id NOT IN (
@@ -637,10 +704,10 @@ impl Store {
                    AND c.lease_expires_at = (
                      SELECT MAX(lease_expires_at) FROM claims d
                      WHERE d.intent_id = c.intent_id
-                     AND d.canonical_scope = c.canonical_scope
+                     AND d.precise_scope = c.precise_scope
                      AND d.status = 'ACTIVE'
                    )
-                   GROUP BY c.intent_id, c.canonical_scope
+                   GROUP BY c.intent_id, c.precise_scope
                  )",
                 [],
             )?;
@@ -705,6 +772,32 @@ impl Store {
             }
             conn.execute("DELETE FROM intent_scopes", [])?;
         }
+        // Schema 8 moves intent-scope uniqueness off the lossy canonical alias.
+        // Keyed on it, an intent declaring `App\Billing\Report::render` and
+        // `App\Admin\Report::render` could not be published at all: both reduce
+        // to one alias and the second row collided with the first. The
+        // reprojection below used INSERT OR IGNORE, so older stores did not
+        // error, they silently dropped the second scope. SQLite cannot alter a
+        // primary key, so the table is rebuilt and refilled from
+        // `intents.scopes_json`, which is the source of truth and already
+        // carries every declared scope.
+        if stored_version < 9 {
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS intent_scopes;
+                 CREATE TABLE intent_scopes (
+                     intent_id TEXT NOT NULL REFERENCES intents(id),
+                     scope_kind TEXT NOT NULL,
+                     scope_key TEXT NOT NULL,
+                     canonical_scope TEXT NOT NULL,
+                     precise_scope TEXT NOT NULL,
+                     operation TEXT NOT NULL DEFAULT 'modify',
+                     operation_inferred INTEGER NOT NULL DEFAULT 1,
+                     PRIMARY KEY(intent_id, precise_scope)
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_intent_scopes_canonical
+                   ON intent_scopes(canonical_scope, intent_id);",
+            )?;
+        }
         let mut statement = if stored_version < 6 {
             conn.prepare("SELECT id, scopes_json FROM intents")?
         } else {
@@ -725,13 +818,14 @@ impl Store {
             for claim in claims {
                 conn.execute(
                     "INSERT OR IGNORE INTO intent_scopes(
-                     intent_id, scope_kind, scope_key, canonical_scope, operation,
-                     operation_inferred) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                     intent_id, scope_kind, scope_key, canonical_scope, precise_scope,
+                     operation, operation_inferred) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     params![
                         intent_id,
                         claim.scope.kind,
                         claim.scope.key,
                         claim.scope.canonical(),
+                        claim.scope.precise(),
                         claim.operation.as_str(),
                         claim.inferred,
                     ],
@@ -772,6 +866,57 @@ impl Store {
                 "UPDATE conflicts SET scope_identity = ?2 WHERE id = ?1",
                 params![id, identity],
             )?;
+        }
+        // Schema 5 changed `Scope::canonical` for symbol scopes, so an identity
+        // an older build stored no longer matches the one this build derives
+        // from the same scope. A *stale* identity is worse than a missing one:
+        // the backfill above only fills blanks, so the old row keeps its old
+        // identity, `record_conflict`'s upsert targets
+        // `(source_intent_id, target_intent_id, kind, scope_identity)` and
+        // misses it, and the insert then falls through to the legacy
+        // `UNIQUE(..., scope_json)` constraint. That surfaces a SQLite
+        // uniqueness error where an advisory conflict warning belongs.
+        // Recompute every identity under the current rule, then fold together
+        // the rows that now share one.
+        //
+        // Gated on 9 rather than 5 because the schema 5 upgrade shipped with
+        // this defect: a store that already migrated to 5 or 6 ran the
+        // blanks-only backfill and kept its stale identities, so re-running the
+        // pass is the only thing that repairs it. Stores that never saw 5 are
+        // covered by the same gate.
+        if stored_version < 9 {
+            // Recomputing row by row passes through intermediate states where
+            // two rows momentarily share an identity, so the uniqueness index
+            // cannot stand during the pass. It is recreated immediately below.
+            conn.execute("DROP INDEX IF EXISTS idx_conflicts_identity", [])?;
+            let mut statement =
+                conn.prepare("SELECT id, scope_json FROM conflicts ORDER BY detected_at, id")?;
+            let stale = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(statement);
+            for (id, scope_json) in stale {
+                let identity = match scope_json {
+                    Some(value) => serde_json::from_str::<Option<Scope>>(&value)
+                        .with_context(|| format!("decode scope for conflict {id}"))?
+                        .map(|scope| scope.precise())
+                        .unwrap_or_else(|| "<none>".to_string()),
+                    None => "<none>".to_string(),
+                };
+                conn.execute(
+                    "UPDATE conflicts SET scope_identity = ?2 WHERE id = ?1",
+                    params![id, identity],
+                )?;
+            }
+            merge_collapsed_conflicts(conn)?;
+            // Independent of the fold, because a store may already have been
+            // through a build that deleted duplicate conflict rows without
+            // touching their projection. The fold finds no duplicate group to
+            // work on in that case and returns early, so the reconciliation
+            // has to stand on its own.
+            reconcile_conflict_graph(conn)?;
         }
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_conflicts_identity
@@ -1108,6 +1253,249 @@ impl Store {
             "events": count("events")?,
         }))
     }
+}
+
+/// Fold conflicts that a canonicalization change has collapsed onto a single
+/// identity into one row.
+///
+/// Detections and coordination messages are repointed at the survivor rather
+/// than dropped, so the evidence behind a merged conflict outlives the merge.
+/// The survivor keeps the least settled status in its group: re-opening a
+/// settled decision costs an operator one review, while hiding an open conflict
+/// behind a resolved twin would silently unblock acceptance.
+fn merge_collapsed_conflicts(conn: &Connection) -> Result<()> {
+    let mut statement = conn.prepare(
+        "SELECT source_intent_id, target_intent_id, kind, scope_identity
+         FROM conflicts
+         GROUP BY source_intent_id, target_intent_id, kind, scope_identity
+         HAVING COUNT(*) > 1",
+    )?;
+    let groups = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    if groups.is_empty() {
+        return Ok(());
+    }
+    // A detection is immutable, and repointing one at the surviving conflict
+    // does not alter the observation itself, only which row owns it. Schema 3
+    // set the precedent for lifting this guard inside a migration.
+    conn.execute_batch("DROP TRIGGER IF EXISTS conflict_detections_no_update;")?;
+    let merged = (|| -> Result<usize> {
+        let mut merged = 0_usize;
+        for (source, target, kind, identity) in groups {
+            let mut statement = conn.prepare(
+                "SELECT id, status FROM conflicts
+                 WHERE source_intent_id IS ?1 AND target_intent_id = ?2
+                 AND kind = ?3 AND scope_identity = ?4
+                 ORDER BY detected_at, id",
+            )?;
+            let members = statement
+                .query_map(params![source, target, kind, identity], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(statement);
+            let Some((survivor, _)) = members.first().cloned() else {
+                continue;
+            };
+            let unsettled = if members.iter().any(|(_, status)| status == "OPEN") {
+                Some("OPEN")
+            } else if members.iter().any(|(_, status)| status == "COORDINATING") {
+                Some("COORDINATING")
+            } else {
+                None
+            };
+            for (id, _) in members.iter().skip(1) {
+                conn.execute(
+                    "UPDATE conflict_detections SET conflict_id = ?2 WHERE conflict_id = ?1",
+                    params![id, survivor],
+                )?;
+                conn.execute(
+                    "UPDATE coordination_messages SET conflict_id = ?2 WHERE conflict_id = ?1",
+                    params![id, survivor],
+                )?;
+                // The semantic graph is a projection of these tables, so it
+                // folds the same way they do. The detections were repointed at
+                // the survivor above, and their `OCCURRENCE_OF` edges have to
+                // follow: deleting them instead would leave every detection
+                // node from the folded conflict floating with nothing to
+                // occur on. `OR IGNORE` covers the case where the survivor
+                // already carries an identical edge, which the uniqueness
+                // constraint would otherwise reject.
+                conn.execute(
+                    "UPDATE OR IGNORE graph_edges SET to_node_id =
+                       (SELECT id FROM graph_nodes WHERE kind = 'Conflict' AND node_key = ?2)
+                     WHERE to_node_id IN
+                       (SELECT id FROM graph_nodes WHERE kind = 'Conflict' AND node_key = ?1)",
+                    params![id, survivor],
+                )?;
+                conn.execute(
+                    "UPDATE OR IGNORE graph_edges SET from_node_id =
+                       (SELECT id FROM graph_nodes WHERE kind = 'Conflict' AND node_key = ?2)
+                     WHERE from_node_id IN
+                       (SELECT id FROM graph_nodes WHERE kind = 'Conflict' AND node_key = ?1)",
+                    params![id, survivor],
+                )?;
+                // Anything `OR IGNORE` refused was a duplicate of an edge the
+                // survivor already has, so dropping it loses nothing.
+                conn.execute(
+                    "DELETE FROM graph_edges WHERE from_node_id IN
+                       (SELECT id FROM graph_nodes WHERE kind = 'Conflict' AND node_key = ?1)
+                     OR to_node_id IN
+                       (SELECT id FROM graph_nodes WHERE kind = 'Conflict' AND node_key = ?1)",
+                    params![id],
+                )?;
+                conn.execute(
+                    "DELETE FROM graph_nodes WHERE kind = 'Conflict' AND node_key = ?1",
+                    params![id],
+                )?;
+                conn.execute("DELETE FROM conflicts WHERE id = ?1", params![id])?;
+                merged += 1;
+            }
+            if let Some(status) = unsettled {
+                conn.execute(
+                    "UPDATE conflicts SET status = ?2 WHERE id = ?1",
+                    params![survivor, status],
+                )?;
+                // Keep the survivor's projection in step with the row it
+                // projects. Only `status` moves here, so the node's payload is
+                // patched rather than rebuilt, which would mean duplicating
+                // the typed serialization in the migration.
+                conn.execute(
+                    "UPDATE graph_nodes SET data_json = json_set(data_json, '$.status', ?2)
+                     WHERE kind = 'Conflict' AND node_key = ?1",
+                    params![survivor, status],
+                )?;
+            }
+        }
+        Ok(merged)
+    })();
+    // Restore the guard whether or not the fold succeeded, so a failed
+    // migration cannot leave detections mutable.
+    conn.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS conflict_detections_no_update
+         BEFORE UPDATE ON conflict_detections
+         BEGIN SELECT RAISE(ABORT, 'conflict detections are immutable'); END;",
+    )?;
+    let merged = merged?;
+    if merged > 0 {
+        tracing::info!(
+            merged,
+            "folded conflicts that the schema 5 scope canonicalization collapsed onto one identity"
+        );
+    }
+    Ok(())
+}
+
+/// Bring the Conflict projection back into agreement with the typed rows.
+///
+/// The graph is a materialized view, so any disagreement is the view being
+/// wrong. Two shapes are repaired: a node for a conflict row that no longer
+/// exists, which shows a conflict that was folded away or deleted, and a node
+/// whose recorded status has drifted from the row it projects, which is how a
+/// survivor keeps reading as RESOLVED after the fold reopened it.
+fn reconcile_conflict_graph(conn: &Connection) -> Result<()> {
+    let orphaned = conn.execute(
+        "DELETE FROM graph_edges WHERE from_node_id IN
+           (SELECT n.id FROM graph_nodes n WHERE n.kind = 'Conflict'
+            AND NOT EXISTS(SELECT 1 FROM conflicts c WHERE c.id = n.node_key))
+         OR to_node_id IN
+           (SELECT n.id FROM graph_nodes n WHERE n.kind = 'Conflict'
+            AND NOT EXISTS(SELECT 1 FROM conflicts c WHERE c.id = n.node_key))",
+        [],
+    )?;
+    let removed = conn.execute(
+        "DELETE FROM graph_nodes WHERE kind = 'Conflict'
+         AND NOT EXISTS(SELECT 1 FROM conflicts c WHERE c.id = graph_nodes.node_key)",
+        [],
+    )?;
+    // Only `status` is patched. Rebuilding the payload would mean duplicating
+    // the typed serialization here, and status is the field the fold moves.
+    // A detection node whose row is gone is a phantom in the same way a
+    // conflict node is.
+    conn.execute(
+        "DELETE FROM graph_edges WHERE from_node_id IN
+           (SELECT n.id FROM graph_nodes n WHERE n.kind = 'ConflictDetection'
+            AND NOT EXISTS(SELECT 1 FROM conflict_detections d WHERE d.id = n.node_key))
+         OR to_node_id IN
+           (SELECT n.id FROM graph_nodes n WHERE n.kind = 'ConflictDetection'
+            AND NOT EXISTS(SELECT 1 FROM conflict_detections d WHERE d.id = n.node_key))",
+        [],
+    )?;
+    conn.execute(
+        "DELETE FROM graph_nodes WHERE kind = 'ConflictDetection'
+         AND NOT EXISTS(
+           SELECT 1 FROM conflict_detections d WHERE d.id = graph_nodes.node_key
+         )",
+        [],
+    )?;
+    // A detection's node carries its own serialized `conflict_id`, so the fold
+    // has to reach inside the payload too. Repointing the row and the edge but
+    // not the payload leaves the graph telling two different stories about the
+    // same observation.
+    let repointed = conn.execute(
+        "UPDATE graph_nodes
+         SET data_json = json_set(
+               data_json,
+               '$.conflict_id',
+               (SELECT d.conflict_id FROM conflict_detections d WHERE d.id = graph_nodes.node_key)
+             )
+         WHERE kind = 'ConflictDetection'
+           AND EXISTS(
+             SELECT 1 FROM conflict_detections d
+             WHERE d.id = graph_nodes.node_key
+               AND d.conflict_id IS NOT json_extract(graph_nodes.data_json, '$.conflict_id')
+           )",
+        [],
+    )?;
+    // Restore the `OCCURRENCE_OF` edge for any detection whose node survived
+    // without one, which is how an earlier fold left them.
+    let relinked = conn.execute(
+        "INSERT OR IGNORE INTO graph_edges(id, from_node_id, to_node_id, kind, data_json, created_at)
+         SELECT 'edg_' || d.id, dn.id, cn.id, 'OCCURRENCE_OF', '{}', d.detected_at
+         FROM conflict_detections d
+         JOIN graph_nodes dn ON dn.kind = 'ConflictDetection' AND dn.node_key = d.id
+         JOIN graph_nodes cn ON cn.kind = 'Conflict' AND cn.node_key = d.conflict_id
+         WHERE NOT EXISTS(
+           SELECT 1 FROM graph_edges e
+           WHERE e.from_node_id = dn.id AND e.to_node_id = cn.id AND e.kind = 'OCCURRENCE_OF'
+         )",
+        [],
+    )?;
+    let refreshed = conn.execute(
+        "UPDATE graph_nodes
+         SET data_json = json_set(
+               data_json,
+               '$.status',
+               (SELECT c.status FROM conflicts c WHERE c.id = graph_nodes.node_key)
+             )
+         WHERE kind = 'Conflict'
+           AND EXISTS(
+             SELECT 1 FROM conflicts c
+             WHERE c.id = graph_nodes.node_key
+               AND c.status IS NOT json_extract(graph_nodes.data_json, '$.status')
+           )",
+        [],
+    )?;
+    if removed > 0 || refreshed > 0 || relinked > 0 || repointed > 0 {
+        tracing::info!(
+            removed,
+            refreshed,
+            relinked,
+            repointed,
+            orphaned_edges = orphaned,
+            "reconciled the conflict graph projection with the conflicts table"
+        );
+    }
+    Ok(())
 }
 
 fn audit_event_connection(conn: &Connection, page_size: usize) -> Result<EventChainAudit> {
@@ -1522,18 +1910,106 @@ mod schema_repair_tests {
         }
     }
 
+    /// Each seeded conflict gets a distinct scope of its own.
+    ///
+    /// A scopeless conflict canonicalizes to `<none>`, so two of them on one
+    /// intent pair and kind share an identity and the uniqueness index refuses
+    /// them both. Giving every row its own scope keeps these fixtures to states
+    /// the running system can actually reach.
     fn seed_conflict(conn: &Connection, id: &str, detected_at: &str) {
+        let scope = Scope::new("path", format!("src/{id}.rs"));
         conn.execute(
             "INSERT INTO conflicts(id, kind, severity, score, source_intent_id, target_intent_id,
              scope_json, scope_identity, explanation, suggestion, evidence_json, status, detected_at)
-             VALUES(?1, 'replace_vs_extend', 'HIGH', 0.9, 'int_a', 'int_b', NULL, ?1,
-                    'shared scope', 'coordinate', '{}', 'OPEN', ?2)",
-            params![id, detected_at],
+             VALUES(?1, 'replace_vs_extend', 'HIGH', 0.9, 'int_a', 'int_b', ?2, ?3,
+                    'shared scope', 'coordinate', '{}', 'OPEN', ?4)",
+            params![
+                id,
+                serde_json::to_string(&Some(&scope)).expect("encode scope"),
+                scope.canonical(),
+                detected_at
+            ],
         )
         .expect("seed conflict");
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Project a conflict into the graph the way the service layer does.
+    fn seed_conflict_node(conn: &Connection, conflict_id: &str, status: &str) {
+        conn.execute(
+            "INSERT INTO graph_nodes(id, kind, node_key, label, data_json, created_at)
+             VALUES(?1, 'Conflict', ?2, 'shared scope', ?3, '2026-01-01T00:00:00Z')",
+            params![
+                format!("nod_{conflict_id}"),
+                conflict_id,
+                serde_json::json!({ "id": conflict_id, "status": status }).to_string()
+            ],
+        )
+        .expect("seed conflict node");
+    }
+
+    /// Project a detection into the graph the way the service layer does:
+    /// its own node plus an `OCCURRENCE_OF` edge to the conflict it observed.
+    fn seed_detection_node(conn: &Connection, detection_id: &str, conflict_id: &str) {
+        conn.execute(
+            "INSERT INTO graph_nodes(id, kind, node_key, label, data_json, created_at)
+             VALUES(?1, 'ConflictDetection', ?2, 'observed', ?3, '2026-01-01T00:00:00Z')",
+            params![
+                format!("nod_{detection_id}"),
+                detection_id,
+                // The real projection serializes the whole detection, so the
+                // payload carries its own `conflict_id`. A `{}` stand-in cannot
+                // catch a fold that forgets to repoint it.
+                serde_json::json!({
+                    "id": detection_id,
+                    "conflict_id": conflict_id,
+                    "severity": "HIGH",
+                    "explanation": "observed",
+                })
+                .to_string()
+            ],
+        )
+        .expect("seed detection node");
+        conn.execute(
+            "INSERT INTO graph_edges(id, from_node_id, to_node_id, kind, data_json, created_at)
+             VALUES(?1, ?2, ?3, 'OCCURRENCE_OF', '{}', '2026-01-01T00:00:00Z')",
+            params![
+                format!("edg_{detection_id}"),
+                format!("nod_{detection_id}"),
+                format!("nod_{conflict_id}")
+            ],
+        )
+        .expect("seed occurrence edge");
+    }
+
+    /// Detection nodes that still point at a conflict node, by conflict.
+    fn occurrence_targets(conn: &Connection) -> Vec<(String, String)> {
+        let mut statement = conn
+            .prepare(
+                "SELECT dn.node_key, cn.node_key FROM graph_edges e
+                 JOIN graph_nodes dn ON dn.id = e.from_node_id
+                 JOIN graph_nodes cn ON cn.id = e.to_node_id
+                 WHERE e.kind = 'OCCURRENCE_OF' ORDER BY dn.node_key",
+            )
+            .expect("prepare");
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("query")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect")
+    }
+
+    fn conflict_node_keys(conn: &Connection) -> Vec<String> {
+        let mut statement = conn
+            .prepare("SELECT node_key FROM graph_nodes WHERE kind = 'Conflict' ORDER BY node_key")
+            .expect("prepare");
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect")
+    }
+
     fn seed_detection(conn: &Connection, id: &str, conflict: &str, explanation: &str, at: &str) {
         conn.execute(
             "INSERT INTO conflict_detections(id, conflict_id, severity, score, scope_json,
@@ -1556,6 +2032,378 @@ mod schema_repair_tests {
     }
 
     /// Schema 2 minted a byte-identical twin for a conflict that already had a
+    fn seed_symbol_conflict(
+        conn: &Connection,
+        id: &str,
+        key: &str,
+        stale_identity: &str,
+        status: &str,
+        detected_at: &str,
+    ) {
+        let scope_json = serde_json::json!({ "kind": "symbol", "key": key }).to_string();
+        conn.execute(
+            "INSERT INTO conflicts(id, kind, severity, score, source_intent_id, target_intent_id,
+             scope_json, scope_identity, explanation, suggestion, evidence_json, status, detected_at)
+             VALUES(?1, 'replace_vs_extend', 'HIGH', 0.9, 'int_a', 'int_b', ?2, ?3,
+                    'shared scope', 'coordinate', '{}', ?4, ?5)",
+            params![id, scope_json, stale_identity, status, detected_at],
+        )
+        .expect("seed symbol conflict");
+    }
+
+    fn conflict_identity(conn: &Connection, id: &str) -> String {
+        conn.query_row(
+            "SELECT scope_identity FROM conflicts WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .expect("read identity")
+    }
+
+    /// Schema 5 changed how a symbol scope canonicalizes. An identity written
+    /// under the old rule keeps pointing at a name this build never derives, so
+    /// the upsert in `record_conflict` misses the row and collides with the
+    /// legacy `scope_json` uniqueness constraint instead of warning. Every
+    /// identity must therefore be recomputed, not merely the blank ones.
+    #[test]
+    fn migration_recomputes_conflict_identities_written_under_the_old_rule() {
+        let store = Store::in_memory().expect("open store");
+        let conn = store.lock().expect("lock");
+        seed_intents(&conn);
+        seed_symbol_conflict(
+            &conn,
+            "cfl_stale",
+            "App\\Billing\\Report::render",
+            "symbol:app\\billing\\report::render",
+            "OPEN",
+            "2026-01-01T00:00:00Z",
+        );
+
+        conn.execute(
+            "UPDATE meta SET value = '6' WHERE key = 'schema_version'",
+            [],
+        )
+        .expect("pretend the store already migrated with the defective pass");
+        Store::migrate(&conn).expect("upgrade migration");
+
+        assert_eq!(
+            conflict_identity(&conn, "cfl_stale"),
+            Scope::new("symbol", "App\\Billing\\Report::render").precise(),
+            "the stored identity must match what this build now derives"
+        );
+    }
+
+    /// Two conflicts that the new rule collapses onto one identity cannot both
+    /// survive: the uniqueness index would refuse to build. Folding them must
+    /// keep every observation and must not bury an open conflict behind a
+    /// settled twin, which would silently unblock acceptance.
+    #[test]
+    fn migration_folds_conflicts_that_now_share_one_identity() {
+        let store = Store::in_memory().expect("open store");
+        let conn = store.lock().expect("lock");
+        seed_intents(&conn);
+        seed_symbol_conflict(
+            &conn,
+            "cfl_settled",
+            "App\\Billing\\Report::render",
+            "symbol:app\\billing\\report::render",
+            "RESOLVED",
+            "2026-01-01T00:00:00Z",
+        );
+        // Same symbol, different separators: one precise identity, so the old
+        // rule kept two rows where this build derives one.
+        seed_symbol_conflict(
+            &conn,
+            "cfl_open",
+            "app/billing/Report::render",
+            "symbol:app/billing/report::render",
+            "OPEN",
+            "2026-02-01T00:00:00Z",
+        );
+        seed_detection(
+            &conn,
+            "dtn_settled",
+            "cfl_settled",
+            "first observation",
+            "2026-01-01T00:00:00Z",
+        );
+        seed_detection(
+            &conn,
+            "dtn_open",
+            "cfl_open",
+            "second observation",
+            "2026-02-01T00:00:00Z",
+        );
+        seed_conflict_node(&conn, "cfl_settled", "RESOLVED");
+        seed_conflict_node(&conn, "cfl_open", "OPEN");
+        seed_detection_node(&conn, "dtn_settled", "cfl_settled");
+        seed_detection_node(&conn, "dtn_open", "cfl_open");
+
+        conn.execute(
+            "UPDATE meta SET value = '6' WHERE key = 'schema_version'",
+            [],
+        )
+        .expect("pretend the store already migrated with the defective pass");
+        Store::migrate(&conn).expect("upgrade migration");
+
+        let surviving: Vec<String> = {
+            let mut statement = conn
+                .prepare("SELECT id FROM conflicts ORDER BY id")
+                .expect("prepare");
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .expect("query")
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .expect("collect")
+        };
+        assert_eq!(
+            surviving,
+            vec!["cfl_settled".to_string()],
+            "the earliest row survives the fold"
+        );
+        assert_eq!(
+            detection_ids(&conn, "cfl_settled"),
+            vec!["dtn_open".to_string(), "dtn_settled".to_string()],
+            "both observations must be repointed at the survivor, not dropped"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM conflicts WHERE id = 'cfl_settled'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .expect("read status"),
+            "OPEN",
+            "an open conflict must not be hidden behind a settled twin"
+        );
+
+        // The graph is a projection of the typed tables, so it must agree
+        // with them: no node for a conflict that was folded away, and the
+        // survivor's node carrying the status its row now has.
+        assert_eq!(
+            conflict_node_keys(&conn),
+            vec!["cfl_settled".to_string()],
+            "the folded conflict must not linger as a phantom graph node"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT json_extract(data_json, '$.status') FROM graph_nodes
+                 WHERE kind = 'Conflict' AND node_key = 'cfl_settled'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .expect("read projected status"),
+            "OPEN",
+            "the survivor's projection must match its reconciled row"
+        );
+
+        // A detection repointed in the table must be repointed in the graph
+        // too. Deleting its edge instead would leave the observation floating
+        // with nothing to occur on.
+        assert_eq!(
+            occurrence_targets(&conn),
+            vec![
+                ("dtn_open".to_string(), "cfl_settled".to_string()),
+                ("dtn_settled".to_string(), "cfl_settled".to_string()),
+            ],
+            "both observations must point at the surviving conflict"
+        );
+        // Row, edge and payload are three views of one fact and must agree.
+        let payload_targets: Vec<(String, String)> = {
+            let mut statement = conn
+                .prepare(
+                    "SELECT node_key, json_extract(data_json, '$.conflict_id')
+                     FROM graph_nodes WHERE kind = 'ConflictDetection' ORDER BY node_key",
+                )
+                .expect("prepare");
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .expect("query")
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .expect("collect")
+        };
+        assert_eq!(
+            payload_targets,
+            vec![
+                ("dtn_open".to_string(), "cfl_settled".to_string()),
+                ("dtn_settled".to_string(), "cfl_settled".to_string()),
+            ],
+            "each detection's serialized conflict_id must name the survivor too"
+        );
+
+        // The detection guard must be back in place after the fold.
+        let mutated = conn.execute(
+            "UPDATE conflict_detections SET explanation = 'tampered' WHERE id = 'dtn_open'",
+            [],
+        );
+        assert!(
+            mutated.is_err(),
+            "conflict detections must be immutable again after migration"
+        );
+
+        // Repeat opens must be inert.
+        Store::migrate(&conn).expect("second open");
+        assert_eq!(detection_ids(&conn, "cfl_settled").len(), 2);
+    }
+
+    /// The schema 5 recompute releases live claims that collapsed onto one
+    /// scope. Keyed on the canonical alias it released claims that never
+    /// collided at all: two same-named symbols in different namespaces share an
+    /// alias, so upgrading silently dropped a live claim on unrelated code.
+    #[test]
+    fn upgrading_keeps_live_claims_on_distinct_namespaced_scopes() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("state.sqlite3");
+        {
+            let store = Store::open(&path).expect("create store");
+            let conn = store.lock().expect("lock");
+            seed_intents(&conn);
+            for (claim_id, key, expires) in [
+                (
+                    "clm_billing",
+                    "App\\Billing\\Report::render",
+                    "2099-01-01T00:00:00Z",
+                ),
+                (
+                    "clm_admin",
+                    "App\\Admin\\Report::render",
+                    "2099-01-02T00:00:00Z",
+                ),
+            ] {
+                conn.execute(
+                    "INSERT INTO claims(id, agent_id, intent_id, scope_kind, scope_key,
+                     canonical_scope, precise_scope, status, reason, lease_expires_at, created_at)
+                     VALUES(?1, 'agt_x', 'int_a', 'symbol', ?2, ?3, '', 'ACTIVE', NULL, ?4,
+                            '2026-01-01T00:00:00Z')",
+                    params![
+                        claim_id,
+                        key,
+                        Scope::new("symbol", key).canonical(),
+                        expires
+                    ],
+                )
+                .expect("seed claim");
+            }
+            conn.execute(
+                "UPDATE meta SET value = '4' WHERE key = 'schema_version'",
+                [],
+            )
+            .expect("stamp a pre-schema-5 store");
+        }
+
+        let reopened = Store::open(&path).expect("upgrade");
+        let conn = reopened.lock().expect("lock");
+        let mut statement = conn
+            .prepare("SELECT id FROM claims WHERE status = 'ACTIVE' ORDER BY id")
+            .expect("prepare");
+        let active = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect");
+        assert_eq!(
+            active,
+            vec!["clm_admin".to_string(), "clm_billing".to_string()],
+            "claims on different namespaces are not duplicates and must both survive"
+        );
+    }
+
+    /// The schema batch runs before the migration, against a table that may
+    /// predate a column the batch wants to index. `CREATE TABLE IF NOT EXISTS`
+    /// is a no-op on an existing store, so indexing `precise_scope` there
+    /// failed the open outright and no in-memory test could see it: those
+    /// always build the current schema from scratch.
+    #[test]
+    fn opening_a_store_that_predates_precise_scope_still_upgrades() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("state.sqlite3");
+        {
+            let store = Store::open(&path).expect("create store");
+            let conn = store.lock().expect("lock");
+            // Rewind to a store written before `precise_scope` existed.
+            conn.execute("DROP INDEX IF EXISTS idx_claims_precise", [])
+                .expect("drop index");
+            conn.execute("ALTER TABLE claims DROP COLUMN precise_scope", [])
+                .expect("drop column");
+            conn.execute(
+                "UPDATE meta SET value = '4' WHERE key = 'schema_version'",
+                [],
+            )
+            .expect("stamp an older schema");
+        }
+
+        let reopened = Store::open(&path).expect("an older store must still open");
+        let conn = reopened.lock().expect("lock");
+        let present: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM pragma_table_info('claims') WHERE name = 'precise_scope'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query");
+        assert!(present, "the upgrade must add the column it indexes");
+        let stamped: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read schema version");
+        assert_eq!(stamped, DATABASE_SCHEMA_VERSION.to_string());
+    }
+
+    /// A store an earlier build already folded is the harder case: the
+    /// duplicate conflict row is gone, so there is no duplicate group left to
+    /// find, and a fold that repairs the projection only while folding would
+    /// return early and leave the damage in place.
+    #[test]
+    fn migration_repairs_a_projection_an_earlier_fold_left_behind() {
+        let store = Store::in_memory().expect("open store");
+        let conn = store.lock().expect("lock");
+        seed_intents(&conn);
+        // The survivor, already reopened in the table by the earlier fold.
+        seed_symbol_conflict(
+            &conn,
+            "cfl_billing",
+            "App\\Billing\\Report::render",
+            Scope::new("symbol", "App\\Billing\\Report::render")
+                .precise()
+                .as_str(),
+            "OPEN",
+            "2026-01-01T00:00:00Z",
+        );
+        // Its projection still carries the pre-fold status.
+        seed_conflict_node(&conn, "cfl_billing", "RESOLVED");
+        // And the folded-away row's node was never removed.
+        seed_conflict_node(&conn, "cfl_admin", "OPEN");
+
+        conn.execute(
+            "UPDATE meta SET value = '7' WHERE key = 'schema_version'",
+            [],
+        )
+        .expect("pretend an earlier fold already ran");
+        Store::migrate(&conn).expect("upgrade migration");
+
+        assert_eq!(
+            conflict_node_keys(&conn),
+            vec!["cfl_billing".to_string()],
+            "a node whose conflict row is gone must not survive the upgrade"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT json_extract(data_json, '$.status') FROM graph_nodes
+                 WHERE kind = 'Conflict' AND node_key = 'cfl_billing'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .expect("read projected status"),
+            "OPEN",
+            "the survivor's projection must be brought back to its row's status"
+        );
+    }
+
     /// native observation. Only that twin may be removed.
     #[test]
     fn repair_removes_only_byte_identical_phantoms() {

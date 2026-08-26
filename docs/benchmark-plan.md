@@ -218,10 +218,24 @@ checks establish whether code existed and whether integration occurred.
 
 ### Scale
 
-Three arms times five scenarios times twenty repetitions is 300 agent runs per
-model. Twenty paired repetitions detects a large effect and will not detect a
-10% one; the plan states the detectable effect size rather than discovering it
-afterwards.
+Three arms times five scenarios times twenty repetitions is 300 arm/scenario
+executions per model. Each execution runs two agents, so it is 600 agent
+invocations, not 300. Quote whichever number a cost or scheduling estimate
+actually needs, and say which one it is.
+
+The unit of analysis is the arm/scenario execution, and the design is matched
+triplets: the three arms see the same scenario seed, so each scenario
+contributes one block of three paired observations rather than three
+independent samples.
+
+Twenty repetitions per cell is a preregistered design choice, not a derived
+sample size. This plan does not yet carry a power calculation, and until it
+does, no claim about which effects the design can or cannot detect belongs
+here. Supplying one means fixing, in advance: the outcome model for each
+primary measure, the baseline rate or mean and its assumed variance, the test
+and its alpha, the correction across the two planned contrasts, and the
+resulting minimum detectable effect. Report results as a pilot until that
+exists.
 
 Anything smaller is labelled a pilot or a smoke test, never a benchmark result.
 

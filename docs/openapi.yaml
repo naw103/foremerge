@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Foremerge local JSON API
-  version: 0.3.1
+  version: 0.4.0
   description: >-
     Local-first semantic coordination API above Git. Successful responses use
     an ok/data envelope. All versioned routes require bearer authentication when
@@ -875,9 +875,21 @@ components:
         allow_high_conflicts:
           type: boolean
           default: false
+        allow_unverified:
+          type: boolean
+          default: false
+          description: >-
+            Accept work Foremerge did not verify, or verified as failing,
+            regardless of the configured acceptance policy. Requires
+            override_reason. The outcome is recorded on the ChangeSet as
+            UNVERIFIED rather than as a check that passed. This and
+            allow_high_conflicts are operator overrides: the CLI and this API
+            accept them, MCP rejects them.
         override_reason:
           type: [string, "null"]
-          description: Required when unresolved HIGH conflicts are explicitly overridden.
+          description: >-
+            Required when unresolved HIGH conflicts are explicitly overridden,
+            and when allow_unverified is set.
     RecordCommitRequest:
       type: object
       required: [git_ref]

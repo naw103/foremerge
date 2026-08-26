@@ -606,7 +606,16 @@ pub fn tracked_content_contains(worktree: &Path, needle: &str) -> bool {
         .args(["grep", "--ignore-case", "--fixed-strings", "--quiet", "-e"])
         .arg(needle)
         .output()
-        .map(|output| output.status.success())
+        .map(|output| match output.status.code() {
+            // `git grep` reports a match with 0 and a clean "no match" with 1.
+            // Only 1 is evidence of absence. Anything else, including the 128
+            // Git uses for its own failures and the None of a signal, means the
+            // search did not run, and a search that did not run must not be
+            // read as a missing symbol.
+            Some(0) => true,
+            Some(1) => false,
+            _ => true,
+        })
         .unwrap_or(true)
 }
 
@@ -753,5 +762,36 @@ mod tests {
         assert!(report.truncated);
         assert!(report.total_bytes > report.captured_bytes as u64);
         assert!(report.symbols.contains(&"CapturedSymbol".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod symbol_search_tests {
+    use super::*;
+
+    /// The advisory exists to say a declared symbol appears nowhere. A search
+    /// that could not run has not established that. `git grep` exits 128 for
+    /// its own failures, which `ExitStatus::success` cannot tell apart from the
+    /// 1 it uses for an honest "no match".
+    #[test]
+    fn a_search_that_could_not_run_is_not_evidence_of_a_missing_symbol() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        // Not a repository, so `git grep` fails with 128 rather than answering.
+        let probe = std::process::Command::new("git")
+            .arg("-C")
+            .arg(temp.path())
+            .args(["grep", "--quiet", "-e", "Anything"])
+            .output()
+            .expect("run git grep");
+        assert_eq!(
+            probe.status.code(),
+            Some(128),
+            "this test is meaningless unless git actually fails here"
+        );
+
+        assert!(
+            tracked_content_contains(temp.path(), "Anything"),
+            "a failed search must report found, so it cannot manufacture a warning"
+        );
     }
 }

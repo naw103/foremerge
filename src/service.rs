@@ -307,6 +307,7 @@ impl Foremerge {
         let mut conn = self.store.lock()?;
         let tx = Store::immediate_tx(&mut conn)?;
         let agent = agent_by_id(&tx, &request.agent_id)?;
+        touch_agent(&tx, &agent.id)?;
         let now = Utc::now().to_rfc3339();
         let task_key = digest(&request.task);
         let task_id: String = match tx
@@ -364,13 +365,14 @@ impl Foremerge {
         for claim in &intent.scopes {
             tx.execute(
                 "INSERT INTO intent_scopes(intent_id, scope_kind, scope_key, canonical_scope,
-                                           operation, operation_inferred)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                                           precise_scope, operation, operation_inferred)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     intent.id,
                     claim.scope.kind,
                     claim.scope.key,
                     claim.scope.canonical(),
+                    claim.scope.precise(),
                     claim.operation.as_str(),
                     claim.inferred,
                 ],
@@ -483,10 +485,15 @@ impl Foremerge {
     ///
     /// An agent that dies mid-task leaves its intent owned by an agent that
     /// will never return, and ownership is otherwise permanent, so the work
-    /// could only be duplicated. Adoption is deliberately narrow: it is refused
-    /// while any claim on the intent is still live, so it can never be used to
-    /// take work away from an agent that is simply busy. The expiry of every
-    /// claim is the evidence that the previous owner has stopped.
+    /// could only be duplicated. Adoption is deliberately narrow, and requires
+    /// the same three things `status` requires before it calls an intent
+    /// stranded: an eligible lifecycle state, no live claim, and an owner that
+    /// has actually fallen silent.
+    ///
+    /// The absence of a live claim is not on its own evidence that the owner
+    /// stopped — a freshly published intent has never held one — so it cannot
+    /// be the only gate. Checking the owner's own silence is what stops a
+    /// handover from racing an agent between publishing and claiming.
     pub fn adopt_intent(&self, agent_id: &str, intent_id: &str, reason: &str) -> Result<Intent> {
         let reason = reason.trim();
         if reason.is_empty() {
@@ -499,6 +506,12 @@ impl Foremerge {
         if intent.agent_id == agent.id {
             bail!("INVALID_INPUT: intent {intent_id} already belongs to this agent");
         }
+        // `INTENT` is adoptable even though `status` never calls it stranded.
+        // The two answer different questions: `stranded` flags work that reads
+        // as in progress while nothing holds it, which an unclaimed intent
+        // never does, whereas an intent published by an agent that then died is
+        // orphaned exactly the same way. The owner-silence gate below is what
+        // makes including it safe.
         require_state(
             &intent.status,
             &["INTENT", "CLAIMED", "IN_PROGRESS", "PROVISIONAL"],
@@ -516,10 +529,27 @@ impl Foremerge {
                 "FORBIDDEN: intent {intent_id} still holds {live} live claim(s); its owner has not stopped. Wait for the leases to expire, or ask that agent to discard the work."
             );
         }
+        let (owner_status, owner_last_seen): (String, String) = tx.query_row(
+            "SELECT status, last_seen_at FROM agents WHERE id = ?1",
+            [&intent.agent_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if owner_status == "ACTIVE" && !is_stale(&owner_last_seen) {
+            bail!(
+                "FORBIDDEN: intent {intent_id} belongs to {}, which last called Foremerge at {owner_last_seen} and is still active; its owner has not stopped. Wait until it falls silent, or ask that agent to discard the work.",
+                intent.agent_id
+            );
+        }
+        // Adopting is the adopter acting, so it is evidence the adopter is
+        // alive. Without this the handover can complete and leave the work
+        // reading as stranded again immediately, under a new owner that looks
+        // just as absent as the old one.
+        touch_agent(&tx, &agent.id)?;
         let previous_owner = intent.agent_id.clone();
         tx.execute(
-            "UPDATE intents SET agent_id = ?2 WHERE id = ?1 AND agent_id = ?3",
-            params![intent_id, agent.id, previous_owner],
+            "UPDATE intents SET agent_id = ?2, version = version + 1, updated_at = ?4
+             WHERE id = ?1 AND agent_id = ?3",
+            params![intent_id, agent.id, previous_owner, now],
         )?;
         // Expired claims belong to the agent that is gone. Release them
         // explicitly so the audit trail shows the handover rather than leaving
@@ -529,6 +559,11 @@ impl Foremerge {
              WHERE intent_id = ?1 AND status = 'ACTIVE'",
             params![intent_id, now],
         )?;
+        // The graph is a projection of both, and a handover that updates only
+        // the typed tables leaves it naming the previous owner and showing the
+        // released claims as still held.
+        refresh_intent_node(&tx, intent_id)?;
+        refresh_claim_nodes_for_intent(&tx, intent_id)?;
         Store::append_event(
             &tx,
             "intent.adopted",
@@ -564,6 +599,7 @@ impl Foremerge {
         let mut conn = self.store.lock()?;
         let tx = Store::immediate_tx(&mut conn)?;
         let agent = agent_by_id(&tx, &request.agent_id)?;
+        touch_agent(&tx, &agent.id)?;
         let intent = intent_by_id(&tx, &request.intent_id)?;
         let related = intent_by_id(&tx, &request.related_intent_id)?;
         if intent.agent_id != agent.id {
@@ -686,6 +722,7 @@ impl Foremerge {
         let mut conn = self.store.lock()?;
         let tx = Store::immediate_tx(&mut conn)?;
         let agent = agent_by_id(&tx, &request.agent_id)?;
+        touch_agent(&tx, &agent.id)?;
         let intent = intent_by_id(&tx, &request.intent_id)?;
         if intent.agent_id != agent.id {
             bail!(
@@ -707,7 +744,12 @@ impl Foremerge {
         let mut warnings = Vec::new();
         for scope in request.scopes {
             let mut statement = tx.prepare(
-                "SELECT intent_id FROM claims WHERE canonical_scope = ?1 AND status = 'ACTIVE'
+                // DISTINCT because the alias is deliberately non-unique: one
+                // intent may hold several claims that share it, and each
+                // duplicate row would otherwise persist and report the same
+                // overlap again.
+                "SELECT DISTINCT intent_id FROM claims
+                 WHERE canonical_scope = ?1 AND status = 'ACTIVE'
                  AND lease_expires_at > ?2 AND intent_id <> ?3",
             )?;
             let existing = statement
@@ -727,9 +769,9 @@ impl Foremerge {
             let existing_claim: Option<(String, String)> = tx
                 .query_row(
                     "SELECT id, created_at FROM claims
-                     WHERE intent_id = ?1 AND canonical_scope = ?2 AND status = 'ACTIVE'
+                     WHERE intent_id = ?1 AND precise_scope = ?2 AND status = 'ACTIVE'
                      ORDER BY created_at DESC LIMIT 1",
-                    params![intent.id, scope.canonical()],
+                    params![intent.id, scope.precise()],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?;
@@ -750,15 +792,31 @@ impl Foremerge {
                     .unwrap_or_else(|| now.to_rfc3339()),
             };
             if renewed {
+                // The scope is rewritten too. Renewal matches on the precise
+                // identity, which folds separator and case spellings together,
+                // so a renewal can legitimately arrive spelled differently from
+                // the row it renews. Leaving the stored spelling alone left the
+                // table disagreeing with both the response and the graph, which
+                // carry the spelling the caller just used.
                 tx.execute(
-                    "UPDATE claims SET lease_expires_at = ?2, reason = ?3 WHERE id = ?1",
-                    params![claim.id, claim.lease_expires_at, claim.reason],
+                    "UPDATE claims SET lease_expires_at = ?2, reason = ?3,
+                     scope_kind = ?4, scope_key = ?5, canonical_scope = ?6
+                     WHERE id = ?1",
+                    params![
+                        claim.id,
+                        claim.lease_expires_at,
+                        claim.reason,
+                        claim.scope.kind,
+                        claim.scope.key,
+                        claim.scope.canonical(),
+                    ],
                 )?;
             } else {
                 tx.execute(
                     "INSERT INTO claims(id, agent_id, intent_id, scope_kind, scope_key,
-                     canonical_scope, status, reason, lease_expires_at, created_at)
-                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                     canonical_scope, precise_scope, status, reason, lease_expires_at,
+                     created_at)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                     params![
                         claim.id,
                         claim.agent_id,
@@ -766,6 +824,7 @@ impl Foremerge {
                         claim.scope.kind,
                         claim.scope.key,
                         claim.scope.canonical(),
+                        claim.scope.precise(),
                         claim.status,
                         claim.reason,
                         claim.lease_expires_at,
@@ -841,6 +900,7 @@ impl Foremerge {
             bail!("FORBIDDEN: an agent may only start its own intent");
         }
         require_state(&intent.status, &["CLAIMED"], "start work")?;
+        touch_agent(&tx, agent_id)?;
         transition_intent(&tx, intent_id, agent_id, "CLAIMED", "IN_PROGRESS")?;
         let mut started = intent_by_id(&tx, intent_id)?;
         started.open_conflicts = Some(open_conflicts_for_intent(&tx, intent_id)?);
@@ -1215,6 +1275,7 @@ impl Foremerge {
         let mut conn = self.store.lock()?;
         let tx = Store::immediate_tx(&mut conn)?;
         bind_repository(&tx, &snapshot.common_dir)?;
+        touch_agent(&tx, &agent.id)?;
         let fresh_intent = intent_by_id(&tx, &intent.id)?;
         require_state(
             &fresh_intent.status,
@@ -2268,6 +2329,7 @@ impl Foremerge {
                 intent.status
             );
         }
+        touch_agent(&tx, agent_id)?;
         let now = Utc::now().to_rfc3339();
         tx.execute(
             "UPDATE intents SET status = 'DISCARDED', version = version + 1, updated_at = ?2 WHERE id = ?1",
@@ -2323,6 +2385,7 @@ impl Foremerge {
         let mut conn = self.store.lock()?;
         let tx = Store::immediate_tx(&mut conn)?;
         agent_by_id(&tx, &request.from_agent_id)?;
+        touch_agent(&tx, &request.from_agent_id)?;
         agent_by_id(&tx, &request.to_agent_id)?;
         if let Some(conflict_id) = request.conflict_id.as_deref() {
             let exists: bool = tx.query_row(
@@ -2393,6 +2456,7 @@ impl Foremerge {
         let mut conn = self.store.lock()?;
         let tx = Store::immediate_tx(&mut conn)?;
         agent_by_id(&tx, &request.agent_id)?;
+        touch_agent(&tx, &request.agent_id)?;
         let mut conflict = conflict_by_id(&tx, conflict_id)?;
         if !matches!(conflict.status.as_str(), "OPEN" | "COORDINATING") {
             bail!(
@@ -2646,12 +2710,7 @@ impl Foremerge {
                     [&agent.id],
                     |row| row.get(0),
                 )?;
-                let stale = DateTime::parse_from_rfc3339(&last_seen_at)
-                    .map(|seen| {
-                        Utc::now().signed_duration_since(seen).num_seconds()
-                            > AGENT_STALE_AFTER_SECONDS
-                    })
-                    .unwrap_or(false);
+                let stale = is_stale(&last_seen_at);
                 agents.push(StatusAgent {
                     id: agent.id,
                     name: agent.name,
@@ -3060,10 +3119,13 @@ fn persist_conflict(
         }
     }
     let scope_json = to_json(&normalized.scope)?;
+    // The conflict row's identity is the precise scope, matching `pair_key`.
+    // On the canonical alias two distinct overlaps would share one row, and the
+    // second would fold into the first as a mere redetection.
     let scope_identity = normalized
         .scope
         .as_ref()
-        .map(Scope::canonical)
+        .map(Scope::precise)
         .unwrap_or_else(|| "<none>".to_string());
     // The conflict row is a stable lifecycle identity. A fresh observation of
     // the same identity must never rewrite its original evidence or silently
@@ -3310,14 +3372,60 @@ fn require_state(current: &str, expected: &[&str], action: &str) -> Result<()> {
     }
 }
 
+/// Normalize declared scopes and fold the ones that name the same thing.
+///
+/// `App\Billing\Report::render` and `app/billing/Report::render` are one
+/// scope, so a request carrying both is describing a single scope twice. The
+/// storage layer keys on that same precise identity, so leaving the duplicate
+/// in place surfaced a raw primary-key violation from SQLite instead of an
+/// answer. Two entries that agree are collapsed; two that declare different
+/// operations on one scope are a contradiction the caller has to resolve,
+/// because Foremerge cannot know which one it meant.
 fn normalize_scopes(scopes: Vec<ScopeClaim>) -> Result<Vec<ScopeClaim>> {
-    scopes.into_iter().map(|claim| claim.normalized()).collect()
+    let mut folded: Vec<ScopeClaim> = Vec::new();
+    for claim in scopes {
+        let claim = claim.normalized()?;
+        let identity = claim.scope.precise();
+        match folded
+            .iter_mut()
+            .find(|existing| existing.scope.precise() == identity)
+        {
+            Some(existing) if existing.operation == claim.operation => {
+                // A declared operation is better evidence than an inferred one,
+                // so the declared spelling wins when both name one scope.
+                if existing.inferred && !claim.inferred {
+                    *existing = claim;
+                }
+            }
+            Some(existing) => bail!(
+                "INVALID_INPUT: scope '{}' is declared twice with different operations ({} and {}); it names one scope, so declare it once",
+                claim.scope.key,
+                existing.operation.as_str(),
+                claim.operation.as_str()
+            ),
+            None => folded.push(claim),
+        }
+    }
+    Ok(folded)
 }
 
 /// Claims name a scope without restating what the intent does to it, because
 /// the intent already declared that.
+///
+/// Folded the same way, so claiming one scope under two spellings records one
+/// claim rather than returning the same claim id twice.
 fn normalize_plain_scopes(scopes: Vec<Scope>) -> Result<Vec<Scope>> {
-    scopes.into_iter().map(|scope| scope.normalized()).collect()
+    let mut folded: Vec<Scope> = Vec::new();
+    for scope in scopes {
+        let scope = scope.normalized()?;
+        if !folded
+            .iter()
+            .any(|existing| existing.precise() == scope.precise())
+        {
+            folded.push(scope);
+        }
+    }
+    Ok(folded)
 }
 
 /// Build the caller-facing view of one related intent.
@@ -3392,6 +3500,38 @@ fn bind_repository(tx: &Transaction<'_>, common_dir: &std::path::Path) -> Result
         [canonical_path(common_dir).to_string_lossy().into_owned()],
     )?;
     Ok(())
+}
+
+/// Record that an agent just acted.
+///
+/// `last_seen_at` is documented on [`StatusAgent`] as the agent's last
+/// Foremerge call, and staleness — which drives the status report and gates
+/// adoption — is measured from it. Registration alone cannot maintain it: an
+/// agent that registered and then worked for longer than
+/// [`AGENT_STALE_AFTER_SECONDS`] would otherwise read as abandoned while it was
+/// busy. Only operations the agent itself performs touch this; being named as
+/// the recipient of someone else's message is not evidence of life.
+fn touch_agent(conn: &Connection, agent_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE agents SET last_seen_at = ?2 WHERE id = ?1",
+        params![agent_id, Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+/// Whether an agent has been silent long enough to be treated as gone.
+///
+/// One definition, shared by the `status` report and by [`Foremerge::adopt_intent`],
+/// so a handover can never be granted on weaker evidence than the report shows.
+/// A timestamp that will not parse reads as *not* stale: refusing a handover on
+/// a damaged row costs an operator a message, while granting one takes an
+/// agent's work away.
+fn is_stale(last_seen_at: &str) -> bool {
+    DateTime::parse_from_rfc3339(last_seen_at)
+        .map(|seen| {
+            Utc::now().signed_duration_since(seen).num_seconds() > AGENT_STALE_AFTER_SECONDS
+        })
+        .unwrap_or(false)
 }
 
 fn agent_by_id(conn: &Connection, id: &str) -> Result<Agent> {
@@ -3606,6 +3746,101 @@ async fn read_bounded_tail(mut input: impl AsyncRead + Unpin) -> std::io::Result
 
 #[cfg(test)]
 mod tests {
+
+    /// Adoption has to actually rescue the work. The refusal paths are tested
+    /// elsewhere; this is the success path, and it asserts the state the
+    /// handover leaves behind rather than only its return value. A handover
+    /// that completes and leaves the intent reading as stranded under a new
+    /// owner, or a graph still naming the old one, has not rescued anything.
+    #[test]
+    fn adopting_a_stranded_intent_leaves_it_owned_live_and_projected() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let owner = service
+            .register_agent(RegisterAgentRequest {
+                name: "owner".into(),
+                model: None,
+                capabilities: vec![],
+                worktree: None,
+            })
+            .unwrap()
+            .agent;
+        let rescuer = service
+            .register_agent(RegisterAgentRequest {
+                name: "rescuer".into(),
+                model: None,
+                capabilities: vec![],
+                worktree: None,
+            })
+            .unwrap()
+            .agent;
+        let intent = service
+            .publish_intent(PublishIntentRequest {
+                agent_id: owner.id.clone(),
+                task: "rescue".into(),
+                summary: "Add a greeting helper".into(),
+                rationale: None,
+                scopes: vec![ScopeClaim::new(
+                    Scope::new("symbol", "Greeter::greet"),
+                    Operation::Modify,
+                )],
+                depends_on: vec![],
+                metadata: json!({}),
+            })
+            .unwrap()
+            .intent;
+
+        // The owner dies. Backdate its heartbeat well past the stale window,
+        // and the rescuer's too, so the adopter starts out looking as absent
+        // as the agent it is replacing.
+        let long_ago =
+            (Utc::now() - chrono::Duration::seconds(AGENT_STALE_AFTER_SECONDS * 2)).to_rfc3339();
+        {
+            let conn = service.store.lock().unwrap();
+            conn.execute("UPDATE agents SET last_seen_at = ?1", params![long_ago])
+                .unwrap();
+        }
+
+        let adopted = service
+            .adopt_intent(&rescuer.id, &intent.id, "owner died mid-task")
+            .expect("a stranded intent must be adoptable");
+        assert_eq!(adopted.agent_id, rescuer.id);
+
+        let status = service.status().unwrap();
+        let rescuer_entry = status
+            .agents
+            .iter()
+            .find(|entry| entry.id == rescuer.id)
+            .expect("the rescuer appears in status");
+        assert!(
+            !rescuer_entry.stale,
+            "adopting is the adopter acting, so it must not still read as absent"
+        );
+        let adopted_entry = status
+            .intents
+            .iter()
+            .flat_map(|group| group.intents.iter())
+            .find(|entry| entry.id == intent.id)
+            .expect("the adopted intent appears in status");
+        assert!(
+            !adopted_entry.stranded,
+            "rescued work must not immediately read as stranded again"
+        );
+
+        let projected: String = {
+            let conn = service.store.lock().unwrap();
+            conn.query_row(
+                "SELECT json_extract(data_json, '$.agent_id') FROM graph_nodes
+                 WHERE kind = 'Intent' AND node_key = ?1",
+                [&intent.id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            projected, rescuer.id,
+            "the graph must name the new owner, not the agent that died"
+        );
+    }
     use super::*;
 
     #[test]

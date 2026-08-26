@@ -179,6 +179,23 @@ pub const SKILL_CONTENT: &str = include_str!("../.codex/skills/foremerge/SKILL.m
 const SKILL_STAMP_PREFIX: &str = "<!-- foremerge:managed ";
 const SKILL_STAMP_SUFFIX: &str = "-->";
 
+/// The body of every Foremerge skill file released before stamping existed.
+///
+/// Stamping arrived after v0.3.1, so the whole pre-stamp installed base is
+/// these three bodies: v0.1.0, v0.2.0, and v0.3.0/v0.3.1, which shipped an
+/// identical file. A file matching one of them is provably untouched and may
+/// be refreshed in place; an unstamped file matching none of them is somebody's
+/// own work and needs `--force`.
+///
+/// Each entry is the SHA-256 of `skill_body` for that release, which for an
+/// unstamped file is the file verbatim. Recompute with
+/// `git show vX.Y.Z:.codex/skills/foremerge/SKILL.md | shasum -a 256`.
+const PRE_STAMP_SKILL_DIGESTS: &[&str] = &[
+    "3c16ef8ed787bb749784a2b7fa728a80a931f1fbb7df0a695c5c03325610143b",
+    "ffa4d100e05c7ca74df00f83c05ad52a36eafc140465ddab17abbb321d37f9d9",
+    "247a1e96ec93a9a3459f530ff331e2c5d1bbfdf8e823650307aef0ace1ddcda2",
+];
+
 /// How an installed skill file relates to the one this release would write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SkillState {
@@ -253,13 +270,17 @@ fn skill_state(existing: &str) -> SkillState {
         // Foremerge wrote the file, so this release may upgrade it in place.
         Some(recorded) if recorded == skill_digest(body) => SkillState::Replaceable,
         Some(_) => SkillState::Edited,
-        // Releases before stamping left no marker, so an unstamped file is
-        // treated as Foremerge's own and upgrading off it does not demand
-        // --force. The cost is that deleting the stamp from an edited file
-        // also forfeits its protection; that is deliberate while the
-        // pre-stamp installed base still exists, and should tighten to
-        // SkillState::Edited once it does not.
-        None => SkillState::Replaceable,
+        // Releases before stamping left no marker of their own, so an
+        // unstamped file is identified by its content instead. Matching a body
+        // Foremerge actually shipped proves nobody has touched it, which is
+        // the same thing a stamp proves. Anything else unstamped was written
+        // by someone: treating it as Foremerge's own would silently discard
+        // their work, which is exactly what the README promises never happens
+        // without --force.
+        None if PRE_STAMP_SKILL_DIGESTS.contains(&skill_digest(body).as_str()) => {
+            SkillState::Replaceable
+        }
+        None => SkillState::Edited,
     }
 }
 
@@ -694,14 +715,14 @@ fn configure_codex_mcp(_root: &Path, foremerge_exe: &Path, force: bool) -> Resul
         );
     }
     let warning = existing
-        .filter(|entry| entry.cwd.is_some())
+        .filter(|entry| matches!(entry.cwd, CodexCwd::Pinned(_)))
         .map(|entry| {
+            let previous = match &entry.cwd {
+                CodexCwd::Pinned(cwd) => cwd.display().to_string(),
+                _ => "one repository".to_string(),
+            };
             format!(
-                "Codex was pinned to {} and is now portable: one registration serves every repository, resolved from the directory Codex is launched in.",
-                entry
-                    .cwd
-                    .as_deref()
-                    .map_or_else(|| "one repository".to_string(), |cwd| cwd.display().to_string())
+                "Codex was pinned to {previous} and is now portable: one registration serves every repository, resolved from the directory Codex is launched in."
             )
         });
     Ok(McpOutcome {
@@ -735,7 +756,7 @@ enum CodexRegistration {
 struct CodexEntry {
     enabled: bool,
     command: Option<String>,
-    cwd: Option<PathBuf>,
+    cwd: CodexCwd,
 }
 
 impl CodexEntry {
@@ -763,8 +784,13 @@ impl CodexEntry {
             // The pre-portable form Foremerge itself used to write. Replacing
             // it destroys nothing an operator authored, and leaving it in place
             // would keep Codex pinned to one repository.
-            Some(_) => CodexRegistration::Upgradable,
-            None => CodexRegistration::Current,
+            CodexCwd::Pinned(_) => CodexRegistration::Upgradable,
+            CodexCwd::Absent => CodexRegistration::Current,
+            // Present but unusable. Calling this current would report a
+            // registration Codex refuses to start as healthy, and it is not
+            // the pinned form either, so repairing it stays an explicit
+            // operator decision rather than something setup does silently.
+            CodexCwd::Malformed => CodexRegistration::Foreign,
         }
     }
 
@@ -772,15 +798,17 @@ impl CodexEntry {
         format!(
             "command: {}, cwd: {}",
             self.command.as_deref().unwrap_or("unknown"),
-            self.cwd
-                .as_deref()
-                .map_or_else(|| "unknown".to_string(), |cwd| cwd.display().to_string())
+            match &self.cwd {
+                CodexCwd::Pinned(cwd) => cwd.display().to_string(),
+                CodexCwd::Absent => "unset".to_string(),
+                CodexCwd::Malformed => "present but empty".to_string(),
+            }
         )
     }
 
     fn restore_command(&self) -> String {
-        match (self.command.as_deref(), self.cwd.as_deref()) {
-            (Some(command), Some(cwd)) => {
+        match (self.command.as_deref(), &self.cwd) {
+            (Some(command), CodexCwd::Pinned(cwd)) => {
                 format!(
                     "`codex mcp add foremerge -- {command} --cwd {} mcp`",
                     cwd.display()
@@ -831,11 +859,13 @@ fn codex_mcp_entry() -> Result<Option<CodexEntry>> {
             return Ok(Some(entry));
         }
         let tokens: Vec<&str> = text.split_whitespace().collect();
-        let cwd = tokens
-            .iter()
-            .position(|token| *token == "--cwd")
-            .and_then(|position| tokens.get(position + 1))
-            .and_then(|value| non_empty_cwd(value));
+        let cwd = match tokens.iter().position(|token| *token == "--cwd") {
+            Some(position) => match tokens.get(position + 1) {
+                Some(value) => parse_cwd(value),
+                None => CodexCwd::Malformed,
+            },
+            None => CodexCwd::Absent,
+        };
         // Plain output marks disabled registrations as "name (disabled)".
         return Ok(Some(CodexEntry {
             command: None,
@@ -877,9 +907,29 @@ fn codex_mcp_entry() -> Result<Option<CodexEntry>> {
 
 /// A `--cwd` carrying no value pins the registration to nothing. Reading it as
 /// a path would make a malformed entry look like Foremerge's own pinned form
-/// and so replaceable without --force, so treat it as absent instead.
-fn non_empty_cwd(value: &str) -> Option<PathBuf> {
-    (!value.trim().is_empty()).then(|| PathBuf::from(value))
+/// and so replaceable without --force. Reading it as *absent* is equally wrong
+/// in the other direction: absent is the portable form setup writes, so the
+/// entry would be reported as current when Codex will not start it at all.
+fn parse_cwd(value: &str) -> CodexCwd {
+    if value.trim().is_empty() {
+        CodexCwd::Malformed
+    } else {
+        CodexCwd::Pinned(PathBuf::from(value))
+    }
+}
+
+/// What a Codex registration's `--cwd` says about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CodexCwd {
+    /// No `--cwd` at all: the portable form, which resolves the repository
+    /// from the directory Codex spawns the server in.
+    Absent,
+    /// A `--cwd` naming a directory: the pre-portable form Foremerge used to
+    /// write, which serves only that one repository.
+    Pinned(PathBuf),
+    /// A `--cwd` present but carrying no usable value. Codex rejects it, so
+    /// this registration cannot serve anything.
+    Malformed,
 }
 
 fn parse_codex_entry(value: &Value) -> Option<CodexEntry> {
@@ -891,10 +941,17 @@ fn parse_codex_entry(value: &Value) -> Option<CodexEntry> {
     let cwd = object
         .get("args")
         .and_then(Value::as_array)
-        .and_then(|args| {
-            let position = args.iter().position(|arg| arg.as_str() == Some("--cwd"))?;
-            args.get(position + 1)?.as_str().and_then(non_empty_cwd)
-        });
+        .map(
+            |args| match args.iter().position(|arg| arg.as_str() == Some("--cwd")) {
+                Some(position) => match args.get(position + 1).and_then(Value::as_str) {
+                    Some(value) => parse_cwd(value),
+                    // `--cwd` as the final argument has no value to take.
+                    None => CodexCwd::Malformed,
+                },
+                None => CodexCwd::Absent,
+            },
+        )
+        .unwrap_or(CodexCwd::Absent);
     Some(CodexEntry {
         command,
         cwd,
@@ -1188,7 +1245,7 @@ mod tests {
         // Foremerge's earlier pinned form upgrades without --force.
         let pinned = CodexEntry {
             command: Some(exe.to_string_lossy().into_owned()),
-            cwd: Some(PathBuf::from("/somewhere/else")),
+            cwd: CodexCwd::Pinned(PathBuf::from("/somewhere/else")),
             enabled: true,
         };
         assert_eq!(pinned.registration(), CodexRegistration::Upgradable);
@@ -1201,8 +1258,10 @@ mod tests {
         fs::write(&exe, b"#!/bin/sh\n").unwrap();
 
         // A `--cwd` carrying no value pins the entry to nothing. Reading it as
-        // Some("") would classify a malformed entry as Foremerge's own pinned
-        // form, which setup replaces without --force.
+        // Pinned("") would classify a malformed entry as Foremerge's own pinned
+        // form, which setup replaces without --force. Absent is wrong the other
+        // way: it is the portable form, so a registration Codex cannot start
+        // would be reported as current and left alone.
         for empty in ["", "   "] {
             let json = serde_json::json!({
                 "transport": {
@@ -1212,13 +1271,14 @@ mod tests {
             });
             let entry = parse_codex_entry(&json).expect("entry parses");
             assert_eq!(
-                entry.cwd, None,
-                "an empty --cwd must read as absent: {empty:?}"
+                entry.cwd,
+                CodexCwd::Malformed,
+                "an empty --cwd is neither a path nor the portable form: {empty:?}"
             );
             assert_eq!(
                 entry.registration(),
-                CodexRegistration::Current,
-                "an entry pinned to nothing is the portable form, not an upgradable one"
+                CodexRegistration::Foreign,
+                "a registration Codex will not start must not be reported as current"
             );
         }
 
@@ -1230,7 +1290,7 @@ mod tests {
             },
         });
         let entry = parse_codex_entry(&pinned).expect("entry parses");
-        assert_eq!(entry.cwd.as_deref(), Some(Path::new("/some/repo")));
+        assert_eq!(entry.cwd, CodexCwd::Pinned(PathBuf::from("/some/repo")));
         assert_eq!(entry.registration(), CodexRegistration::Upgradable);
     }
 
@@ -1243,7 +1303,7 @@ mod tests {
         // A registration the operator disabled must not be silently re-added.
         let disabled = CodexEntry {
             command: Some(exe.to_string_lossy().into_owned()),
-            cwd: None,
+            cwd: CodexCwd::Absent,
             enabled: false,
         };
         assert_eq!(disabled.registration(), CodexRegistration::Foreign);
@@ -1251,7 +1311,7 @@ mod tests {
         // An entry whose command Codex did not report cannot be verified.
         let unverifiable = CodexEntry {
             command: None,
-            cwd: None,
+            cwd: CodexCwd::Absent,
             enabled: true,
         };
         assert_eq!(unverifiable.registration(), CodexRegistration::Foreign);
@@ -1259,7 +1319,7 @@ mod tests {
         // Someone else's `foremerge` entry pointing at a different program.
         let foreign = CodexEntry {
             command: Some("/usr/bin/env".to_string()),
-            cwd: None,
+            cwd: CodexCwd::Absent,
             enabled: true,
         };
         assert_eq!(foreign.registration(), CodexRegistration::Foreign);
@@ -1483,20 +1543,16 @@ mod tests {
         assert!(format!("{fallback:#}").starts_with("CHECK_FAILED: "));
     }
 
+    /// An unstamped file carries no provenance of its own, so content is the
+    /// only evidence available. Matching nothing Foremerge ever shipped means
+    /// somebody wrote it, and the README promises that survives an upgrade.
     #[test]
-    fn an_unstamped_custom_skill_is_replaced_during_the_transition() {
-        // Foremerge cannot tell a hand-written unstamped file from one an
-        // earlier, pre-stamp release installed: neither carries provenance.
-        // While the pre-stamp installed base exists, such files are replaced
-        // so upgrading does not demand --force. Once every installed file
-        // carries a stamp this should tighten to SkillState::Edited, and this
-        // test should assert refusal again. Files that DO carry a stamp are
-        // already protected; see an_edited_skill_still_requires_force.
+    fn an_unstamped_custom_skill_is_not_replaced_without_force() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(".claude/skills/foremerge/SKILL.md");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "custom instructions").unwrap();
-        assert_eq!(skill_state("custom instructions"), SkillState::Replaceable);
+        assert_eq!(skill_state("custom instructions"), SkillState::Edited);
         let reports = install(
             temp.path(),
             &[Client::Claude],
@@ -1504,8 +1560,57 @@ mod tests {
             false,
             false,
         );
-        assert!(reports[0].error.is_none());
-        assert_eq!(reports[0].skill.status, "written");
+        assert!(
+            reports[0]
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("ALREADY_EXISTS:")),
+            "unstamped custom content must stay behind --force: {:?}",
+            reports[0].error
+        );
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "custom instructions",
+            "an upgrade must not discard instructions somebody wrote"
+        );
+
+        // --force is how the operator says it may go.
+        let forced = install(
+            temp.path(),
+            &[Client::Claude],
+            Path::new("foremerge"),
+            true,
+            false,
+        );
+        assert!(forced[0].error.is_none());
         assert_eq!(fs::read_to_string(&path).unwrap(), desired_skill());
+    }
+
+    /// The pre-stamp installed base still has to upgrade cleanly: a file whose
+    /// body is exactly what an earlier release shipped is provably untouched,
+    /// so refreshing it is not an overwrite and must not demand --force.
+    #[test]
+    fn a_released_pre_stamp_skill_still_upgrades_in_place() {
+        for digest in PRE_STAMP_SKILL_DIGESTS {
+            assert_eq!(
+                digest.len(),
+                64,
+                "a pre-stamp digest must be a full SHA-256: {digest}"
+            );
+        }
+        let shipped = std::process::Command::new("git")
+            .args(["show", "v0.1.0:.codex/skills/foremerge/SKILL.md"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output();
+        let Ok(shipped) = shipped else { return };
+        if !shipped.status.success() {
+            return;
+        }
+        let body = String::from_utf8(shipped.stdout).expect("skill text is UTF-8");
+        assert_eq!(
+            skill_state(&body),
+            SkillState::Replaceable,
+            "the v0.1.0 body must still be recognised as Foremerge's own"
+        );
     }
 }

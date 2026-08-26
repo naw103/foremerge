@@ -206,6 +206,11 @@ struct AcceptChangeSetToolRequest {
     git_ref: Option<String>,
     #[serde(default)]
     allow_high_conflicts: bool,
+    /// Accepted into the struct only so it can be refused by name. Without the
+    /// field serde drops it silently, and an agent sending it would get a
+    /// normal acceptance while the documentation promised a refusal.
+    #[serde(default)]
+    allow_unverified: bool,
     #[serde(default)]
     override_reason: Option<String>,
 }
@@ -381,9 +386,12 @@ async fn call_tool(service: &Foremerge, params: Value) -> Result<Value, (i64, St
             mcp_blocking(move || {
                 parse::<AcceptChangeSetToolRequest>(arguments)
                     .and_then(|request| {
-                        if request.allow_high_conflicts || request.override_reason.is_some() {
+                        if request.allow_high_conflicts
+                            || request.allow_unverified
+                            || request.override_reason.is_some()
+                        {
                             anyhow::bail!(
-                                "FORBIDDEN: explicit HIGH-conflict overrides are CLI-only operator actions and are not accepted over MCP; ask a human operator to review the conflict and run the override from the CLI"
+                                "FORBIDDEN: acceptance overrides are operator actions and are not accepted over MCP; ask a human operator to review and run the override from the CLI, or from the HTTP API with the daemon token"
                             );
                         }
                         service.accept_changeset(
@@ -587,7 +595,7 @@ pub fn tool_catalog() -> Vec<Value> {
         tool(
             "accept_changeset",
             "Accept a validated ChangeSet",
-            "Apply Foremerge's final conflict, dependency, fingerprint, validation, and Git gates, then pin the accepted commit. Explicit HIGH-conflict overrides (allow_high_conflicts, override_reason) are CLI-only operator actions and are rejected over MCP; ask a human operator instead.",
+            "Apply Foremerge's final conflict, dependency, fingerprint, validation, and Git gates, then pin the accepted commit. Acceptance overrides (allow_high_conflicts, allow_unverified, override_reason) are operator actions, available on the CLI and the HTTP API and rejected over MCP; ask a human operator instead.",
             json!({
                 "changeset_id": { "type": "string", "minLength": 1 },
                 "git_ref": { "type": "string", "minLength": 1 }

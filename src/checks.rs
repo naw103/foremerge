@@ -154,6 +154,14 @@ pub struct CheckDiagnostic {
     /// Checks whose executable could not be found, or whose relative path
     /// argument does not exist here.
     pub unrunnable: Vec<String>,
+    /// Whether the registry itself could be read. A registry that will not
+    /// parse is not the same as one with no checks in it, and reporting it as
+    /// empty hides the reason acceptance is about to fail.
+    pub registry_readable: bool,
+    /// Whether any ChangeSet could be accepted here at all. False when the
+    /// policy is strict and nothing runnable is registered, which is a working
+    /// installation that can still never accept work.
+    pub acceptance_possible: bool,
     pub warnings: Vec<String>,
 }
 
@@ -165,9 +173,22 @@ pub struct CheckDiagnostic {
 /// usually gitignored, so `git worktree add` never creates them and every check
 /// fails in every agent worktree while the primary checkout looks fine.
 pub fn diagnose(config_path: &Path, cwd: &Path) -> CheckDiagnostic {
-    let registry = load_path(config_path).unwrap_or_default();
     let mut unrunnable = Vec::new();
     let mut warnings = Vec::new();
+    // A malformed registry is a distinct failure from an empty one. Defaulting
+    // it away reports "no checks registered" and sends the operator off to
+    // register one, when the real problem is that the file they already have
+    // cannot be read.
+    let (registry, registry_readable) = match load_path(config_path) {
+        Ok(registry) => (registry, true),
+        Err(error) => {
+            warnings.push(format!(
+                "the verification check registry at {} could not be read: {error:#}. Acceptance cannot be gated until it parses; repair or remove it.",
+                config_path.display()
+            ));
+            (CheckRegistry::default(), false)
+        }
+    };
     for (name, check) in &registry.checks {
         let Some(program) = check.command.first() else {
             continue;
@@ -197,10 +218,15 @@ pub fn diagnose(config_path: &Path, cwd: &Path) -> CheckDiagnostic {
             "no verification checks are registered and the acceptance policy is strict, so no ChangeSet can be accepted here. Register one with `foremerge checks set <name> -- <command>`, or, if this repository has nothing to verify, run `foremerge checks policy advisory`.".to_string(),
         );
     }
+    let runnable = registry.checks.len().saturating_sub(unrunnable.len());
+    let acceptance_possible = registry_readable
+        && (registry.acceptance_policy == AcceptancePolicy::Advisory || runnable > 0);
     CheckDiagnostic {
         registered: registry.checks.len(),
         acceptance_policy: registry.acceptance_policy,
         unrunnable,
+        registry_readable,
+        acceptance_possible,
         warnings,
     }
 }
@@ -423,5 +449,61 @@ mod tests {
             assert!(error.starts_with("INVALID_INPUT:"), "{error}");
             assert!(error.contains("repository-scoped"), "{error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod diagnosis_tests {
+    use super::*;
+
+    /// A registry that will not parse is a different problem from an empty one,
+    /// and defaulting it away sent the operator to register a check when the
+    /// one they had was unreadable.
+    #[test]
+    fn a_malformed_registry_is_reported_rather_than_defaulted_away() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("checks.json");
+        std::fs::write(&path, "not json at all {{{").expect("write");
+
+        let diagnosis = diagnose(&path, temp.path());
+        assert!(
+            !diagnosis.registry_readable,
+            "an unparseable registry must not read as a readable empty one"
+        );
+        assert!(
+            !diagnosis.acceptance_possible,
+            "nothing can be accepted while the registry cannot be read"
+        );
+        assert!(
+            diagnosis
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("could not be read")),
+            "the operator must be told the file is broken: {:?}",
+            diagnosis.warnings
+        );
+    }
+
+    /// A healthy installation with a strict policy and nothing registered can
+    /// never accept a ChangeSet. That is not readiness.
+    #[test]
+    fn strict_policy_with_no_checks_cannot_accept() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("checks.json");
+
+        let strict = diagnose(&path, temp.path());
+        assert!(strict.registry_readable, "a missing registry reads cleanly");
+        assert_eq!(strict.acceptance_policy, AcceptancePolicy::Strict);
+        assert!(
+            !strict.acceptance_possible,
+            "strict with nothing registered can accept nothing"
+        );
+
+        set_policy_at(&path, AcceptancePolicy::Advisory).expect("set advisory");
+        let advisory = diagnose(&path, temp.path());
+        assert!(
+            advisory.acceptance_possible,
+            "advisory policy accepts work with nothing to verify"
+        );
     }
 }

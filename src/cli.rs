@@ -280,8 +280,9 @@ enum WorkCommand {
         #[arg(long = "agent")]
         agent_id: String,
     },
-    /// Take over an intent whose agent has stopped. Refused while any of its
-    /// claims are still live, so it cannot take work from a busy agent.
+    /// Take over an intent whose agent has stopped. Refused unless the intent
+    /// is stranded: no live claim and an owner that has fallen silent, so it
+    /// cannot take work from a busy agent.
     Adopt {
         intent_id: String,
         #[arg(long = "agent")]
@@ -730,6 +731,17 @@ async fn execute(cli: Cli) -> Result<Completion> {
             let checks_diagnosis = repo
                 .as_ref()
                 .map(|value| checks::diagnose(&checks::registry_path(&value.common_dir), &cwd));
+            // Acceptance readiness is a claim about this repository, so it
+            // cannot outrank the installation it depends on. Without a store,
+            // a repository, or a readable registry there is nothing to accept
+            // into, and reporting it as ready said the opposite.
+            let infrastructure_ready =
+                database_ok && event_chain_ok == Some(true) && git::available() && clients_ready;
+            let acceptance_ready = infrastructure_ready
+                && repo.is_some()
+                && checks_diagnosis
+                    .as_ref()
+                    .is_some_and(|diagnosis| diagnosis.acceptance_possible);
             let report = DoctorReport {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 database: database.to_string_lossy().into_owned(),
@@ -748,10 +760,8 @@ async fn execute(cli: Cli) -> Result<Completion> {
                 api_bind: DEFAULT_BIND.to_string(),
                 token_configured: token_path.is_file(),
                 mcp_transport: "stdio (newline-delimited JSON-RPC; MCP 2026-07-28 with 2025-11-25 initialize compatibility)".to_string(),
-                ready: database_ok
-                    && event_chain_ok == Some(true)
-                    && git::available()
-                    && clients_ready,
+                ready: infrastructure_ready,
+                acceptance_ready,
                 next_step: if !database_ok {
                     "foremerge init".to_string()
                 } else if let Some(next_step) = next_client_step {

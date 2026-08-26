@@ -439,6 +439,7 @@ fm_curl \
   -d '{
     "git_ref":"HEAD",
     "allow_high_conflicts":false,
+    "allow_unverified":false,
     "override_reason":null
   }' | jq .
 ```
@@ -446,7 +447,23 @@ fm_curl \
 Acceptance requires fresh passing validation and a clean resolvable Git ref.
 Open high-severity conflicts fail the gate unless the caller explicitly opts
 into the override and supplies a non-empty `override_reason`; Foremerge stores
-that reason as a decision and marks those findings `OVERRIDDEN`. Declared
+that reason as a decision and marks those findings `OVERRIDDEN`.
+
+`allow_unverified` is the second operator override. It accepts work Foremerge
+did not verify, or verified as failing, regardless of the configured acceptance
+policy, and it also requires a non-empty `override_reason`. The outcome is
+recorded on the ChangeSet as `UNVERIFIED` with that reason rather than being
+presented as a check that passed.
+
+Both overrides are operator actions. This API and the CLI are the operator
+surfaces and accept them; MCP is the agent surface and rejects them outright,
+so an agent that believes an override is justified has to ask a person. That
+split is a guardrail against a confused agent, not an authorization boundary:
+the daemon token is what separates an operator from anyone else, and anyone
+holding it can act on either surface. See [`SECURITY.md`](../SECURITY.md) and
+[limitations](limitations.md).
+
+Declared
 ChangeSet dependencies must already be accepted or committed; each dependency's
 stored `accepted_commit` must remain matched by its namespaced ref and be present
 in the candidate's Git ancestry. The selected ref must resolve to the validated

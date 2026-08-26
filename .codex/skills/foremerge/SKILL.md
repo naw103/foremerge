@@ -59,7 +59,7 @@ Commit a clean candidate with ordinary Git, then:
 
 1. Call `publish_changeset` with implementation, dependency, decision, and provenance evidence. Pass `base_ref` when you know the true diff base (for example your branch's fork point); otherwise Foremerge derives it from the candidate commit's first parent.
 2. Call `run_verification` with a configured check name such as `test`.
-3. Resolve any persisted HIGH conflict you are a party to, only after real agreement with the other party; name the agreeing coordination message in the rationale. Explicit HIGH-conflict overrides are CLI-only operator actions and are rejected over MCP: ask a human operator instead of overriding yourself.
+3. Resolve any persisted HIGH conflict you are a party to, only after real agreement with the other party; name the agreeing coordination message in the rationale. Acceptance overrides are operator actions, available on the CLI and the HTTP API and rejected over MCP: ask a human operator instead of overriding yourself.
 4. Call `accept_changeset`; it must match the clean Git commit and passing fingerprint.
 5. Land the accepted commit through ordinary Git or a pull request.
 6. Call `record_commit` with the actual target-branch integration ref.

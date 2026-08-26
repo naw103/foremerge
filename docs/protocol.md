@@ -42,7 +42,7 @@ integrate with ordinary Git or a pull request
 record the integration commit
 ```
 
-The complete lifecycle and core read parity are available through 17 MCP tools:
+The complete lifecycle and core read parity are available through 18 MCP tools:
 
 - `accept_changeset`
 - `check_conflicts`
@@ -55,6 +55,7 @@ The complete lifecycle and core read parity are available through 17 MCP tools:
 - `publish_changeset`
 - `publish_intent`
 - `query_work`
+- `record_assessment`
 - `record_commit`
 - `register_agent`
 - `resolve_conflict`

@@ -570,9 +570,16 @@ impl DeclaredOverlap {
         }
     }
 
+    /// Keyed on the precise scope, not the canonical alias.
+    ///
+    /// Collapsing on the alias would report only the strongest of several
+    /// genuinely distinct overlaps: an intent touching both
+    /// `App\Billing\Report::render` and `App\Admin\Report::render` shares one
+    /// alias across both, so the second asserted finding would be silently
+    /// dropped as a duplicate of the first.
     fn pair_key(&self) -> (String, String) {
-        let source = self.source.scope.canonical();
-        let target = self.target.scope.canonical();
+        let source = self.source.scope.precise();
+        let target = self.target.scope.precise();
         if source <= target {
             (source, target)
         } else {
@@ -604,8 +611,18 @@ pub fn declared_overlaps(left: &[ScopeClaim], right: &[ScopeClaim]) -> Vec<Decla
     let mut found: Vec<DeclaredOverlap> = Vec::new();
     for first in left {
         for second in right {
-            let (score, reason, exact) = if first.scope.canonical() == second.scope.canonical() {
+            let (score, reason, exact) = if first.scope.precise() == second.scope.precise() {
                 (1.0, "the same semantic scope", true)
+            } else if first.scope.canonical() == second.scope.canonical() {
+                // The reduced form matched but the full one did not, so these
+                // are same-named symbols under different namespaces or paths.
+                // Worth surfacing, never worth asserting: `severity_for` caps
+                // an unasserted overlap below HIGH so it cannot block.
+                (
+                    0.9,
+                    "the same symbol name under a different namespace or path",
+                    false,
+                )
             } else if first.scope.key.eq_ignore_ascii_case(&second.scope.key) {
                 (0.9, "the same semantic key across scope kinds", false)
             } else {
@@ -911,6 +928,65 @@ mod tests {
         assert_eq!(conflicts[0].kind, "destructive_vs_additive");
         assert_eq!(conflicts[0].evidence["asserted"], true);
         assert!(conflicts[0].suggestion.contains("PaymentProvider"));
+    }
+
+    /// Two same-named classes in different namespaces are unrelated code. The
+    /// reduced scope name brings them together so the overlap is still
+    /// surfaced, but asserting it would block acceptance on a collision that
+    /// does not exist, so it stays advisory.
+    #[test]
+    fn same_name_under_different_namespaces_warns_without_asserting() {
+        let replace = candidate(
+            "a",
+            "Rewrite billing report rendering",
+            vec![claim(
+                "symbol:App\\Billing\\Report::render",
+                Operation::Replace,
+            )],
+        );
+        let extend = candidate(
+            "b",
+            "Add a column to the admin report",
+            vec![claim(
+                "symbol:App\\Admin\\Report::render",
+                Operation::Extend,
+            )],
+        );
+        let conflicts = detect_pair(&extend, &replace);
+        assert_eq!(
+            conflicts[0].evidence["asserted"], false,
+            "different namespaces are not an exact scope match"
+        );
+        assert_eq!(
+            conflicts[0].severity, "MEDIUM",
+            "an unasserted overlap must be capped below HIGH so it cannot block acceptance"
+        );
+    }
+
+    /// The reduction still has to do its job: the same symbol written with and
+    /// without its namespace is one scope, and an exact match on the full name
+    /// is still asserted.
+    #[test]
+    fn the_same_symbol_written_with_either_separator_is_still_asserted() {
+        let replace = candidate(
+            "a",
+            "Replace the report renderer",
+            vec![claim(
+                "symbol:App\\Billing\\Report::render",
+                Operation::Replace,
+            )],
+        );
+        let extend = candidate(
+            "b",
+            "Extend the report renderer",
+            vec![claim(
+                "symbol:app/billing/Report::render",
+                Operation::Extend,
+            )],
+        );
+        let conflicts = detect_pair(&extend, &replace);
+        assert_eq!(conflicts[0].evidence["asserted"], true);
+        assert_eq!(conflicts[0].severity, "HIGH");
     }
 
     /// The point of the redesign: wording carries no weight once the operation

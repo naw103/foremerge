@@ -1,4 +1,9 @@
-# Foremerge
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://foremerge.com/brand/png/lockup-horizontal-dark.png">
+    <img src="https://foremerge.com/brand/png/lockup-horizontal-light.png" alt="Foremerge" width="240">
+  </picture>
+</h1>
 
 **Catch intent conflicts before code conflicts.**
 
@@ -15,7 +20,7 @@ provenance.
 | :---: | :---: | :---: | :---: | :---: |
 | Paste one line into Claude Code, Codex, or Cursor | | It installs Foremerge and wires itself up | | Every agent sees what the others are about to change, even in separate worktrees |
 
-> **Status:** Foremerge `0.3.1` is a pre-1.0, local-first MVP. The CLI, JSON API,
+> **Status:** Foremerge `0.4.0` is a pre-1.0, local-first MVP. The CLI, JSON API,
 > MCP server, SQLite store, deterministic conflict detector, and
 > verification-gated lifecycle are implemented. Public schemas may still
 > change. Shared multi-machine mode and published benchmark results do not yet
@@ -542,13 +547,14 @@ using Foremerge as an integration gate.
 | [Conflict detection](docs/conflict-detection.md) | Which deterministic rules produce findings and suggestions? |
 | [Git integration](docs/git-integration.md) | How do fingerprints, worktrees, and accepted refs behave? |
 | [Agent clients](docs/agent-clients.md) | How do Codex, Claude Code, and Cursor discover the skill and MCP server? |
-| [MCP setup](docs/mcp-setup.md) | How do clients configure and call the 17 lifecycle/read tools? |
+| [MCP setup](docs/mcp-setup.md) | How do clients configure and call the 18 lifecycle/read tools? |
 | [JSON API](docs/json-api.md) | Which routes, request bodies, auth, and errors are shipped? |
 | [OpenAPI schema](docs/openapi.yaml) | What is the machine-readable HTTP contract? |
 | [Benchmark plan](docs/benchmark-plan.md) | How will coordinated and uncoordinated runs be compared? |
 | [Validation exclusion ADR](docs/adr/0001-validation-exclusion-rules.md) | Which generated paths may validation ignore, and why? |
 | [Roadmap](docs/roadmap.md) | What is current, next, later, or a non-goal? |
 | [Limitations](docs/limitations.md) | What does the MVP not guarantee? |
+| [Brand](docs/brand.md) | Which mark, colors, type, icons, and CLI output rules apply to any Foremerge surface? |
 
 Also see the [changelog](CHANGELOG.md), [security policy](SECURITY.md), and
 [code of conduct](CODE_OF_CONDUCT.md).

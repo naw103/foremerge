@@ -9,6 +9,8 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-26
+
 ### Changed
 
 - **Breaking.** An intent now declares what it does to each scope. `scopes`
@@ -86,10 +88,13 @@ changes when they are called out here with a migration note.
 
 - `foremerge work adopt` transfers an intent whose agent has stopped. An agent
   that died mid-task previously left its intent owned forever by an agent that
-  would never return, so the work could only be duplicated. Adoption is refused
-  while any claim on the intent is still live, so it can never take work from an
-  agent that is merely busy; the expiry of every claim is the evidence that the
-  owner has stopped. The handover records the previous owner and a reason.
+  would never return, so the work could only be duplicated. Adoption requires
+  the same three things `status` requires before it calls an intent stranded: an
+  eligible lifecycle state, no live claim, and an owner that has actually fallen
+  silent. No live claim is not on its own evidence that the owner stopped, since
+  a freshly published intent has never held one, so checking the owner's silence
+  is what stops a handover from racing an agent that is merely busy. The
+  handover records the previous owner and a reason.
 - `foremerge checks policy <strict|advisory>` sets what acceptance requires when
   Foremerge verified nothing itself. Strict, the default and the previous
   behaviour, accepts only verified work. Advisory accepts work with nothing to
@@ -97,8 +102,9 @@ changes when they are called out here with a migration note.
   is never cleared by policy, because a failure is evidence of breakage rather
   than an absence of evidence.
 - `foremerge changeset accept --allow-unverified --override-reason` is the
-  operator equivalent, available regardless of policy. Agents cannot use it:
-  overrides remain CLI-only human actions.
+  operator equivalent, available regardless of policy. Agents cannot reach it
+  over MCP, which rejects both overrides; the CLI and the HTTP API are the
+  operator surfaces and accept them.
 - `foremerge checks verify-symbols true` warns when a published `symbol:` scope
   names something that appears nowhere in the worktree. Off by default, and
   always a warning, because a scope may legitimately name something the agent is
@@ -186,8 +192,29 @@ changes when they are called out here with a migration note.
 
 ### Migration
 
-Opening a store with this release migrates it to database schema 6. The
-`intent_scopes` projection gains `operation` and `operation_inferred` columns
+Opening a store with this release migrates it to database schema 9. Two things
+change that an earlier build wrote differently.
+
+Conflict scope identities are recomputed under the rule this build uses and
+rows that now share one identity are folded together, carrying their
+detections, coordination messages and graph projection onto the survivor. This
+repair also runs for stores an affected build already migrated, because that
+build filled only blank identities and left stale ones in place.
+
+Intent scope uniqueness moves off the canonical alias and onto the precise
+scope, so an intent may declare two symbols whose names differ only by
+namespace. `intent_scopes` is rebuilt from `intents.scopes_json`, which is the
+source of truth and is untouched, and the alias remains a non-unique search
+index. Scopes an older build dropped as alias collisions reappear.
+
+An older Foremerge build will refuse to open a schema 9 store rather than
+migrate it backwards, so upgrade every agent on a shared repository together.
+
+Earlier schema notes from this release follow.
+
+Opening a store with an earlier build of this release migrated it to database
+schema 6. The `intent_scopes` projection gained `operation` and
+`operation_inferred` columns
 and an `assessments` table is created. Intents written by an older build
 recorded only the scope, so their operation is recovered from the summary and
 marked inferred, which is the strongest claim the stored data supports. An
@@ -202,6 +229,116 @@ is the source of truth and is untouched, and claims are recomputed in place.
 Where normalization makes two live claims on one intent share a scope, the
 longest-lived is kept and the others are released. An older Foremerge build will
 refuse to open a schema 5 store rather than migrate it backwards.
+
+
+- Conflict identities written before the scope canonicalization change are
+  recomputed on upgrade. The earlier backfill filled only blank identities, so
+  a store carrying identities from an older rule kept them; the conflict upsert
+  then missed those rows and collided with the legacy uniqueness constraint,
+  surfacing a SQLite error where an advisory warning belongs. Conflicts that now
+  share one identity are folded into a single row, carrying their detections,
+  coordination messages, and graph projection with them, and the survivor keeps
+  the least settled status so an open conflict is never hidden behind a
+  resolved twin.
+
+  Migration: schema 9. Stores already upgraded by an affected build are
+  repaired on open, so no manual step is needed. An older binary will refuse to
+  open a schema 9 store, so upgrade every agent on a shared repository together.
+
+- An intent may declare two symbols whose names differ only by namespace, such
+  as `App\Billing\Report::render` and `App\Admin\Report::render`. Scope
+  uniqueness keyed on the canonical alias, which discards the namespace, so
+  publication failed outright with a primary-key error and the reprojection
+  quietly dropped the second scope. Uniqueness now keys on the precise scope
+  and the alias remains a non-unique search index, so differently qualified
+  names still find each other.
+
+- Same-named symbols in different namespaces no longer assert a HIGH conflict.
+  The reduced scope name is a search alias, and an overlap found only through it
+  is capped below HIGH and offered as a candidate; an asserted finding now
+  requires the full name to match. Unrelated code no longer blocks acceptance.
+
+- Adoption establishes that the previous owner actually stopped. It checked
+  only for live claims, which a freshly published intent has never had, so a
+  handover could race an agent between publishing and claiming. It now requires
+  the owner to have fallen silent, and a successful handover touches the
+  adopter, advances the intent, and refreshes the graph, so rescued work does
+  not immediately read as stranded again under its new owner.
+
+- `last_seen_at` advances when an agent acts. It was written only at
+  registration, so every agent read as stale once the staleness window elapsed
+  regardless of activity, which made both the status report and the adoption
+  gate unreliable.
+
+- Setup no longer overwrites a skill file it did not write. An unstamped file is
+  now recognised by matching a body Foremerge actually released; anything else
+  unstamped is treated as the operator's own and needs `--force`, as the README
+  has always promised.
+
+- A `git grep` that fails to run is no longer read as a missing symbol. Exit 128
+  was indistinguishable from the exit 1 that means a clean no-match, so a broken
+  search could manufacture the very warning its own contract said it never
+  could.
+
+- `foremerge doctor` separates infrastructure readiness from acceptance
+  readiness. A healthy installation under a strict policy with no runnable check
+  can never accept a ChangeSet, and reporting only `ready` made that look fine;
+  the report now also carries `acceptance_ready`. A malformed check registry is
+  reported as unreadable rather than defaulted to an empty one, which had sent
+  operators to register a check when the file they already had would not parse.
+
+- One scope named twice in a request is folded before storage. Two spellings
+  of one symbol reach the same identity, so publishing both surfaced a raw
+  SQLite primary-key violation, and claiming both recorded one claim while
+  reporting it twice. Entries that agree are collapsed; entries that declare
+  different operations on one scope are refused as `INVALID_INPUT`, because
+  only the caller knows which was meant.
+
+- A folded conflict's detections carry the survivor's id in their graph payload
+  as well as in the row and the edge. The payload kept naming the conflict that
+  was folded away, so the graph told two stories about one observation.
+
+- Upgrading no longer drops a live claim. The schema 5 recompute released
+  claims that had collapsed onto one scope, keyed on the canonical alias, so
+  two same-named symbols in different namespaces looked like duplicates and one
+  of them was released. It keys on the precise scope now.
+
+- Renewing a claim with an equivalent spelling updates the stored scope.
+  Renewal folds separator and case spellings together, so the stored row kept
+  the original spelling while the response and the graph carried the new one.
+
+- One overlapping intent is reported once. The alias is deliberately
+  non-unique, so an intent holding several claims that share it was returned
+  once per row and the same overlap was persisted and warned about repeatedly.
+
+- Folding a conflict repoints its detections in the graph as well as in the
+  table. Their `OCCURRENCE_OF` edges were deleted instead, leaving every
+  observation from the folded conflict floating with nothing to occur on.
+  Detection nodes whose row is gone are swept, and a missing edge is restored.
+
+- Claims are renewed by their precise scope. Renewal matched on the canonical
+  alias, so claiming two symbols whose names differ only by namespace renewed
+  the first instead of recording the second: the response carried two claims
+  sharing one id, the table kept only the first scope, and the graph showed
+  only the second. The alias remains the advisory cross-intent overlap index.
+
+- The conflict graph is reconciled with the conflicts table on upgrade,
+  independently of whether anything is folded. A store an earlier build had
+  already folded kept a node for the deleted conflict and a survivor whose
+  projected status had drifted from its row, and a repair that ran only while
+  folding would not have reached it.
+
+- `foremerge doctor` no longer reports `acceptance_ready` outside a repository.
+  It defaulted to true when there was no diagnosis to consult, so a directory
+  with no store and no repository reported that it was ready to accept work.
+
+- MCP refuses `allow_unverified` by name. The field was absent from the tool's
+  request type, so serde discarded it and the acceptance proceeded normally
+  while the tool description and the documentation both promised a refusal.
+
+- A Codex registration whose `--cwd` carries no value is diagnosed as malformed
+  rather than current. Codex refuses to start it, so reporting it as the
+  portable form called a broken registration healthy.
 
 ## [0.3.1] - 2026-08-24
 
@@ -419,7 +556,8 @@ schema 4 store rather than migrate it backwards.
 - Apache-2.0 licensing, contribution and security policies, CI, release checks,
   limitations, roadmap, and a reproducible benchmark specification.
 
-[Unreleased]: https://github.com/naw103/foremerge/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/naw103/foremerge/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/naw103/foremerge/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/naw103/foremerge/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/naw103/foremerge/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/naw103/foremerge/compare/v0.1.0...v0.2.0

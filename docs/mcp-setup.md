@@ -115,6 +115,7 @@ The complete MVP MCP tool surface is:
 | --- | --- |
 | `register_agent` | Register agent/model/worktree provenance |
 | `publish_intent` | Announce planned work and receive immediate conflicts |
+| `record_assessment` | Record your verdict and rationale on one related intent, and what you will do |
 | `claim_work` | Make leased advisory semantic claims |
 | `query_work` | Find agents, intents, claims, ChangeSets, and open conflicts |
 | `check_conflicts` | Preflight or re-evaluate semantic conflicts |
@@ -144,9 +145,10 @@ digest-bound trust policy is operator-owned and CLI-only; see
 Two further operations are deliberately narrower over MCP than over the trusted
 CLI and HTTP operator surfaces:
 
-- `accept_changeset` rejects `allow_high_conflicts` and `override_reason`.
-  Explicit HIGH-conflict overrides are CLI-only operator actions; an agent that
-  believes an override is justified must ask a human operator.
+- `accept_changeset` rejects `allow_high_conflicts`, `allow_unverified` and
+  `override_reason`. Those are operator overrides, accepted on the CLI and the
+  HTTP API but never over MCP; an agent that believes an override is justified
+  must ask a human operator.
 - `resolve_conflict` is accepted only from an agent whose intent is a party to
   the conflict, after real agreement with the other party. The recorded
   decision carries the resolver's agent id. Note that MCP callers
@@ -367,9 +369,9 @@ validation. Mitigations: keep named check commands short, configure realistic
 
 MCP acceptance always applies the full HIGH-conflict gate:
 `allow_high_conflicts` and `override_reason` are rejected over MCP. Explicit
-overrides are CLI-only operator actions
-(`foremerge changeset accept ... --allow-high-conflicts --override-reason`),
-so ask a human operator instead of overriding.
+overrides are operator actions, available on the CLI
+(`foremerge changeset accept ... --allow-high-conflicts --override-reason`) and
+on the HTTP API, so ask a human operator instead of overriding.
 
 ### `record_commit`
 
@@ -473,8 +475,8 @@ database. The MVP has no daemon autostart or automatic endpoint discovery.
   repository, is never read from a plain `.foremerge` fallback directory or
   the server's spawn directory, and the check argv is trusted local code that
   is not sandboxed.
-- HIGH-conflict overrides on `accept_changeset` are CLI-only operator actions
-  and are rejected over MCP; `resolve_conflict` over MCP is limited to agents
+- HIGH-conflict and unverified overrides on `accept_changeset` are operator
+  actions and are rejected over MCP; `resolve_conflict` over MCP is limited to agents
   that are parties to the conflict. Agent ids are self-asserted over MCP, so
   the party limit guards against accidental cross-agent resolution, not
   against a deliberately lying client.

@@ -2,7 +2,7 @@ use foremerge::{Foremerge, Store, checks, mcp};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
@@ -4403,12 +4403,17 @@ fn checks_commands_refuse_outside_a_git_repository() {
 }
 
 #[tokio::test]
-async fn mcp_accept_changeset_rejects_high_conflict_overrides() {
+async fn mcp_accept_changeset_rejects_acceptance_overrides() {
     let service = Foremerge::new(Store::in_memory().unwrap());
     for arguments in [
         json!({ "changeset_id": "chg_x", "allow_high_conflicts": true, "override_reason": "self-service" }),
         json!({ "changeset_id": "chg_x", "allow_high_conflicts": true }),
         json!({ "changeset_id": "chg_x", "override_reason": "self-service" }),
+        // Refused by name rather than dropped by serde: an unknown field would
+        // be ignored and the acceptance would proceed, which is the opposite
+        // of what the tool description and the docs promise.
+        json!({ "changeset_id": "chg_x", "allow_unverified": true }),
+        json!({ "changeset_id": "chg_x", "allow_unverified": true, "override_reason": "self-service" }),
     ] {
         let response = mcp::handle_message(
             &service,
@@ -4425,9 +4430,8 @@ async fn mcp_accept_changeset_rejects_high_conflict_overrides() {
         assert!(
             response["result"]["structuredContent"]["error"]
                 .as_str()
-                .is_some_and(
-                    |message| message.starts_with("FORBIDDEN") && message.contains("CLI-only")
-                ),
+                .is_some_and(|message| message.starts_with("FORBIDDEN")
+                    && message.contains("not accepted over MCP")),
             "{response}"
         );
     }
@@ -5591,5 +5595,625 @@ fn an_agent_can_renew_its_lease_while_working_without_stacking_claims() {
         claims.len(),
         1,
         "renewal stacked a duplicate claim: {claims:?}"
+    );
+}
+
+/// Adoption exists to rescue work from an agent that died. The absence of a
+/// live claim is not evidence of death: a freshly published intent has never
+/// held one, and an intent whose lease merely lapsed may belong to an agent
+/// that is still working. Taking either would be theft rather than rescue.
+#[test]
+fn adoption_is_refused_while_the_owning_agent_is_still_active() {
+    let repo = create_repo();
+    let root = repo.root.clone();
+
+    let owner = cli_success(
+        &root,
+        None,
+        [
+            "agent", "register", "--name", "owner", "--model", "e2e-test",
+        ],
+    )["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let rival = cli_success(
+        &root,
+        None,
+        [
+            "agent", "register", "--name", "rival", "--model", "e2e-test",
+        ],
+    )["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let intent = cli_success(
+        &root,
+        None,
+        [
+            "intent",
+            "publish",
+            "--agent",
+            &owner,
+            "--task",
+            "t",
+            "--summary",
+            "Add a greeting helper",
+            "--scope",
+            "symbol:Greeter::greet",
+        ],
+    )["data"]["intent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    cli_success(
+        &root,
+        None,
+        [
+            "work",
+            "claim",
+            "--agent",
+            &owner,
+            "--intent",
+            &intent,
+            "--scope",
+            "symbol:Greeter::greet",
+        ],
+    );
+
+    let refused = cli_failure(
+        &root,
+        None,
+        [
+            "work",
+            "adopt",
+            "--agent",
+            &rival,
+            "--reason",
+            "taking over",
+            &intent,
+        ],
+    );
+    let message = refused["error"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected an error message: {refused}"));
+    assert!(
+        message.contains("has not stopped"),
+        "adoption must say the owner is still working, got: {message}"
+    );
+
+    // Ownership must be untouched by the refusal.
+    let after = cli_success(&root, None, ["intent", "show", &intent]);
+    assert_eq!(
+        after["data"]["intent"]["agent_id"].as_str().unwrap(),
+        owner,
+        "a refused adoption must not transfer ownership"
+    );
+}
+
+/// `last_seen_at` is documented as the agent's last Foremerge call, and both
+/// the status report and adoption read staleness from it. Written only at
+/// registration it would decay on a schedule instead of tracking activity, and
+/// an agent still working after the stale window would read as abandoned.
+#[test]
+fn acting_on_an_intent_advances_the_agents_last_seen_time() {
+    let repo = create_repo();
+    let root = repo.root.clone();
+
+    let agent = cli_success(
+        &root,
+        None,
+        [
+            "agent", "register", "--name", "worker", "--model", "e2e-test",
+        ],
+    )["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let last_seen = |root: &Path| -> String {
+        let status = cli_success(root, None, ["status"]);
+        status["data"]["agents"]
+            .as_array()
+            .expect("agents array")
+            .iter()
+            .find(|entry| entry["id"].as_str() == Some(&agent))
+            .expect("the registered agent appears in status")["last_seen_at"]
+            .as_str()
+            .expect("last_seen_at is a string")
+            .to_string()
+    };
+
+    let at_registration = last_seen(&root);
+
+    cli_success(
+        &root,
+        None,
+        [
+            "intent",
+            "publish",
+            "--agent",
+            &agent,
+            "--task",
+            "t",
+            "--summary",
+            "Add a greeting helper",
+            "--scope",
+            "symbol:Greeter::greet",
+        ],
+    );
+
+    let after_publishing = last_seen(&root);
+    assert!(
+        after_publishing > at_registration,
+        "publishing an intent must advance last_seen_at: {at_registration} -> {after_publishing}"
+    );
+}
+
+/// Two same-named symbols in different namespaces are different code, and one
+/// intent may legitimately touch both. Keyed on the lossy canonical alias they
+/// collided, so publication failed outright with a primary-key error and the
+/// migration's reprojection quietly dropped the second scope.
+#[test]
+fn an_intent_may_declare_the_same_symbol_name_under_two_namespaces() {
+    let repo = create_repo();
+    let root = repo.root.clone();
+
+    let agent = cli_success(
+        &root,
+        None,
+        [
+            "agent", "register", "--name", "author", "--model", "e2e-test",
+        ],
+    )["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let published = cli_success(
+        &root,
+        None,
+        [
+            "intent",
+            "publish",
+            "--agent",
+            &agent,
+            "--task",
+            "reports",
+            "--summary",
+            "Rework both report renderers",
+            "--scope",
+            "symbol:App\\Billing\\Report::render",
+            "--scope",
+            "symbol:App\\Admin\\Report::render",
+        ],
+    );
+
+    let scopes: Vec<String> = published["data"]["intent"]["scopes"]
+        .as_array()
+        .expect("scopes array")
+        .iter()
+        .map(|scope| scope["key"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        scopes,
+        vec![
+            "App\\Billing\\Report::render".to_string(),
+            "App\\Admin\\Report::render".to_string()
+        ],
+        "both declared scopes must survive publication"
+    );
+
+    // The alias is still the search net: an agent naming the bare symbol finds
+    // this work even though it declared the fully qualified names.
+    let found = cli_success(
+        &root,
+        None,
+        ["work", "query", "--scope", "symbol:Report::render"],
+    );
+    assert!(
+        found["data"]
+            .as_array()
+            .is_some_and(|intents| !intents.is_empty()),
+        "the canonical alias must still match a differently qualified name: {found}"
+    );
+}
+
+/// Claim renewal matched on the canonical alias, so claiming two symbols whose
+/// names differ only by namespace renewed the first instead of recording the
+/// second. The response carried two claims sharing one id, the table kept only
+/// the first scope, and the graph showed only the second: three views of the
+/// same moment, all disagreeing.
+#[test]
+fn claiming_two_namespaced_symbols_records_two_distinct_claims() {
+    let repo = create_repo();
+    let root = repo.root.clone();
+
+    let agent = cli_success(
+        &root,
+        None,
+        [
+            "agent", "register", "--name", "author", "--model", "e2e-test",
+        ],
+    )["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let intent = cli_success(
+        &root,
+        None,
+        [
+            "intent",
+            "publish",
+            "--agent",
+            &agent,
+            "--task",
+            "reports",
+            "--summary",
+            "Rework both report renderers",
+            "--scope",
+            "symbol:App\\Billing\\Report::render",
+            "--scope",
+            "symbol:App\\Admin\\Report::render",
+        ],
+    )["data"]["intent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let claimed = cli_success(
+        &root,
+        None,
+        [
+            "work",
+            "claim",
+            "--agent",
+            &agent,
+            "--intent",
+            &intent,
+            "--scope",
+            "symbol:App\\Billing\\Report::render",
+            "--scope",
+            "symbol:App\\Admin\\Report::render",
+        ],
+    );
+
+    let claims = claimed["data"]["claims"].as_array().expect("claims array");
+    assert_eq!(claims.len(), 2, "{claimed}");
+    let ids: BTreeSet<&str> = claims
+        .iter()
+        .map(|claim| claim["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 2, "two claims must not share one id: {claimed}");
+    let response_scopes: BTreeSet<&str> = claims
+        .iter()
+        .map(|claim| claim["scope"]["key"].as_str().unwrap())
+        .collect();
+
+    // Status and the graph project the same rows, so all three must agree.
+    let status = cli_success(&root, None, ["status"]);
+    let status_scopes: BTreeSet<&str> = status["data"]["claims"]
+        .as_array()
+        .expect("status claims")
+        .iter()
+        .map(|claim| claim["scope"]["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        status_scopes, response_scopes,
+        "status must show the same two claims the response returned: {status}"
+    );
+
+    let graph = cli_success(&root, None, ["graph"]);
+    let graph_scopes: BTreeSet<&str> = graph["data"]["nodes"]
+        .as_array()
+        .expect("graph nodes")
+        .iter()
+        .filter(|node| node["kind"] == "Claim")
+        .map(|node| node["data"]["scope"]["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        graph_scopes, response_scopes,
+        "the graph must project the same two claims the response returned"
+    );
+}
+
+/// Renewal matches on the precise identity, which folds separator and case
+/// spellings together, so a renewal can arrive spelled differently from the row
+/// it renews. The stored row used to keep the original spelling while the
+/// response and the graph carried the new one: one claim, three descriptions.
+#[test]
+fn renewing_a_claim_with_an_equivalent_spelling_keeps_every_view_agreed() {
+    let repo = create_repo();
+    let root = repo.root.clone();
+
+    let agent = cli_success(
+        &root,
+        None,
+        [
+            "agent", "register", "--name", "author", "--model", "e2e-test",
+        ],
+    )["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let intent = cli_success(
+        &root,
+        None,
+        [
+            "intent",
+            "publish",
+            "--agent",
+            &agent,
+            "--task",
+            "reports",
+            "--summary",
+            "Rework the report renderer",
+            "--scope",
+            "symbol:App\\Billing\\Report::render",
+        ],
+    )["data"]["intent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let claim = |scope: &str| {
+        cli_success(
+            &root,
+            None,
+            [
+                "work", "claim", "--agent", &agent, "--intent", &intent, "--scope", scope,
+            ],
+        )
+    };
+    claim("symbol:App\\Billing\\Report::render");
+    let renewed = claim("symbol:app/billing/Report::render");
+
+    let claims = renewed["data"]["claims"].as_array().expect("claims");
+    assert_eq!(claims.len(), 1, "an equivalent scope renews, never stacks");
+    let returned = claims[0]["scope"]["key"].as_str().unwrap();
+
+    let status = cli_success(&root, None, ["status"]);
+    let stored: Vec<&str> = status["data"]["claims"]
+        .as_array()
+        .expect("status claims")
+        .iter()
+        .map(|entry| entry["scope"]["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        stored,
+        vec![returned],
+        "the stored claim must carry the spelling the response reported: {status}"
+    );
+
+    let graph = cli_success(&root, None, ["graph"]);
+    let projected: Vec<&str> = graph["data"]["nodes"]
+        .as_array()
+        .expect("graph nodes")
+        .iter()
+        .filter(|node| node["kind"] == "Claim")
+        .map(|node| node["data"]["scope"]["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        projected,
+        vec![returned],
+        "the graph must project the same spelling: {graph}"
+    );
+}
+
+/// The canonical alias is deliberately non-unique, so one intent can hold
+/// several claims that share it. The overlap lookup returned that intent once
+/// per matching row, reporting the same overlap two or three times.
+#[test]
+fn an_intent_holding_two_aliased_claims_is_reported_as_one_overlap() {
+    let repo = create_repo();
+    let root = repo.root.clone();
+
+    let register = |name: &str| {
+        cli_success(
+            &root,
+            None,
+            ["agent", "register", "--name", name, "--model", "e2e-test"],
+        )["data"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let holder = register("holder");
+    let newcomer = register("newcomer");
+
+    let held = cli_success(
+        &root,
+        None,
+        [
+            "intent",
+            "publish",
+            "--agent",
+            &holder,
+            "--task",
+            "reports",
+            "--summary",
+            "Rework both report renderers",
+            "--scope",
+            "symbol:App\\Billing\\Report::render",
+            "--scope",
+            "symbol:App\\Admin\\Report::render",
+        ],
+    )["data"]["intent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    cli_success(
+        &root,
+        None,
+        [
+            "work",
+            "claim",
+            "--agent",
+            &holder,
+            "--intent",
+            &held,
+            "--scope",
+            "symbol:App\\Billing\\Report::render",
+            "--scope",
+            "symbol:App\\Admin\\Report::render",
+        ],
+    );
+
+    let arriving = cli_success(
+        &root,
+        None,
+        [
+            "intent",
+            "publish",
+            "--agent",
+            &newcomer,
+            "--task",
+            "reports-2",
+            "--summary",
+            "Touch the report renderer",
+            "--scope",
+            "symbol:Report::render",
+        ],
+    )["data"]["intent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let claimed = cli_success(
+        &root,
+        None,
+        [
+            "work",
+            "claim",
+            "--agent",
+            &newcomer,
+            "--intent",
+            &arriving,
+            "--scope",
+            "symbol:Report::render",
+        ],
+    );
+
+    let warnings = claimed["data"]["warnings"].as_array().expect("warnings");
+    assert_eq!(
+        warnings.len(),
+        1,
+        "one overlapping intent is one overlap, however many aliased claims it holds: {claimed}"
+    );
+}
+
+/// Two spellings of one symbol name one scope. Storage keys on that identity,
+/// so a request carrying both used to reach SQLite as a duplicate and surface a
+/// raw primary-key violation, or record one claim and report it twice.
+#[test]
+fn equivalent_scopes_in_one_request_are_folded_before_storage() {
+    let repo = create_repo();
+    let root = repo.root.clone();
+
+    let agent = cli_success(
+        &root,
+        None,
+        [
+            "agent", "register", "--name", "author", "--model", "e2e-test",
+        ],
+    )["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let published = cli_success(
+        &root,
+        None,
+        [
+            "intent",
+            "publish",
+            "--agent",
+            &agent,
+            "--task",
+            "reports",
+            "--summary",
+            "Rework the report renderer",
+            "--scope",
+            "symbol:App\\Billing\\Report::render",
+            "--scope",
+            "symbol:app/billing/Report::render",
+        ],
+    );
+    let intent = published["data"]["intent"]["id"].as_str().unwrap();
+    assert_eq!(
+        published["data"]["intent"]["scopes"]
+            .as_array()
+            .expect("scopes")
+            .len(),
+        1,
+        "one scope named twice is one scope: {published}"
+    );
+
+    let claimed = cli_success(
+        &root,
+        None,
+        [
+            "work",
+            "claim",
+            "--agent",
+            &agent,
+            "--intent",
+            intent,
+            "--scope",
+            "symbol:App\\Billing\\Report::render",
+            "--scope",
+            "symbol:app/billing/Report::render",
+        ],
+    );
+    let claims = claimed["data"]["claims"].as_array().expect("claims");
+    assert_eq!(claims.len(), 1, "one claim, reported once: {claimed}");
+}
+
+/// Folding cannot silently pick a winner when the two entries disagree about
+/// what will happen to the scope. That is a contradiction only the caller can
+/// resolve, and it must be reported as bad input rather than as a database
+/// error.
+#[test]
+fn contradictory_operations_on_one_scope_are_rejected_as_bad_input() {
+    let repo = create_repo();
+    let root = repo.root.clone();
+
+    let agent = cli_success(
+        &root,
+        None,
+        [
+            "agent", "register", "--name", "author", "--model", "e2e-test",
+        ],
+    )["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let refused = cli_failure(
+        &root,
+        None,
+        [
+            "intent",
+            "publish",
+            "--agent",
+            &agent,
+            "--task",
+            "reports",
+            "--summary",
+            "Rework the report renderer",
+            "--scope",
+            "symbol:App\\Billing\\Report::render=replace",
+            "--scope",
+            "symbol:app/billing/Report::render=extend",
+        ],
+    );
+    let message = refused["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.starts_with("INVALID_INPUT"),
+        "a contradiction is bad input, not a database failure: {refused}"
+    );
+    assert!(
+        message.contains("different operations"),
+        "the message must say what is contradictory: {message}"
     );
 }
