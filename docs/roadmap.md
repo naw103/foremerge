@@ -41,6 +41,20 @@ validation must leave the target Git ref unchanged.
   and negative-control coverage.
 - Add claim renewal, explicit release, stale-agent handling, and better recovery
   diagnostics.
+- Community-raised during launch week (August 2026), in design order:
+  - `scope_drift`: derive touched paths and symbols from the candidate diff at
+    ChangeSet publish and compare them against declared scopes, raising a
+    finding that can gate acceptance. Closes the declared-versus-touched gap
+    the limitations doc currently assigns to provenance.
+  - An approval-policy layer: declare which operations, verdicts, or lifecycle
+    transitions require a recorded human acknowledgement (for example,
+    destructive operations on `contract:` scopes, or graduating an
+    experiment). Composes with immutable intents: approvals bind to intent ids.
+  - Experiment intents: a declared exploratory state with downgraded
+    cross-severity and sanctioned parallel attempts, which cannot reach
+    acceptance and must graduate through a fresh full-severity declaration.
+  - Scope lineage: rename and extraction relations between scopes, and
+    explicit supersedes edges when a changed plan is republished.
 - Continue compatibility testing across releases of Codex, Claude Code, and
   Cursor; native skills, project templates, setup, and diagnostics shipped in
   0.2.0.
