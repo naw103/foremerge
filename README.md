@@ -92,6 +92,11 @@ command uses the shown `jq` filter; output is abridged for readability._
 
 ## Quickstart: first conflict in under five minutes
 
+![Real terminal recording: two agents declare intents on symbol:PaymentService and Foremerge raises the HIGH destructive_vs_additive finding before either writes code](docs/assets/foremerge-demo.gif)
+
+_Recorded against the released 0.4.0 binary; every command and its output is real._
+
+
 ### Let your coding agent do it
 
 Paste this into Claude Code, Codex, or Cursor from inside the repository you
@@ -350,10 +355,94 @@ Common commands:
 | Record what you concluded | `foremerge assess record --agent ID --intent ID --related-intent-id ID --verdict V --rationale TEXT --action A` |
 | Send coordination | `foremerge coordinate send --from ID --to ID --message TEXT` |
 | Watch semantic events | `foremerge work watch --after-seq 0` |
+| Log in and link through device authorization | `foremerge cloud login --base-url URL` |
+| Link a cloud project | `foremerge cloud link --project ID --base-url URL` |
+| Inspect cloud lag/coverage | `foremerge cloud status` |
+| Deliver already-queued cloud commands | `foremerge cloud flush` |
+| Pull verified cloud state | `foremerge cloud sync` |
+| Revoke and remove a connector credential | `foremerge cloud logout` |
 
 Run `foremerge <command> --help` for the complete current flags. Global flags
 such as `--json`, `--cwd`, and `--database` may appear before or after
 subcommands.
+
+## Foremerge Cloud connector
+
+The first cloud connector links one Git repository to a project, verifies the
+cloud event sequence and hash chain, caches those canonical events in SQLite,
+reduces canonical agent registrations and intent publications into typed local
+projections, and publishes those same two mutations through a durable receipt
+barrier. The standalone workflow remains unchanged when the repository is
+unlinked:
+
+```sh
+foremerge cloud login --base-url https://cloud.foremerge.com
+foremerge --json cloud flush
+foremerge --json cloud sync
+foremerge --json cloud status
+foremerge cloud logout
+```
+
+Interactive login stores access/refresh material only in the operating-system
+credential store and puts a nonsecret `keyring:fmc_...` locator in repository
+configuration. There is no plaintext fallback when the keyring is unavailable.
+Explicit `env:FOREMERGE_CLOUD_TOKEN` references remain supported for hosted/CI
+use. Tokens never enter Git configuration, SQLite, output, errors, or logs.
+Link config version 2 points at an immutable SQLite generation binding the
+service, tenant, connector, project, and origin. Refresh uses a per-link SQLite
+lease and a stable keyring-only rotation id, so concurrent callers cannot race
+and a replayed rotation response retains its original authoritative issuance
+time. Login persists its device flow before prompting, resumes the same device
+code after a restart or truncated response, and performs one idempotent refresh
+before link activation. The service revokes an unacknowledged connector when
+its consumed-device replay is pruned; the subsequent rotation replay remains a
+bounded recovery window (currently about ten minutes) pending a distinct
+pre-alpha rotation acknowledgement. `cloud logout` recovers any in-flight rotation before no-oracle revocation
+and removes the local keyring item only after remote acceptance; explicitly
+named `--local-only` cleanup is available when offline. Login also writes a
+nonsecret pending-auth recovery pointer before activating the link. If link
+activation and immediate revocation both fail, `cloud status` exposes that
+state and `cloud logout` can retry with the keyring-held token even though no
+link exists. Keyring-backed links require logout before unlink; environment
+links retain the existing unlink behavior. When retained events no longer
+cover the local cursor, sync verifies a tenant-bound Ed25519 snapshot from the
+server's well-known key before pulling the remaining tail. Status reports both
+the verified-cache and applied-projection heads, their lag, staleness,
+retention, project/head metadata, and whether coverage starts at genesis or a
+verified snapshot.
+
+For those two mutations, the local attempted record and immutable command
+envelope commit in one SQLite transaction. CLI, MCP, and loopback JSON API
+calls report success only after a matching immutable cloud receipt; if delivery
+is unavailable, they return `CLOUD_MUTATION_DEGRADED` while preserving the
+local attempt and queued command for `cloud flush` recovery. Automatic delivery
+uses one two-second wall-clock deadline across HTTP retries and backoff, then
+releases its lease to immediately retryable pending state. Explicit
+`cloud flush` retains its independently configurable timeout. Agent envelopes
+exclude the local worktree path. Intent envelopes exclude free-form rationale
+and metadata, retaining only stable ids, task/summary, normalized scopes, and
+dependency ids. Both command families omit the project-version precondition so
+independent origins may be authoritatively re-evaluated from the same observed
+head; the envelope and durable outbox retain optional CAS for future
+state-sensitive commands.
+
+This connector does **not** upload existing local history or publish/reduce
+other lifecycle mutations. Canonical `agent.registered` and
+`intent.published` events, plus the corresponding Agent/Intent snapshot
+projections, are applied without appending duplicate local audit events.
+Unknown event kinds remain verified in the immutable cache but fail closed
+without advancing the projection cursor. A retention snapshot likewise remains
+verified and cached, but is not reported as applied when its claims, conflicts,
+or provider-observation projection is non-empty. Those boundaries are explicit in
+`local_history_queued`, `mutation_mode`, `verified_cache_cursor`,
+`applied_projection_cursor`, `projection_lag_events`, and
+`remote_projection_applied` status fields.
+`foremerge cloud unlink` refuses to strand unresolved commands or a live
+keyring-managed grant, then retires only the active link and preserves local
+state, verified inbound events, snapshots, receipts, outbox evidence, and
+legacy quarantine. See
+[Cloud connector](docs/cloud-connector.md) for the wire, trust, and recovery
+details.
 
 ## ChangeSets and the verification gate
 
@@ -550,6 +639,7 @@ using Foremerge as an integration gate.
 | [Agent clients](docs/agent-clients.md) | How do Codex, Claude Code, and Cursor discover the skill and MCP server? |
 | [MCP setup](docs/mcp-setup.md) | How do clients configure and call the 18 lifecycle/read tools? |
 | [JSON API](docs/json-api.md) | Which routes, request bodies, auth, and errors are shipped? |
+| [Cloud connector](docs/cloud-connector.md) | What does link/sync verify, cache, preserve, and deliberately not publish yet? |
 | [OpenAPI schema](docs/openapi.yaml) | What is the machine-readable HTTP contract? |
 | [Benchmark plan](docs/benchmark-plan.md) | How will coordinated and uncoordinated runs be compared? |
 | [Validation exclusion ADR](docs/adr/0001-validation-exclusion-rules.md) | Which generated paths may validation ignore, and why? |
