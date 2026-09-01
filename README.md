@@ -92,10 +92,6 @@ command uses the shown `jq` filter; output is abridged for readability._
 
 ## Quickstart: first conflict in under five minutes
 
-![Real terminal recording: two agents declare intents on symbol:PaymentService and Foremerge raises the HIGH destructive_vs_additive finding before either writes code](docs/assets/foremerge-demo.gif)
-
-_Recorded against the released 0.4.0 binary; every command and its output is real._
-
 
 ### Let your coding agent do it
 
@@ -260,6 +256,10 @@ foremerge --json work query --scope symbol:PaymentService |
 
 Both claims succeed. The second response includes an overlap warning because a
 claim is a leased advisory, never exclusive ownership.
+
+![Real terminal recording: two agents declare intents on symbol:PaymentService and Foremerge raises the HIGH destructive_vs_additive finding before either writes code](docs/assets/foremerge-demo.gif)
+
+_Recorded against the released 0.4.0 binary; every command and its output is real._
 
 ## How it fits above Git
 
