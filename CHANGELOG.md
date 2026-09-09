@@ -9,6 +9,30 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+### Added
+
+- The agent skill now ships at `.agents/skills/foremerge/SKILL.md` as well, the
+  portable Agent Skills location read by Cursor, the Codex CLI, the Gemini CLI,
+  Copilot and OpenClaw. Clients that follow the shared convention pick up the
+  skill without a client-specific install.
+- A Claude Code plugin under `plugins/foremerge/`, bundling the skill and the
+  MCP server so both arrive from one `/plugin install` instead of a separate
+  skill copy and MCP registration. The plugin does not install the binary;
+  `cargo install foremerge` and `foremerge init` remain prerequisites.
+- `llms-install.md`, setup instructions addressed to an AI assistant rather
+  than a human. It states the two things an agent gets wrong unaided: that
+  `foremerge init` is the operator's decision and must be asked for, and that
+  acceptance needs a human-configured named check.
+- `tests/skill_parity.rs` fails if any copy of the skill drifts from the
+  canonical `.codex` one, if the plugin's MCP registration diverges from the
+  repository's, or if the plugin manifest version falls behind the crate.
+
+### Changed
+
+- The README carries a `### Links` section naming the website, the crate, and
+  the MCP registry name. The registry's ownership check reads the rendered
+  crates.io README, so the name has to be visible text rather than a comment.
+
 ## [0.4.0] - 2026-08-26
 
 ### Changed
