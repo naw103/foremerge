@@ -48,15 +48,26 @@ Git identity; they must not depend on a contributor's global Git configuration.
 ### The repository dogfoods its own coordination
 
 This repository ships its own Foremerge client integration: `.mcp.json` (Claude
-Code), `.cursor/mcp.json` (Cursor), and three copies of the agent skill under
-`.codex/`, `.claude/`, and `.cursor/skills/foremerge/SKILL.md`. If you open the
-repository with one of those coding-agent clients, the client will offer to
-enable the Foremerge MCP server and skill; clients prompt before enabling
-project-level configuration, so nothing runs without your consent. The three
-skill files are generated from one source: `src/integrations.rs` embeds
-`.codex/skills/foremerge/SKILL.md` at compile time and `foremerge setup`
-installs it for every client, so edit that file and copy it byte-for-byte to
-the `.claude` and `.cursor` twins (the setup e2e test enforces the match).
+Code), `.cursor/mcp.json` (Cursor), and five copies of the agent skill. If you
+open the repository with one of those coding-agent clients, the client will
+offer to enable the Foremerge MCP server and skill; clients prompt before
+enabling project-level configuration, so nothing runs without your consent.
+
+`.codex/skills/foremerge/SKILL.md` is the canonical copy. `src/integrations.rs`
+embeds it at compile time and `foremerge setup` installs it for every client,
+so edit that file and copy it byte-for-byte to the four twins:
+
+| Copy | Why it exists |
+| --- | --- |
+| `.claude/skills/foremerge/SKILL.md` | Claude Code's own convention |
+| `.cursor/skills/foremerge/SKILL.md` | Cursor's own convention |
+| `.agents/skills/foremerge/SKILL.md` | The portable Agent Skills location, read by Cursor, Codex CLI, Gemini CLI, Copilot and OpenClaw |
+| `plugins/foremerge/skills/foremerge/SKILL.md` | The Claude Code plugin, distributed as a `git-subdir` checkout that cannot reference paths outside itself |
+
+`tests/skill_parity.rs` fails if any copy drifts, if the plugin's `.mcp.json`
+diverges from the repository's, or if the plugin manifest version falls behind
+the crate version. Bump `plugins/foremerge/.claude-plugin/plugin.json` with
+every release.
 
 ## What a good change includes
 

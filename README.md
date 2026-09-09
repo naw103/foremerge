@@ -565,6 +565,12 @@ using Foremerge as an integration gate.
 Also see the [changelog](CHANGELOG.md), [security policy](SECURITY.md), and
 [code of conduct](CODE_OF_CONDUCT.md).
 
+### Links
+
+- Website: [foremerge.com](https://foremerge.com)
+- Crate: [crates.io/crates/foremerge](https://crates.io/crates/foremerge)
+- MCP Registry name: mcp-name: io.github.naw103/foremerge
+
 ## Contributing and license
 
 Contributions are welcome, especially protocol feedback on scope vocabulary,
