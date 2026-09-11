@@ -1404,4 +1404,69 @@ mod tests {
         );
         assert!(!instructions.contains('\u{2014}'), "{instructions}");
     }
+
+    async fn tools_call_result(service: &Foremerge, name: &str, arguments: Value) -> Value {
+        let message = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": arguments }
+        });
+        handle_message(service, message)
+            .await
+            .expect("a tools/call is answered")["result"]
+            .clone()
+    }
+
+    /// An MCP caller passes the key as a structured field, so none of the
+    /// CLI's parsing ever sees it. An operation restated in that key has to be
+    /// refused as a tool error rather than stored as a claim on a symbol that
+    /// overlaps nothing.
+    #[tokio::test]
+    async fn claim_work_and_query_work_refuse_an_operation_restated_in_the_key() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let agent = tools_call_result(
+            &service,
+            "register_agent",
+            json!({ "name": "mcp-agent", "model": "test" }),
+        )
+        .await["structuredContent"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let intent = tools_call_result(
+            &service,
+            "publish_intent",
+            json!({
+                "agent_id": agent,
+                "task": "payments",
+                "summary": "Replace PaymentService with Stripe",
+                "scopes": [{ "kind": "symbol", "key": "PaymentService", "operation": "replace" }]
+            }),
+        )
+        .await["structuredContent"]["intent"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let restated = json!({ "kind": "symbol", "key": "PaymentService=replace" });
+
+        let claimed = tools_call_result(
+            &service,
+            "claim_work",
+            json!({ "agent_id": agent, "intent_id": intent, "scopes": [restated] }),
+        )
+        .await;
+        let queried = tools_call_result(&service, "query_work", json!({ "scope": restated })).await;
+        for (tool, result) in [("claim_work", claimed), ("query_work", queried)] {
+            assert_eq!(result["isError"], true, "{tool}: {result}");
+            let error = result["structuredContent"]["error"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(error.starts_with("INVALID_INPUT:"), "{tool}: {error}");
+            assert!(
+                error.contains("publish_intent"),
+                "{tool}: the refusal names the tool that takes an operation: {error}"
+            );
+        }
+    }
 }

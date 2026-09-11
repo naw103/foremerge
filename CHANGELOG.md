@@ -77,6 +77,22 @@ changes when they are called out here with a migration note.
   would be refused: it names the upgrade for `UNSUPPORTED_SCHEMA` and the error
   to resolve otherwise.
 
+### Fixed
+
+- `work claim` and `work query` reject a scope whose key ends in an operation,
+  such as `symbol:PaymentService=replace`, with `INVALID_INPUT`. So do the
+  `claim_work` and `query_work` MCP tools, `POST /v1/claims` and
+  `GET /v1/work`. `KIND:KEY=OPERATION` is the form `intent publish` and
+  `conflicts check` take, and an agent repeating it on a claim used to claim a
+  key literally named `PaymentService=replace`, which never overlapped
+  `symbol:PaymentService`, so the overlap warning was silently missed. The error
+  names the scope to claim instead. Only an exact operation name after the last
+  `=` is refused, and only when no intent declares a scope by that literal
+  name, so keys such as `config:FEATURE=on`, `api:GET /search?q=x` and a
+  genuinely declared `config:MERGE_MODE=replace` claim as before. Claims already stored under such a key
+  are left in place and lapse with their lease. `--help` for both commands now
+  documents the plain `KIND:KEY` form.
+
 ## [0.4.0] - 2026-08-26
 
 ### Changed

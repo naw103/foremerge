@@ -256,7 +256,18 @@ enum WorkCommand {
         agent_id: String,
         #[arg(long = "intent")]
         intent_id: String,
-        #[arg(long = "scope", required = true)]
+        /// Repeatable. KIND: symbol, api, schema, config, infra, test,
+        /// migration, env, file, component, contract, domain.
+        /// No OPERATION: that is declared on `intent publish`. A scope
+        /// ending in =OPERATION is rejected unless an intent declared a
+        /// scope with that literal name.
+        /// Example: symbol:PaymentService
+        #[arg(
+            long = "scope",
+            value_name = "KIND:KEY",
+            required = true,
+            verbatim_doc_comment
+        )]
         scopes: Vec<String>,
         #[arg(long)]
         reason: Option<String>,
@@ -269,7 +280,13 @@ enum WorkCommand {
         agent_id: Option<String>,
         #[arg(long)]
         status: Option<String>,
-        #[arg(long)]
+        /// Only work whose intent declared or claimed this scope.
+        /// KIND: symbol, api, schema, config, infra, test, migration,
+        /// env, file, component, contract, domain.
+        /// No OPERATION: a scope ending in =OPERATION is rejected unless
+        /// an intent declared a scope with that literal name.
+        /// Example: symbol:PaymentService
+        #[arg(long, value_name = "KIND:KEY", verbatim_doc_comment)]
         scope: Option<String>,
         #[arg(long, default_value_t = 50)]
         limit: usize,
@@ -1629,5 +1646,49 @@ mod tests {
         // teardown bound at or above the grace would silently double it.
         assert!(api::RUNTIME_SHUTDOWN_GRACE > Duration::ZERO);
         assert!(api::RUNTIME_SHUTDOWN_GRACE < api::shutdown_grace());
+    }
+
+    /// `work claim` and `work query` take a plain scope, and their help has to
+    /// say so: the `--scope` an agent saw on `intent publish` carries an
+    /// operation, and this one must not. The kinds are typed by hand, so hold
+    /// them to the parser.
+    #[test]
+    fn work_scope_help_names_the_plain_form_and_every_kind_the_parser_accepts() {
+        use clap::CommandFactory;
+
+        let rejected = Scope::parse("unknown:key").unwrap_err().to_string();
+        let kinds = rejected
+            .rsplit_once("use one of ")
+            .map(|(_, kinds)| kinds.to_string())
+            .expect("the unknown-kind error lists every valid kind");
+
+        let cli = Cli::command();
+        let work = cli.find_subcommand("work").expect("`work` is a command");
+        for (command, id) in [("claim", "scopes"), ("query", "scope")] {
+            let scope = work
+                .find_subcommand(command)
+                .and_then(|found| found.get_arguments().find(|arg| arg.get_id() == id))
+                .unwrap_or_else(|| panic!("`work {command}` has a --scope argument"));
+            let value_names: Vec<&str> = scope
+                .get_value_names()
+                .unwrap_or_default()
+                .iter()
+                .map(|name| name.as_str())
+                .collect();
+            assert_eq!(value_names, ["KIND:KEY"], "`work {command} --scope`");
+            let help = scope
+                .get_help()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                help.contains(&kinds),
+                "`work {command} --scope` help should list {kinds}, got: {help}"
+            );
+            assert!(
+                help.contains("=OPERATION is rejected"),
+                "`work {command} --scope` help should say an operation is refused, got: {help}"
+            );
+        }
     }
 }

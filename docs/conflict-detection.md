@@ -70,8 +70,10 @@ Every finding carries `asserted` in its evidence, along with
 
 ## Prose inference
 
-Prose inference survives for one caller: a person typing `foremerge intent
-publish` who gives a summary and no `--operation`. Agents always declare.
+Prose inference survives for one caller: a person at a terminal who writes
+`--scope KIND:KEY` on `foremerge intent publish` or `foremerge conflicts check`
+without the `=OPERATION` suffix. The operation is then guessed from the summary
+or intent text. Agents always declare.
 
 Inference is deliberately conservative. A destructive reading is withdrawn, and
 degraded to `modify`, when the verb governs only a peripheral artefact (a test,
@@ -299,9 +301,9 @@ decision, appends `conflict.overridden`, and changes affected high findings to
   every payment symbol.
 - Dependency edges and schema compatibility are not yet evaluated by rules.
 - File overlap and AST ownership are not conflict signals in this release.
-- Prose inference, used only by CLI callers who omit `--operation`, remains
-  English-only and misses phrasings outside its lexicon. That is why it never
-  asserts.
+- Prose inference, used only by CLI callers who omit the `=OPERATION` suffix
+  on `--scope`, remains English-only and misses phrasings outside its lexicon.
+  That is why it never asserts.
 - Broad or inaccurate agent-declared scopes cause false positives or negatives.
 - A missing finding never proves semantic compatibility.
 
