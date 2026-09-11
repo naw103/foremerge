@@ -226,8 +226,9 @@ pub struct ScopeClaim {
     pub scope: Scope,
     pub operation: Operation,
     /// True when the operation was inferred from prose instead of declared,
-    /// which happens only for CLI callers who did not pass `--operation`.
-    /// An inferred operation never produces an asserted conflict.
+    /// which happens only for CLI callers who write a `--scope` without the
+    /// `=OPERATION` suffix. An inferred operation never produces an asserted
+    /// conflict.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub inferred: bool,
 }

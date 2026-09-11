@@ -730,6 +730,16 @@ impl Foremerge {
                 owner = intent.agent_id
             );
         }
+        for scope in &request.scopes {
+            if let Some((key, operation)) = restated_operation(scope)
+                && !intent
+                    .scopes
+                    .iter()
+                    .any(|declared| declared.scope.precise() == scope.precise())
+            {
+                return Err(restated_operation_error(scope, key, operation, "a claim"));
+            }
+        }
         // IN_PROGRESS is claimable by the owner so that an agent whose work
         // outlasts its lease can renew it. Without this a long task silently
         // loses the very protection it asked for, with no way to hold it.
@@ -911,6 +921,17 @@ impl Foremerge {
     pub fn query_work(&self, mut query: WorkQuery) -> Result<Vec<WorkItem>> {
         query.scope = query.scope.map(|scope| scope.normalized()).transpose()?;
         let conn = self.store.lock()?;
+        if let Some(scope) = query.scope.as_ref()
+            && let Some((key, operation)) = restated_operation(scope)
+            && !scope_is_declared(&conn, scope)?
+        {
+            return Err(restated_operation_error(
+                scope,
+                key,
+                operation,
+                "a work query",
+            ));
+        }
         let limit = query.limit.clamp(1, 500);
         let mut sql = "SELECT i.id FROM intents i WHERE 1 = 1".to_string();
         let mut bindings = Vec::<rusqlite::types::Value>::new();
@@ -3428,6 +3449,57 @@ fn normalize_plain_scopes(scopes: Vec<Scope>) -> Result<Vec<Scope>> {
     Ok(folded)
 }
 
+/// Whether any intent declares this exact scope, which makes a key that looks
+/// like a restated operation a real name instead.
+fn scope_is_declared(conn: &Connection, scope: &Scope) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM intent_scopes WHERE precise_scope = ?1)",
+        params![scope.precise()],
+        |row| row.get(0),
+    )?)
+}
+
+/// The operation an agent restated inside a scope key, with the key it meant.
+///
+/// `intent publish` and `conflicts check` take `KIND:KEY=OPERATION`, and an
+/// agent that learned that form repeats it where only `KIND:KEY` belongs.
+/// Taken literally, `symbol:PaymentService=replace` names a symbol called
+/// `PaymentService=replace`, which never overlaps `symbol:PaymentService`, so
+/// the overlap warning a claim exists to raise is silently lost.
+///
+/// Only a suffix that is exactly an [`Operation`] qualifies. Any other `=` is
+/// ordinary key text, as in `api:GET /search?q=x` or `config:FEATURE=on`.
+fn restated_operation(scope: &Scope) -> Option<(&str, Operation)> {
+    scope
+        .key
+        .rsplit_once('=')
+        .and_then(|(key, suffix)| Operation::parse(suffix).ok().map(|operation| (key, operation)))
+}
+
+/// Refuse a scope whose key restates an operation.
+///
+/// The refusal lives in the service rather than the CLI because MCP and HTTP
+/// callers pass the key as a structured field and make the same mistake
+/// without any parsing. It is only reached for a key no intent declared: a key
+/// that genuinely ends in `=replace` is claimable, because the ledger proves it
+/// is a name rather than a mistake.
+fn restated_operation_error(scope: &Scope, key: &str, operation: Operation, taken_by: &str) -> anyhow::Error {
+    let meant = key.trim();
+    // With nothing left of the key, there is no scope to suggest, and
+    // suggesting `symbol:` would be worse than suggesting nothing.
+    let suggestion = if meant.is_empty() {
+        String::new()
+    } else {
+        format!(" Use '{kind}:{meant}' here.", kind = scope.kind)
+    };
+    anyhow::anyhow!(
+        "INVALID_INPUT: scope '{kind}:{written}' ends in the operation '{operation}', but {taken_by} takes KIND:KEY with no operation, and no intent declares a scope by that name. Operations are declared on `intent publish` and `conflicts check` (MCP: publish_intent and check_conflicts).{suggestion}",
+        kind = scope.kind,
+        written = scope.key,
+        operation = operation.as_str(),
+    )
+}
+
 /// Build the caller-facing view of one related intent.
 ///
 /// Everything here is either stored fact or a comparison of two declared
@@ -3991,6 +4063,259 @@ mod tests {
             })
             .unwrap_err();
         assert!(format!("{error:#}").contains("provenance must be a JSON object"));
+    }
+
+    /// A key is allowed to end in something that reads like an operation, as
+    /// long as an intent declared that name. `config:MERGE_MODE=replace` is a
+    /// configuration key whose value happens to be `replace`, and refusing to
+    /// claim it would make a real scope unclaimable to protect against a
+    /// mistake the ledger disproves.
+    #[test]
+    fn a_declared_key_that_ends_in_an_operation_word_is_still_claimable() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let agent = service
+            .register_agent(RegisterAgentRequest {
+                name: "config-agent".into(),
+                model: None,
+                capabilities: vec![],
+                worktree: None,
+            })
+            .unwrap()
+            .agent;
+        let declared = Scope::new("config", "MERGE_MODE=replace");
+        let intent = service
+            .publish_intent(PublishIntentRequest {
+                agent_id: agent.id.clone(),
+                task: "merge defaults".into(),
+                summary: "Change the default merge mode".into(),
+                rationale: None,
+                scopes: vec![ScopeClaim::new(declared.clone(), Operation::Modify)],
+                depends_on: vec![],
+                metadata: json!({}),
+            })
+            .unwrap()
+            .intent;
+
+        let claimed = service
+            .claim_work(ClaimWorkRequest {
+                agent_id: agent.id.clone(),
+                intent_id: intent.id.clone(),
+                scopes: vec![declared.clone()],
+                reason: None,
+                lease_seconds: 3600,
+            })
+            .expect("a declared key stays claimable");
+        assert_eq!(claimed.claims.len(), 1);
+        assert_eq!(claimed.claims[0].scope.key, "MERGE_MODE=replace");
+
+        let found = service
+            .query_work(WorkQuery {
+                scope: Some(declared),
+                ..Default::default()
+            })
+            .expect("a declared key stays queryable");
+        assert!(found.iter().any(|item| item.intent.id == intent.id));
+
+        // The same key with nothing declaring it is still the mistake it was.
+        let error = service
+            .query_work(WorkQuery {
+                scope: Some(Scope::new("config", "OTHER_MODE=replace")),
+                ..Default::default()
+            })
+            .expect_err("an undeclared restated operation is still refused");
+        assert!(format!("{error:#}").starts_with("INVALID_INPUT:"), "{error:#}");
+    }
+
+    /// `intent publish` and `conflicts check` take `KIND:KEY=OPERATION`, and
+    /// an agent that learned that form repeats it when claiming. Stored
+    /// literally, `symbol:PaymentService=replace` is a different symbol from
+    /// `symbol:PaymentService`, so the overlap warning a claim exists to raise
+    /// never fires. MCP and HTTP callers hand the service a structured key the
+    /// CLI never parsed, which is why the service is what refuses it.
+    #[test]
+    fn a_claim_or_work_query_that_restates_an_operation_is_refused() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let register = |name: &str| {
+            service
+                .register_agent(RegisterAgentRequest {
+                    name: name.into(),
+                    model: None,
+                    capabilities: vec![],
+                    worktree: None,
+                })
+                .unwrap()
+                .agent
+        };
+        let publish = |agent: &Agent, operation: Operation| {
+            service
+                .publish_intent(PublishIntentRequest {
+                    agent_id: agent.id.clone(),
+                    task: format!("{} task", agent.name),
+                    summary: "Change PaymentService".into(),
+                    rationale: None,
+                    scopes: vec![ScopeClaim::new(
+                        Scope::new("symbol", "PaymentService"),
+                        operation,
+                    )],
+                    depends_on: vec![],
+                    metadata: json!({}),
+                })
+                .unwrap()
+                .intent
+                .id
+        };
+        let claim = |agent: &Agent, intent_id: &str, keys: &[&str]| {
+            service.claim_work(ClaimWorkRequest {
+                agent_id: agent.id.clone(),
+                intent_id: intent_id.to_string(),
+                scopes: keys.iter().map(|key| Scope::new("symbol", *key)).collect(),
+                reason: None,
+                lease_seconds: 3600,
+            })
+        };
+        let stripe = register("stripe-agent");
+        let paypal = register("paypal-agent");
+        let stripe_intent = publish(&stripe, Operation::Replace);
+        let paypal_intent = publish(&paypal, Operation::Extend);
+        claim(&stripe, &stripe_intent, &["PaymentService"]).unwrap();
+
+        for restated in [
+            "PaymentService=replace",
+            "PaymentService=Extend",
+            "PaymentService = remove",
+        ] {
+            // A valid scope alongside it must not be claimed on its own.
+            let error = claim(&paypal, &paypal_intent, &["Ledger", restated]).unwrap_err();
+            let message = format!("{error:#}");
+            assert!(
+                message.starts_with("INVALID_INPUT:"),
+                "{restated}: {message}"
+            );
+            assert!(
+                message.contains("`intent publish`") && message.contains("`conflicts check`"),
+                "{restated}: the refusal says where operations are declared: {message}"
+            );
+            assert!(
+                message.contains("'symbol:PaymentService'"),
+                "{restated}: the refusal names the scope to claim instead: {message}"
+            );
+
+            let error = service
+                .query_work(WorkQuery {
+                    scope: Some(Scope::new("symbol", restated)),
+                    ..WorkQuery::default()
+                })
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").starts_with("INVALID_INPUT:"),
+                "{restated}: {error:#}"
+            );
+        }
+        let held: i64 = service
+            .store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM claims WHERE intent_id = ?1",
+                [&paypal_intent],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            held, 0,
+            "a refused claim stores nothing, not even its valid scopes"
+        );
+
+        // The scope the refusal points to is the one that overlaps.
+        let outcome = claim(&paypal, &paypal_intent, &["PaymentService"]).unwrap();
+        assert!(
+            outcome
+                .warnings
+                .iter()
+                .any(|warning| warning.kind == "overlapping_claim"),
+            "{:?}",
+            outcome.warnings
+        );
+    }
+
+    /// `=` is ordinary key text unless an operation follows the last one, so
+    /// these keys claim, match a work query and overlap exactly as written. A
+    /// suffix that only resembles an operation, like `modified`, is not one.
+    #[test]
+    fn keys_containing_an_equals_sign_still_claim_query_and_overlap() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let scopes = [
+            Scope::new("config", "FEATURE=on"),
+            Scope::new("api", "GET /search?q=x"),
+            Scope::new("api", "GET /items?sort=modified"),
+        ];
+        let mut outcomes = Vec::new();
+        for name in ["first-agent", "second-agent"] {
+            let agent = service
+                .register_agent(RegisterAgentRequest {
+                    name: name.into(),
+                    model: None,
+                    capabilities: vec![],
+                    worktree: None,
+                })
+                .unwrap()
+                .agent;
+            let intent = service
+                .publish_intent(PublishIntentRequest {
+                    agent_id: agent.id.clone(),
+                    task: format!("{name} task"),
+                    summary: "Adjust search and its feature flag".into(),
+                    rationale: None,
+                    scopes: scopes
+                        .iter()
+                        .map(|scope| ScopeClaim::new(scope.clone(), Operation::Modify))
+                        .collect(),
+                    depends_on: vec![],
+                    metadata: json!({}),
+                })
+                .unwrap()
+                .intent;
+            outcomes.push(
+                service
+                    .claim_work(ClaimWorkRequest {
+                        agent_id: agent.id,
+                        intent_id: intent.id,
+                        scopes: scopes.to_vec(),
+                        reason: None,
+                        lease_seconds: 3600,
+                    })
+                    .unwrap(),
+            );
+        }
+
+        let claimed: Vec<&str> = outcomes[0]
+            .claims
+            .iter()
+            .map(|claim| claim.scope.key.as_str())
+            .collect();
+        assert_eq!(
+            claimed,
+            ["FEATURE=on", "GET /search?q=x", "GET /items?sort=modified"]
+        );
+        for scope in &scopes {
+            assert!(
+                outcomes[1].warnings.iter().any(|warning| {
+                    warning.kind == "overlapping_claim" && warning.scope.as_ref() == Some(scope)
+                }),
+                "{} must overlap: {:?}",
+                scope.canonical(),
+                outcomes[1].warnings
+            );
+        }
+
+        let owners = service
+            .query_work(WorkQuery {
+                scope: Some(Scope::new("config", "FEATURE=on")),
+                limit: 50,
+                ..WorkQuery::default()
+            })
+            .unwrap();
+        assert_eq!(owners.len(), 2);
     }
 
     #[test]

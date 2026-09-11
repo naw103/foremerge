@@ -694,7 +694,7 @@ fn failed_validation_cannot_accept_or_change_the_git_target() {
             "--intent".to_string(),
             intent_id.clone(),
             "--scope".to_string(),
-            "symbol:PaymentProvider=extend".to_string(),
+            "symbol:PaymentProvider".to_string(),
         ],
     );
     cli_success(
@@ -1127,7 +1127,7 @@ fn publishing_from_claimed_implicitly_enters_provisional_without_panicking() {
             "--intent".to_string(),
             intent_id.clone(),
             "--scope".to_string(),
-            "symbol:Ledger=extend".to_string(),
+            "symbol:Ledger".to_string(),
         ],
     );
 
@@ -6536,5 +6536,140 @@ fn contradictory_operations_on_one_scope_are_rejected_as_bad_input() {
     assert!(
         message.contains("different operations"),
         "the message must say what is contradictory: {message}"
+    );
+}
+
+/// `intent publish` taught the agent `KIND:KEY=OPERATION`, so that is the form
+/// it is most likely to repeat on `work claim`. Taken literally it claims a
+/// different key, one that overlaps nothing, and the warning the claim exists
+/// to raise goes missing. Both `work claim` and `work query` must refuse it as
+/// bad input, while a key that merely contains `=` still claims and overlaps
+/// as written.
+#[test]
+fn work_claim_and_query_refuse_a_trailing_operation_but_keep_equals_in_keys() {
+    let repo = create_repo();
+    let root = repo.root.clone();
+    let register = |name: &str| {
+        cli_success(
+            &root,
+            None,
+            ["agent", "register", "--name", name, "--model", "e2e-test"],
+        )["data"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let stripe = register("stripe");
+    let paypal = register("paypal");
+    let publish = |agent: &str, summary: &str, operation: &str| {
+        let payment = format!("symbol:PaymentService={operation}");
+        let flag = format!("config:PAYMENTS_V2=on={operation}");
+        let route = format!("api:GET /payments?status=open={operation}");
+        cli_success(
+            &root,
+            None,
+            [
+                "intent",
+                "publish",
+                "--agent",
+                agent,
+                "--task",
+                "payments",
+                "--summary",
+                summary,
+                "--scope",
+                &payment,
+                "--scope",
+                &flag,
+                "--scope",
+                &route,
+            ],
+        )["data"]["intent"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let stripe_intent = publish(&stripe, "Replace PaymentService with Stripe", "replace");
+    let paypal_intent = publish(&paypal, "Add PayPal to PaymentService", "extend");
+
+    for restated in [
+        "symbol:PaymentService=replace",
+        "symbol:PaymentService=Extend",
+    ] {
+        let refused = cli_failure(
+            &root,
+            None,
+            [
+                "work",
+                "claim",
+                "--agent",
+                &paypal,
+                "--intent",
+                &paypal_intent,
+                "--scope",
+                restated,
+            ],
+        );
+        assert_eq!(refused["error"]["code"], "INVALID_INPUT", "{refused}");
+        let message = refused["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("`intent publish`") && message.contains("'symbol:PaymentService'"),
+            "the refusal says where the operation goes and what to claim: {message}"
+        );
+
+        let refused = cli_failure(&root, None, ["work", "query", "--scope", restated]);
+        assert_eq!(refused["error"]["code"], "INVALID_INPUT", "{refused}");
+    }
+
+    let scopes = [
+        "symbol:PaymentService",
+        "config:PAYMENTS_V2=on",
+        "api:GET /payments?status=open",
+    ];
+    let claim = |agent: &str, intent: &str| {
+        let mut args = vec!["work", "claim", "--agent", agent, "--intent", intent];
+        for scope in scopes {
+            args.extend(["--scope", scope]);
+        }
+        cli_success(&root, None, args)
+    };
+    let first = claim(&stripe, &stripe_intent);
+    let claimed: Vec<&str> = first["data"]["claims"]
+        .as_array()
+        .expect("claims")
+        .iter()
+        .map(|claim| claim["scope"]["key"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        claimed,
+        [
+            "PaymentService",
+            "PAYMENTS_V2=on",
+            "GET /payments?status=open"
+        ],
+        "a key keeps every `=` that does not introduce an operation: {first}"
+    );
+
+    let second = claim(&paypal, &paypal_intent);
+    let overlapped: Vec<&str> = second["data"]["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .filter(|warning| warning["kind"] == "overlapping_claim")
+        .map(|warning| warning["scope"]["key"].as_str().unwrap_or_default())
+        .collect();
+    for key in claimed {
+        assert!(overlapped.contains(&key), "{key} must overlap: {second}");
+    }
+
+    let owners = cli_success(
+        &root,
+        None,
+        ["work", "query", "--scope", "config:PAYMENTS_V2=on"],
+    );
+    assert_eq!(
+        owners["data"].as_array().expect("work items").len(),
+        2,
+        "both intents declared and claimed the flag: {owners}"
     );
 }

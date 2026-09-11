@@ -232,6 +232,12 @@ fm_curl \
 Claims are always advisory. The response contains `claims`, `warnings`, and
 `"advisory_only": true`.
 
+A claimed scope carries no operation, because the intent already declared one.
+A `key` that ends in `=OPERATION`, such as `PaymentService=replace`, is rejected
+with `400 INVALID_INPUT` rather than claimed as a symbol by that name, and so is
+a `scope` query parameter on `GET /v1/work` written that way. Any other `=` is
+part of the key, as in `config:FEATURE=on`.
+
 ## Query work
 
 Supported query parameters mirror the `WorkQuery` model:

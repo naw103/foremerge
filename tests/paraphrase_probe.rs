@@ -6,8 +6,9 @@
 //! * **Declared** is what an agent sends: each scope carries the operation the
 //!   intent performs on it. Wording is then irrelevant, because nothing has to
 //!   be recovered from it.
-//! * **Inferred** is the CLI fallback for a person who typed prose and no
-//!   `--operation`. Foremerge guesses, and a guess is capped below HIGH.
+//! * **Inferred** is the CLI fallback for a person who typed prose and a
+//!   `--scope` with no `=OPERATION` suffix. Foremerge guesses, and a guess is
+//!   capped below HIGH.
 //!
 //! Sets B and C are genuinely compatible work that mentions a shared scope.
 //! Every HIGH there is a false alarm, and a false HIGH is worse than silence:

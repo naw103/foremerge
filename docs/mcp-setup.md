@@ -241,6 +241,11 @@ Do not call tools for every keystroke. Foremerge events are semantic boundaries.
 }
 ```
 
+`key` names the scope and nothing more. The operation was declared on
+`publish_intent`, so a key that ends in one, such as `PaymentService=replace`,
+is rejected with `INVALID_INPUT` instead of claiming a symbol by that name. The
+same holds for the `query_work` scope. Any other `=` is part of the key.
+
 ### `query_work`
 
 ```json
