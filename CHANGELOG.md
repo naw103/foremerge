@@ -13,19 +13,29 @@ changes when they are called out here with a migration note.
 
 - The agent skill now ships at `.agents/skills/foremerge/SKILL.md` as well, the
   portable Agent Skills location read by Cursor, the Codex CLI, the Gemini CLI,
-  Copilot and OpenClaw. Clients that follow the shared convention pick up the
-  skill without a client-specific install.
+  Copilot and OpenClaw. A client that follows the shared convention finds the
+  skill in this repository without a client-specific install. Note that
+  `foremerge setup` still writes only the three client-specific locations
+  (`.claude`, `.codex`, `.cursor`); it does not yet install the portable one
+  into your repository.
 - A Claude Code plugin under `plugins/foremerge/`, bundling the skill and the
   MCP server so both arrive from one `/plugin install` instead of a separate
   skill copy and MCP registration. The plugin does not install the binary;
-  `cargo install foremerge` and `foremerge init` remain prerequisites.
+  `cargo install --locked foremerge` and `foremerge init` remain prerequisites.
+- `.claude-plugin/marketplace.json`, the catalogue that makes the plugin
+  installable by name. A plugin directory on its own is not discoverable:
+  Claude Code resolves `/plugin install <plugin>@<marketplace>` through a
+  marketplace, which must live at the repository root. Installing is
+  `/plugin marketplace add naw103/foremerge` followed by
+  `/plugin install foremerge@foremerge`.
 - `llms-install.md`, setup instructions addressed to an AI assistant rather
   than a human. It states the two things an agent gets wrong unaided: that
   `foremerge init` is the operator's decision and must be asked for, and that
   acceptance needs a human-configured named check.
 - `tests/skill_parity.rs` fails if any copy of the skill drifts from the
   canonical `.codex` one, if the plugin's MCP registration diverges from the
-  repository's, or if the plugin manifest version falls behind the crate.
+  repository's, if the marketplace entry stops pointing at the plugin
+  directory, or if the plugin manifest version falls behind the crate.
 
 ### Changed
 

@@ -13,7 +13,7 @@ The MCP server is a subcommand of the `foremerge` binary, so the binary must
 exist before any MCP configuration will work.
 
 ```bash
-cargo install foremerge
+cargo install --locked foremerge
 ```
 
 If Rust is not available, use the install script instead:
@@ -57,9 +57,12 @@ foremerge --json setup codex
 foremerge --json setup cursor
 ```
 
+Setup refuses to replace a differing existing entry unless the user explicitly
+passes `--force`. Do not pass `--force` on your own initiative.
+
 For a client Foremerge does not yet install natively, including Cline, add a
-stdio server entry by hand. The server takes no arguments beyond `mcp` and
-resolves the repository from the working directory it is launched in:
+stdio server entry by hand. The server resolves its repository the way Git
+does, from the directory the client spawns it in:
 
 ```json
 {
@@ -72,8 +75,45 @@ resolves the repository from the working directory it is launched in:
 }
 ```
 
-Setup refuses to replace a differing existing entry unless the user explicitly
-passes `--force`. Do not pass `--force` on your own initiative.
+**That entry is only correct if the client spawns the server in the
+repository.** Not every client does. Cline currently starts stdio servers with
+a working directory of `/` rather than the open workspace
+([cline#9950](https://github.com/cline/cline/issues/9950)), and the server
+exits before serving a single request:
+
+```
+INVALID_INPUT: no Git repository at /; the MCP server resolves its repository
+from the directory the client spawns it in, so start the client inside a
+repository or register it with an explicit --cwd
+```
+
+Pass the repository as an argument rather than relying on the spawn directory.
+`--cwd` is Foremerge's own flag, so it works on every client regardless of what
+that client does with the working directory:
+
+```json
+{
+  "mcpServers": {
+    "foremerge": {
+      "command": "foremerge",
+      "args": ["--cwd", "/absolute/path/to/the/repository", "mcp"]
+    }
+  }
+}
+```
+
+Ask the user for that path, or read it from `git rev-parse --show-toplevel` in
+the repository they are working in. Do not guess it.
+
+Two further notes for hand-written entries:
+
+- Use the absolute path to the binary as `command` if the client cannot find
+  `foremerge` on `PATH`. A desktop client does not always inherit the shell
+  `PATH` that `cargo install` extends, so `~/.cargo/bin/foremerge` may be
+  invisible to it even though it resolves in a terminal.
+- Cline also accepts a `cwd` field on a stdio entry, which it passes to the
+  spawned process. It is not in Cline's documented schema, so prefer `--cwd`,
+  which is Foremerge's own contract and cannot be dropped by a client update.
 
 ## 4. Configure at least one named verification check
 
@@ -118,6 +158,26 @@ foremerge --json status
 
 A healthy install reports `git_repository: true`, `database_ok: true`, the
 client's MCP entry present, and at least one named check.
+
+`doctor --client all` inspects the clients Foremerge installs natively, which
+today are Claude Code, Codex and Cursor. It cannot see a hand-written entry for
+a client it does not know about, so a clean `doctor` is not evidence that a
+Cline entry works. Verify that one through the client itself: ask it to list
+its MCP tools and confirm the Foremerge tools are present. If the client
+reports the server exited, read its MCP error output before changing anything,
+because the `INVALID_INPUT` message above names the cause exactly.
+
+The same check run from a shell tells you whether the entry's arguments are
+right, without involving the client at all:
+
+```bash
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"probe","version":"1"}}}' \
+  | (cd / && foremerge --cwd /absolute/path/to/the/repository mcp)
+```
+
+A working entry answers with a `result` naming `foremerge`. Running it from `/`
+is the point: it reproduces the working directory a client like Cline would
+give the server.
 
 ## What not to do
 
