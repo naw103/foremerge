@@ -7,6 +7,7 @@
 //! because the Claude Code plugin is distributed as a `git-subdir` checkout
 //! that cannot reference a path outside its own directory.
 
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -65,26 +66,56 @@ fn the_plugin_mcp_registration_matches_the_repository_one() {
 /// version it shows comes from this file rather than from the crate.
 #[test]
 fn the_plugin_manifest_version_matches_the_crate_version() {
-    let root = repo_root();
-
-    let crate_version = read(&root.join("Cargo.toml"))
-        .lines()
-        .find_map(|line| line.strip_prefix("version = \"")?.strip_suffix('"'))
-        .expect("crate version in Cargo.toml")
-        .to_string();
-
-    let manifest = read(&root.join("plugins/foremerge/.claude-plugin/plugin.json"));
-    let manifest_version = manifest
-        .lines()
-        .find_map(|line| {
-            let line = line.trim();
-            let rest = line.strip_prefix("\"version\": \"")?;
-            rest.strip_suffix("\",").or_else(|| rest.strip_suffix('"'))
-        })
-        .expect("version in plugin.json");
+    let manifest = read(&repo_root().join("plugins/foremerge/.claude-plugin/plugin.json"));
+    let manifest: Value = serde_json::from_str(&manifest).expect("plugin.json is valid JSON");
 
     assert_eq!(
-        manifest_version, crate_version,
+        manifest["version"]
+            .as_str()
+            .expect("version in plugin.json"),
+        env!("CARGO_PKG_VERSION"),
         "plugins/foremerge/.claude-plugin/plugin.json must be bumped with the crate"
+    );
+}
+
+/// A plugin directory is not installable on its own. Claude Code resolves
+/// `/plugin install <plugin>@<marketplace>` through a marketplace catalogue at
+/// the repository root, so an entry that stops naming the plugin directory
+/// breaks installation while every file it points at stays valid.
+#[test]
+fn the_marketplace_lists_the_plugin_directory() {
+    let root = repo_root();
+    let marketplace = read(&root.join(".claude-plugin/marketplace.json"));
+    let marketplace: Value =
+        serde_json::from_str(&marketplace).expect("marketplace.json is valid JSON");
+
+    let plugins = marketplace["plugins"]
+        .as_array()
+        .expect("marketplace.json lists plugins");
+    let entry = plugins
+        .iter()
+        .find(|entry| entry["name"] == "foremerge")
+        .expect("marketplace.json has a foremerge entry");
+
+    let source = entry["source"]
+        .as_str()
+        .expect("the foremerge entry has a string source");
+    assert_eq!(
+        source, "./plugins/foremerge",
+        "the marketplace entry must point at the plugin directory in this repository"
+    );
+    assert!(
+        root.join(source)
+            .join(".claude-plugin/plugin.json")
+            .is_file(),
+        "the marketplace source {source} does not contain a plugin manifest"
+    );
+
+    let manifest = read(&root.join("plugins/foremerge/.claude-plugin/plugin.json"));
+    let manifest: Value = serde_json::from_str(&manifest).expect("plugin.json is valid JSON");
+    assert_eq!(
+        entry["name"], manifest["name"],
+        "the marketplace entry name must match the plugin manifest name, or \
+         `/plugin install foremerge@foremerge` resolves to nothing"
     );
 }

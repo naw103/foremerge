@@ -15,12 +15,30 @@ merge. Local-first, deterministic, no cloud account and no API key.
   `publish_changeset`, `run_verification`, `accept_changeset`, `record_commit`,
   and the read tools.
 
+## Installing
+
+The plugin is catalogued by the marketplace at the root of this repository, so
+add the marketplace first and then install by name:
+
+```
+/plugin marketplace add naw103/foremerge
+```
+
+```
+/plugin install foremerge@foremerge
+```
+
+The first command registers the catalogue; the second installs the plugin from
+it. `foremerge@foremerge` is `<plugin>@<marketplace>`, and both are named
+`foremerge` here because this repository publishes one plugin.
+
 ## Prerequisites
 
-The plugin does not install the binary. Install it first:
+The plugin does not install the binary, and it does not initialise the
+repository. Install the binary first:
 
 ```bash
-cargo install foremerge
+cargo install --locked foremerge
 ```
 
 Or use the install script:
