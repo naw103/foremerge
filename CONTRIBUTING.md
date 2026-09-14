@@ -48,15 +48,48 @@ Git identity; they must not depend on a contributor's global Git configuration.
 ### The repository dogfoods its own coordination
 
 This repository ships its own Foremerge client integration: `.mcp.json` (Claude
-Code), `.cursor/mcp.json` (Cursor), and three copies of the agent skill under
-`.codex/`, `.claude/`, and `.cursor/skills/foremerge/SKILL.md`. If you open the
-repository with one of those coding-agent clients, the client will offer to
-enable the Foremerge MCP server and skill; clients prompt before enabling
-project-level configuration, so nothing runs without your consent. The three
-skill files are generated from one source: `src/integrations.rs` embeds
-`.codex/skills/foremerge/SKILL.md` at compile time and `foremerge setup`
-installs it for every client, so edit that file and copy it byte-for-byte to
-the `.claude` and `.cursor` twins (the setup e2e test enforces the match).
+Code), `.cursor/mcp.json` (Cursor), and five copies of the agent skill. If you
+open the repository with one of those coding-agent clients, the client will
+offer to enable the Foremerge MCP server and skill; clients prompt before
+enabling project-level configuration, so nothing runs without your consent.
+
+`.codex/skills/foremerge/SKILL.md` is the canonical copy. `src/integrations.rs`
+embeds it at compile time and `foremerge setup` installs it for each native
+client it supports, so edit that file and copy it byte-for-byte to the four
+twins:
+
+| Copy | Why it exists |
+| --- | --- |
+| `.claude/skills/foremerge/SKILL.md` | Claude Code's own convention |
+| `.cursor/skills/foremerge/SKILL.md` | Cursor's own convention |
+| `.agents/skills/foremerge/SKILL.md` | The portable Agent Skills location, read by Cursor, Codex CLI, Gemini CLI, Copilot and OpenClaw |
+| `plugins/foremerge/skills/foremerge/SKILL.md` | The Claude Code plugin, distributed as a `git-subdir` checkout that cannot reference paths outside itself |
+
+`tests/skill_parity.rs` fails if any copy drifts, if the plugin's `.mcp.json`
+diverges from the repository's, if `.claude-plugin/marketplace.json` stops
+pointing at the plugin directory, or if the plugin manifest version falls
+behind the crate version. Bump
+`plugins/foremerge/.claude-plugin/plugin.json` with every release.
+
+Expect the skill to appear more than once in some clients while you work in
+this repository. Cursor reads `.cursor/skills/` and `.agents/skills/` and also
+scans `.claude/skills/` and `.codex/skills/` for compatibility, so all four
+copies are discoverable at once. Cursor currently surfaces those copies
+separately rather than deduplicating them by skill name. The parity test keeps
+their instructions byte-identical, but the duplicate discovery can still spend
+context and clutter skill selection. The copies are kept rather than collapsed
+because each one is some client's own documented convention, and a repository
+that dogfoods its integration should carry the layout its users will have. If a
+client ever resolves two copies to *different* instructions, that is the parity
+test failing, not a client bug.
+
+### The plugin is catalogued separately from the plugin directory
+
+`plugins/foremerge/` is the plugin; `.claude-plugin/marketplace.json` at the
+repository root is what makes it installable. Claude Code resolves
+`/plugin install <plugin>@<marketplace>` through a marketplace catalogue, so a
+valid plugin directory with no catalogue entry cannot be installed by name. The
+two are edited together and the parity test ties them.
 
 ## What a good change includes
 

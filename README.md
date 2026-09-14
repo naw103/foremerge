@@ -563,9 +563,10 @@ See [MCP setup](docs/mcp-setup.md) for transport behavior, schemas, named checks
 example inputs, and multi-worktree configuration.
 
 Source clones include equivalent skills in `.codex/skills`, `.claude/skills`,
-and `.cursor/skills`, plus portable Claude and Cursor MCP templates. A Cargo
-installation embeds the canonical skill so `foremerge setup` can install it
-into another repository without copying this source tree.
+`.cursor/skills`, the portable `.agents/skills` location, and the Claude Code
+plugin, plus portable Claude and Cursor MCP templates. A Cargo installation
+embeds the canonical skill so `foremerge setup` can install it into another
+repository without copying this source tree.
 
 ## Local JSON API
 
@@ -649,6 +650,12 @@ using Foremerge as an integration gate.
 
 Also see the [changelog](CHANGELOG.md), [security policy](SECURITY.md), and
 [code of conduct](CODE_OF_CONDUCT.md).
+
+### Links
+
+- Website: [foremerge.com](https://foremerge.com)
+- Crate: [crates.io/crates/foremerge](https://crates.io/crates/foremerge)
+- MCP Registry name: mcp-name: io.github.naw103/foremerge
 
 ## Contributing and license
 
