@@ -809,7 +809,9 @@ async fn execute(cli: Cli) -> Result<Completion> {
             // runs. Outside a repository that resolution has no answer, and
             // continuing would create a stray store beside the spawn directory
             // rather than coordinating anything, so fail where the operator can
-            // still read the reason.
+            // still read the reason. Plugin hosts may start MCP automatically,
+            // so the default repository store must also exist already: starting
+            // a client is not permission to opt a repository into coordination.
             if cli.database.is_none() {
                 git::discover(&cwd).with_context(|| {
                     format!(
@@ -817,6 +819,18 @@ async fn execute(cli: Cli) -> Result<Completion> {
                         cwd.display()
                     )
                 })?;
+                match std::fs::symlink_metadata(&database) {
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => bail!(
+                        "NOT_INITIALIZED: Foremerge is not initialized in {}; run `foremerge init` before starting its MCP server",
+                        cwd.display()
+                    ),
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("inspect Foremerge database {}", database.display())
+                        });
+                    }
+                }
             }
             let service = open_service(&database, &cwd)?;
             mcp::run_stdio(service).await?;

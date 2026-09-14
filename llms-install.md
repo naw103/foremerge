@@ -76,10 +76,10 @@ does, from the directory the client spawns it in:
 ```
 
 **That entry is only correct if the client spawns the server in the
-repository.** Not every client does. Cline currently starts stdio servers with
-a working directory of `/` rather than the open workspace
-([cline#9950](https://github.com/cline/cline/issues/9950)), and the server
-exits before serving a single request:
+repository.** Not every client does. Cline has been reported to start stdio
+servers with a working directory of `/` rather than the open workspace
+([cline#9950](https://github.com/cline/cline/issues/9950)); in that case the
+server exits before serving a single request:
 
 ```
 INVALID_INPUT: no Git repository at /; the MCP server resolves its repository

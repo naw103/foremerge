@@ -39,6 +39,10 @@ changes when they are called out here with a migration note.
 
 ### Changed
 
+- The repository-resolving MCP server now refuses to create coordination state
+  before an operator runs `foremerge init`. This preserves explicit opt-in when
+  an installed plugin starts its MCP server automatically. Advanced callers
+  that provide an explicit `--database` retain the existing standalone mode.
 - The README carries a `### Links` section naming the website, the crate, and
   the MCP registry name. The registry's ownership check reads the rendered
   crates.io README, so the name has to be visible text rather than a comment.
