@@ -4,13 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Parallel coding agents without the carnage | Foremerge</title>
-<meta name="description" content="Two agents, two worktrees, zero textual conflict, and a clean merge that broke anyway. Worktrees isolate files, not plans, and Git compares diffs, not intentions.">
+<meta name="description" content="Two agents, two worktrees, zero textual conflict, and a clean merge that broke. Worktrees isolate files, not plans.">
 <link rel="canonical" href="https://foremerge.com/blog/parallel-coding-agents-without-the-carnage/">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/app-icon-180.png">
 <meta name="theme-color" content="#0F1317">
 <meta property="og:title" content="Parallel coding agents without the carnage | Foremerge">
-<meta property="og:description" content="Two agents, two worktrees, zero textual conflict, and a clean merge that broke anyway. Worktrees isolate files, not plans, and Git compares diffs, not intentions.">
+<meta property="og:description" content="Two agents, two worktrees, zero textual conflict, and a clean merge that broke. Worktrees isolate files, not plans.">
 <meta property="og:type" content="article">
 <meta property="og:url" content="https://foremerge.com/blog/parallel-coding-agents-without-the-carnage/">
 <meta property="og:image" content="https://foremerge.com/og-1200x630.png">
@@ -22,8 +22,18 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="/blog/blog.css">
+<meta property="article:published_time" content="2026-08-27T09:00:00Z">
+<meta property="article:modified_time" content="2026-08-27T09:00:00Z">
+<meta property="article:author" content="Nick Woodhead">
+<meta property="article:tag" content="git">
+<meta property="article:tag" content="ai">
+<meta property="article:tag" content="devtools">
+<meta property="article:tag" content="rust">
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"BlogPosting","headline":"Parallel coding agents without the carnage","description":"Two agents, two worktrees, zero textual conflict, and a clean merge that broke anyway. Worktrees isolate files, not plans, and Git compares diffs, not intentions.","datePublished":"2026-08-27","dateModified":"2026-08-27","author":{"@type":"Person","name":"Nick Woodhead","url":"https://github.com/naw103"},"publisher":{"@type":"Organization","name":"Foremerge","logo":{"@type":"ImageObject","url":"https://foremerge.com/brand/png/mark-color-512.png"}},"mainEntityOfPage":{"@type":"WebPage","@id":"https://foremerge.com/blog/parallel-coding-agents-without-the-carnage/"},"image":"https://foremerge.com/og-1200x630.png","inLanguage":"en"}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Foremerge","item":"https://foremerge.com/"},{"@type":"ListItem","position":2,"name":"Blog","item":"https://foremerge.com/blog/"},{"@type":"ListItem","position":3,"name":"Parallel coding agents without the carnage","item":"https://foremerge.com/blog/parallel-coding-agents-without-the-carnage/"}]}
 </script>
 </head>
 <body>
@@ -61,7 +71,7 @@
 <ol><li><strong>Destructive versus additive.</strong> One agent removes or replaces a thing another agent is building on. The example above. Merges clean, breaks the design.</li><li><strong>Duplicate work.</strong> Two agents solve the same problem from different angles because nothing assigned ownership. You pay twice and then pay again to reconcile.</li><li><strong>Contract drift.</strong> One agent changes an API, a schema, or a config contract while another codes against the old shape. Compiles, runs, disagrees at runtime.</li></ol>
 <p>A shared task list helps with the second one, if every agent reads it, every time. Nothing in that setup catches the first or third, because the collision is between intentions, and intentions live in prompts, not in any file a tool can watch.</p>
 <h2 id="declare-the-work-before-doing-it">Declare the work before doing it</h2>
-<p>Foremerge is the internal tool we built for this, open-sourced this week. It is a coordination protocol that sits above Git: agents declare what they are about to do, before they do it, in a form precise enough to check.</p>
+<p>Foremerge is the internal tool we built for this, open-sourced this week. It is a <a href="/blog/the-coordination-layer/">coordination protocol</a> that sits above Git: agents declare what they are about to do, before they do it, in a form precise enough to check.</p>
 <p>A declaration is an intent with one or more semantic scopes, each carrying an operation:</p>
 <pre><code>foremerge intent publish \
   --agent &quot;$AGENT&quot; \
@@ -111,7 +121,7 @@ the scope, and check for conflicts before you start.</code></pre>
   <p>The open-source coordination protocol for parallel coding agents, built above Git. Agents declare intent and semantic scopes before writing code, so plans that cannot both be true collide in a queryable store instead of in your merge. One Rust binary, Apache-2.0, local-first.</p>
   <div class="install mono"><span class="p">$ </span>curl -fsSL https://foremerge.com/install.sh | sh</div>
 </div>
-    <div class="more"><p class="eyebrow">More from the blog</p><div class="posts"><a class="post-card" href="/blog/the-coordination-layer/"><span class="meta">15 September 2026</span><h2>AI agents introduced several new layers to the development stack. You are probably missing this one.</h2><p>The stack grew five layers in two years, and each was adopted fast because its absence hurt the same day. The sixth one&#x27;s absence hurts three days later. That is the only reason you are probably missing it.</p></a><a class="post-card" href="/blog/orchestrator-vs-coordinator/"><span class="meta">14 September 2026</span><h2>Agent orchestrators and agent coordinators are not the same layer</h2><p>Both words mean make several agents work together, so they get used interchangeably. They name different layers, and one question tells you which one you are running.</p></a><a class="post-card" href="/blog/31-questions-coordinating-parallel-coding-agents/"><span class="meta">4 September 2026</span><h2>31 hard questions about coordinating parallel coding agents, answered</h2><p>A reader went through the Foremerge source and asked 31 questions about design, trust, and roadmap. The full maintainer Q&amp;A, lightly edited.</p></a></div></div>
+    <div class="more"><p class="eyebrow">More from the blog</p><div class="posts"><a class="post-card" href="/blog/the-coordination-layer/"><span class="meta">15 September 2026</span><h2>AI agents introduced several new layers to the development stack. You are probably missing this one.</h2><p>The stack grew five layers in two years, and each was adopted fast because its absence hurt the same day. The sixth one&#x27;s absence hurts three days later. That is the only reason you are probably missing it.</p></a><a class="post-card" href="/blog/orchestrator-vs-coordinator/"><span class="meta">14 September 2026</span><h2>Agent orchestrators and agent coordinators are not the same layer</h2><p>Both words mean make several agents work together, so they get used interchangeably. They name different layers, and one question tells you which one you are running.</p></a></div></div>
   </div>
 </article>
 </div>

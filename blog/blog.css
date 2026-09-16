@@ -132,6 +132,17 @@ article h1 {
 }
 .body th { font-family: var(--sans); font-weight: 500; color: var(--paper); background: var(--panel); }
 
+/* --- Contents ----------------------------------------------------------- */
+.toc {
+  border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+  padding: 1.1rem 1.3rem; margin: 0 0 2.4rem;
+}
+.toc .eyebrow { margin-bottom: .7rem; }
+.toc ol { margin: 0; padding-left: 1.3rem; columns: 2; column-gap: 2rem; }
+.toc li { margin: .3rem 0; font-size: .88rem; break-inside: avoid; }
+.toc li::marker { color: var(--slate); }
+@media (max-width: 600px) { .toc ol { columns: 1; } }
+
 /* --- Syndication note and end matter ----------------------------------- */
 .syndication {
   margin: 3rem 0 0; border: 1px solid var(--line); background: var(--panel);

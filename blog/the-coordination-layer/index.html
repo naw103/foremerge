@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>The coordination layer: the agent-stack layer you are probably missing | Foremerge</title>
-<meta name="description" content="The stack grew five layers in two years, and each was adopted fast because its absence hurt the same day. The sixth one&#x27;s absence hurts three days later. That is the only reason you are probably missing it.">
+<title>The coordination layer the agent stack is missing</title>
+<meta name="description" content="The agent stack grew five layers in two years. Each one hurt the day it was missing. The sixth one hurts three days later.">
 <link rel="canonical" href="https://foremerge.com/blog/the-coordination-layer/">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/app-icon-180.png">
 <meta name="theme-color" content="#0F1317">
-<meta property="og:title" content="The coordination layer: the agent-stack layer you are probably missing | Foremerge">
-<meta property="og:description" content="The stack grew five layers in two years, and each was adopted fast because its absence hurt the same day. The sixth one&#x27;s absence hurts three days later. That is the only reason you are probably missing it.">
+<meta property="og:title" content="The coordination layer the agent stack is missing">
+<meta property="og:description" content="The agent stack grew five layers in two years. Each one hurt the day it was missing. The sixth one hurts three days later.">
 <meta property="og:type" content="article">
 <meta property="og:url" content="https://foremerge.com/blog/the-coordination-layer/">
 <meta property="og:image" content="https://foremerge.com/og-1200x630.png">
@@ -22,8 +22,18 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="/blog/blog.css">
+<meta property="article:published_time" content="2026-09-15T09:00:00Z">
+<meta property="article:modified_time" content="2026-09-15T09:00:00Z">
+<meta property="article:author" content="Nick Woodhead">
+<meta property="article:tag" content="ai">
+<meta property="article:tag" content="devtools">
+<meta property="article:tag" content="git">
+<meta property="article:tag" content="productivity">
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"BlogPosting","headline":"AI agents introduced several new layers to the development stack. You are probably missing this one.","description":"The stack grew five layers in two years, and each was adopted fast because its absence hurt the same day. The sixth one's absence hurts three days later. That is the only reason you are probably missing it.","datePublished":"2026-09-15","dateModified":"2026-09-15","author":{"@type":"Person","name":"Nick Woodhead","url":"https://github.com/naw103"},"publisher":{"@type":"Organization","name":"Foremerge","logo":{"@type":"ImageObject","url":"https://foremerge.com/brand/png/mark-color-512.png"}},"mainEntityOfPage":{"@type":"WebPage","@id":"https://foremerge.com/blog/the-coordination-layer/"},"image":"https://foremerge.com/og-1200x630.png","inLanguage":"en"}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Foremerge","item":"https://foremerge.com/"},{"@type":"ListItem","position":2,"name":"Blog","item":"https://foremerge.com/blog/"},{"@type":"ListItem","position":3,"name":"AI agents introduced several new layers to the development stack. You are probably missing this one.","item":"https://foremerge.com/blog/the-coordination-layer/"}]}
 </script>
 </head>
 <body>
@@ -56,8 +66,8 @@
 <p>The agent layer: Claude Code, Codex, Cursor. The thing that writes code. Two years ago this layer did not exist; today it is where implementation happens.</p>
 <p>The context layer: CLAUDE.md, AGENTS.md, rules files, memory systems. Telling agents how your repository works, what your conventions are, what not to touch. Everyone who onboarded an agent wrote these within a week, because an agent without context is a very fast junior with amnesia.</p>
 <p>The tool layer: MCP. Agents reaching databases, browsers, issue trackers, deployment systems. Adopted fast because an agent that cannot touch your systems can only talk about them.</p>
-<p>The isolation layer: git worktrees, containers, cloud sandboxes. One agent per checkout, because two sessions in one working directory stomp each other's files and poison each other's context. Anyone who ran two agents learned this in the first afternoon.</p>
-<p>The orchestration layer: Gas Town, claude-squad, Foreman, and a fast-growing ecosystem of fleet runners. Who works on what, which sessions are alive, what needs review. The moment you run more than two or three agents, supervision becomes its own job, and this layer takes it.</p>
+<p>The isolation layer: <a href="/blog/parallel-coding-agents-without-the-carnage/">git worktrees</a>, containers, cloud sandboxes. One agent per checkout, because two sessions in one working directory stomp each other's files and poison each other's context. Anyone who ran two agents learned this in the first afternoon.</p>
+<p>The <a href="/blog/orchestrator-vs-coordinator/">orchestration layer</a>: Gas Town, claude-squad, Foreman, and a fast-growing ecosystem of fleet runners. Who works on what, which sessions are alive, what needs review. The moment you run more than two or three agents, supervision becomes its own job, and this layer takes it.</p>
 <p>Each of these layers got adopted quickly for the same reason: its absence hurts immediately and obviously. No context, the agent writes nonsense today. No isolation, files get stomped today. No orchestration, you lose track of your fleet today.</p>
 <p>There is one more layer, and almost nobody runs it, because its absence hurts silently.</p>
 <h2 id="the-failure-that-announces-nothing">The failure that announces nothing</h2>
@@ -86,7 +96,7 @@
   <p>The open-source coordination protocol for parallel coding agents, built above Git. Agents declare intent and semantic scopes before writing code, so plans that cannot both be true collide in a queryable store instead of in your merge. One Rust binary, Apache-2.0, local-first.</p>
   <div class="install mono"><span class="p">$ </span>curl -fsSL https://foremerge.com/install.sh | sh</div>
 </div>
-    <div class="more"><p class="eyebrow">More from the blog</p><div class="posts"><a class="post-card" href="/blog/orchestrator-vs-coordinator/"><span class="meta">14 September 2026</span><h2>Agent orchestrators and agent coordinators are not the same layer</h2><p>Both words mean make several agents work together, so they get used interchangeably. They name different layers, and one question tells you which one you are running.</p></a><a class="post-card" href="/blog/31-questions-coordinating-parallel-coding-agents/"><span class="meta">4 September 2026</span><h2>31 hard questions about coordinating parallel coding agents, answered</h2><p>A reader went through the Foremerge source and asked 31 questions about design, trust, and roadmap. The full maintainer Q&amp;A, lightly edited.</p></a><a class="post-card" href="/blog/parallel-coding-agents-without-the-carnage/"><span class="meta">27 August 2026</span><h2>Parallel coding agents without the carnage</h2><p>Two agents, two worktrees, zero textual conflict, and a clean merge that broke anyway. Worktrees isolate files, not plans, and Git compares diffs, not intentions.</p></a></div></div>
+    <div class="more"><p class="eyebrow">More from the blog</p><div class="posts"><a class="post-card" href="/blog/orchestrator-vs-coordinator/"><span class="meta">14 September 2026</span><h2>Agent orchestrators and agent coordinators are not the same layer</h2><p>Both words mean make several agents work together, so they get used interchangeably. They name different layers, and one question tells you which one you are running.</p></a><a class="post-card" href="/blog/parallel-coding-agents-without-the-carnage/"><span class="meta">27 August 2026</span><h2>Parallel coding agents without the carnage</h2><p>Two agents, two worktrees, zero textual conflict, and a clean merge that broke anyway. Worktrees isolate files, not plans, and Git compares diffs, not intentions.</p></a></div></div>
   </div>
 </article>
 </div>

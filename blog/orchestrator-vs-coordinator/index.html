@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Agent orchestrators and agent coordinators are not the same layer | Foremerge</title>
-<meta name="description" content="Both words mean make several agents work together, so they get used interchangeably. They name different layers, and one question tells you which one you are running.">
+<title>Agent orchestration vs coordination: not the same layer</title>
+<meta name="description" content="Orchestration and coordination name different layers. One question tells you which you are running: what happens if you kill it?">
 <link rel="canonical" href="https://foremerge.com/blog/orchestrator-vs-coordinator/">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/app-icon-180.png">
 <meta name="theme-color" content="#0F1317">
-<meta property="og:title" content="Agent orchestrators and agent coordinators are not the same layer | Foremerge">
-<meta property="og:description" content="Both words mean make several agents work together, so they get used interchangeably. They name different layers, and one question tells you which one you are running.">
+<meta property="og:title" content="Agent orchestration vs coordination: not the same layer">
+<meta property="og:description" content="Orchestration and coordination name different layers. One question tells you which you are running: what happens if you kill it?">
 <meta property="og:type" content="article">
 <meta property="og:url" content="https://foremerge.com/blog/orchestrator-vs-coordinator/">
 <meta property="og:image" content="https://foremerge.com/og-1200x630.png">
@@ -22,8 +22,18 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="/blog/blog.css">
+<meta property="article:published_time" content="2026-09-14T09:00:00Z">
+<meta property="article:modified_time" content="2026-09-14T09:00:00Z">
+<meta property="article:author" content="Nick Woodhead">
+<meta property="article:tag" content="ai">
+<meta property="article:tag" content="devtools">
+<meta property="article:tag" content="git">
+<meta property="article:tag" content="opensource">
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"BlogPosting","headline":"Agent orchestrators and agent coordinators are not the same layer","description":"Both words mean make several agents work together, so they get used interchangeably. They name different layers, and one question tells you which one you are running.","datePublished":"2026-09-14","dateModified":"2026-09-14","author":{"@type":"Person","name":"Nick Woodhead","url":"https://github.com/naw103"},"publisher":{"@type":"Organization","name":"Foremerge","logo":{"@type":"ImageObject","url":"https://foremerge.com/brand/png/mark-color-512.png"}},"mainEntityOfPage":{"@type":"WebPage","@id":"https://foremerge.com/blog/orchestrator-vs-coordinator/"},"image":"https://foremerge.com/og-1200x630.png","inLanguage":"en"}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Foremerge","item":"https://foremerge.com/"},{"@type":"ListItem","position":2,"name":"Blog","item":"https://foremerge.com/blog/"},{"@type":"ListItem","position":3,"name":"Agent orchestrators and agent coordinators are not the same layer","item":"https://foremerge.com/blog/orchestrator-vs-coordinator/"}]}
 </script>
 </head>
 <body>
@@ -106,7 +116,7 @@ run against this ChangeSet)</code></pre>
 <h2 id="which-one-do-you-need">Which one do you need?</h2>
 <p>One agent: neither.</p>
 <p>Two or three in parallel: orchestration first. Its absence hurts today, in ways you notice within an afternoon. Lost sessions, stomped files, no idea what is still running.</p>
-<p>The coordination layer's absence hurts on a delay. Both agents finish, both look right, Git merges both without a conflict because nothing textually overlaps, and three days later you are asking when that class stopped existing. That is the failure that made us build this one.</p>
+<p>The <a href="/blog/the-coordination-layer/">coordination layer</a>'s absence hurts on a delay. Both agents finish, both look right, Git merges both without a conflict because nothing textually overlaps, and three days later you are asking when that class stopped existing. That is <a href="/blog/parallel-coding-agents-without-the-carnage/">the failure that made us build this one</a>.</p>
 <p>Foremerge is the coordination layer we extracted from the monorepo of internal tools we use building GPTree, and open-sourced in late August 2026. One Rust binary, Apache-2.0, local-first, a CLI plus a local JSON API plus an MCP server over one SQLite store inside your repository's Git common directory. It sits above Git rather than inside it, and it composes with whatever orchestrator you already run.</p>
 <p>Stated plainly, per the honesty its own docs demand: detection is deterministic but heuristic, so it can warn on compatible work and can miss incompatible plans when agents name the same concept differently. Claims never lock anything. Agent identity is self-asserted, so the ownership guards raise the bar against confusion, not against a caller that deliberately presents another agent's id. It is local-only today, with no multi-machine mode. There are no published benchmarks yet, so there are no performance claims here.</p>
 <p>The layer matters regardless of whose implementation you run, including one you write yourself. So here is the noun test one more time. If it can start and stop your agents, it is an orchestrator. If it can only tell you whether their plans can coexist, and refuse to bless the result at the end, it is a coordinator. Most fleets run the first. Almost nobody runs the second.</p>
@@ -117,7 +127,7 @@ run against this ChangeSet)</code></pre>
   <p>The open-source coordination protocol for parallel coding agents, built above Git. Agents declare intent and semantic scopes before writing code, so plans that cannot both be true collide in a queryable store instead of in your merge. One Rust binary, Apache-2.0, local-first.</p>
   <div class="install mono"><span class="p">$ </span>curl -fsSL https://foremerge.com/install.sh | sh</div>
 </div>
-    <div class="more"><p class="eyebrow">More from the blog</p><div class="posts"><a class="post-card" href="/blog/the-coordination-layer/"><span class="meta">15 September 2026</span><h2>AI agents introduced several new layers to the development stack. You are probably missing this one.</h2><p>The stack grew five layers in two years, and each was adopted fast because its absence hurt the same day. The sixth one&#x27;s absence hurts three days later. That is the only reason you are probably missing it.</p></a><a class="post-card" href="/blog/31-questions-coordinating-parallel-coding-agents/"><span class="meta">4 September 2026</span><h2>31 hard questions about coordinating parallel coding agents, answered</h2><p>A reader went through the Foremerge source and asked 31 questions about design, trust, and roadmap. The full maintainer Q&amp;A, lightly edited.</p></a><a class="post-card" href="/blog/parallel-coding-agents-without-the-carnage/"><span class="meta">27 August 2026</span><h2>Parallel coding agents without the carnage</h2><p>Two agents, two worktrees, zero textual conflict, and a clean merge that broke anyway. Worktrees isolate files, not plans, and Git compares diffs, not intentions.</p></a></div></div>
+    <div class="more"><p class="eyebrow">More from the blog</p><div class="posts"><a class="post-card" href="/blog/the-coordination-layer/"><span class="meta">15 September 2026</span><h2>AI agents introduced several new layers to the development stack. You are probably missing this one.</h2><p>The stack grew five layers in two years, and each was adopted fast because its absence hurt the same day. The sixth one&#x27;s absence hurts three days later. That is the only reason you are probably missing it.</p></a><a class="post-card" href="/blog/31-questions-coordinating-parallel-coding-agents/"><span class="meta">4 September 2026</span><h2>31 hard questions about coordinating parallel coding agents, answered</h2><p>A reader went through the Foremerge source and asked 31 questions about design, trust, and roadmap. The full maintainer Q&amp;A, lightly edited.</p></a></div></div>
   </div>
 </article>
 </div>
