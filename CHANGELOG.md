@@ -77,8 +77,6 @@ changes when they are called out here with a migration note.
   would be refused: it names the upgrade for `UNSUPPORTED_SCHEMA` and the error
   to resolve otherwise.
 
-### Fixed
-
 - `work claim` and `work query` reject a scope whose key ends in an operation,
   such as `symbol:PaymentService=replace`, with `INVALID_INPUT`. So do the
   `claim_work` and `query_work` MCP tools, `POST /v1/claims` and
