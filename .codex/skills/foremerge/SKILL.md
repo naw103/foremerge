@@ -16,6 +16,26 @@ foremerge --json doctor --client all
 foremerge --json checks list
 ```
 
+Read the answer before going further.
+
+- `git_repository: false` means this directory is not a Git repository, so
+  there is nothing to coordinate. Say so and stop.
+- `database_ok: false` with `database_error.code` `NOT_INITIALIZED` means this
+  repository has never run `foremerge init`, so it has not opted into
+  coordination. Say so and stop. Do not run `init` yourself: whether a
+  repository coordinates is the operator's decision, and a store created on
+  your initiative coordinates nothing while looking as though it does.
+- `database_ok: false` with any other `database_error` means the store exists
+  but cannot be used, for example `UNSUPPORTED_SCHEMA` after a newer build has
+  migrated it. Report the error and `next_step` to the user and stop. Do not
+  delete, move, or edit the store.
+
+`doctor` opens the store read-only and never creates one, so a false answer
+here is trustworthy. A Foremerge tool that answers `Foremerge unavailable: ...`
+is the same situation seen from the MCP server: tell the user the error and its
+remedy, leave the store and the MCP configuration alone, and do not assume other
+agents can see your work.
+
 If the client integration is missing, run the relevant installer from the repository:
 
 ```bash

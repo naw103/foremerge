@@ -834,6 +834,10 @@ pub struct DoctorReport {
     pub version: String,
     pub database: String,
     pub database_ok: bool,
+    /// Why the store cannot be used when `database_ok` is false, as the typed
+    /// code and full message of the CLI's error envelope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_error: Option<DoctorError>,
     pub event_chain_ok: Option<bool>,
     pub events_verified: usize,
     pub git_available: bool,
@@ -860,6 +864,14 @@ pub struct DoctorReport {
     /// run here. Absent when the store is not bound to a Git repository.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checks: Option<crate::checks::CheckDiagnostic>,
+}
+
+/// A typed failure inside a doctor report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DoctorError {
+    /// The error's typed prefix, such as `UNSUPPORTED_SCHEMA`, or `ERROR`.
+    pub code: String,
+    pub message: String,
 }
 
 /// One consistent snapshot answering "what are my agents doing right now".
