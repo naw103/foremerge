@@ -8,5 +8,10 @@
 - [MCP setup](https://github.com/naw103/foremerge/blob/main/docs/mcp-setup.md)
 - [Conflict detection](https://github.com/naw103/foremerge/blob/main/docs/conflict-detection.md)
 - [Limitations](https://github.com/naw103/foremerge/blob/main/docs/limitations.md)
+## Writing
+- [Parallel coding agents without the carnage](https://foremerge.com/blog/parallel-coding-agents-without-the-carnage/)
+- [The coordination layer you are probably missing](https://foremerge.com/blog/the-coordination-layer/)
+- [31 hard questions about coordinating parallel coding agents](https://foremerge.com/blog/31-questions-coordinating-parallel-coding-agents/)
+- [Orchestrators and coordinators are not the same layer](https://foremerge.com/blog/orchestrator-vs-coordinator/)
 ## Install
 - `curl -fsSL https://foremerge.com/install.sh | sh` or `cargo install foremerge`

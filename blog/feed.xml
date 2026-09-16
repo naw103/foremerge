@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>Foremerge blog</title>
+    <link>https://foremerge.com/blog/</link>
+    <description>Coordinating parallel coding agents, above Git.</description>
+    <language>en</language>
+    <atom:link href="https://foremerge.com/blog/feed.xml" rel="self" type="application/rss+xml"/>
+    <item>
+      <title>AI agents introduced several new layers to the development stack. You are probably missing this one.</title>
+      <link>https://foremerge.com/blog/the-coordination-layer/</link>
+      <guid isPermaLink="true">https://foremerge.com/blog/the-coordination-layer/</guid>
+      <pubDate>Tue, 15 Sep 2026 09:00:00 +0000</pubDate>
+      <description>The stack grew five layers in two years, and each was adopted fast because its absence hurt the same day. The sixth one&#x27;s absence hurts three days later. That is the only reason you are probably missing it.</description>
+    </item>
+    <item>
+      <title>Agent orchestrators and agent coordinators are not the same layer</title>
+      <link>https://foremerge.com/blog/orchestrator-vs-coordinator/</link>
+      <guid isPermaLink="true">https://foremerge.com/blog/orchestrator-vs-coordinator/</guid>
+      <pubDate>Mon, 14 Sep 2026 09:00:00 +0000</pubDate>
+      <description>Both words mean make several agents work together, so they get used interchangeably. They name different layers, and one question tells you which one you are running.</description>
+    </item>
+    <item>
+      <title>31 hard questions about coordinating parallel coding agents, answered</title>
+      <link>https://foremerge.com/blog/31-questions-coordinating-parallel-coding-agents/</link>
+      <guid isPermaLink="true">https://foremerge.com/blog/31-questions-coordinating-parallel-coding-agents/</guid>
+      <pubDate>Fri, 04 Sep 2026 09:00:00 +0000</pubDate>
+      <description>A reader went through the Foremerge source and asked 31 questions about design, trust, and roadmap. The full maintainer Q&amp;A, lightly edited.</description>
+    </item>
+    <item>
+      <title>Parallel coding agents without the carnage</title>
+      <link>https://foremerge.com/blog/parallel-coding-agents-without-the-carnage/</link>
+      <guid isPermaLink="true">https://foremerge.com/blog/parallel-coding-agents-without-the-carnage/</guid>
+      <pubDate>Thu, 27 Aug 2026 09:00:00 +0000</pubDate>
+      <description>Two agents, two worktrees, zero textual conflict, and a clean merge that broke anyway. Worktrees isolate files, not plans, and Git compares diffs, not intentions.</description>
+    </item>
+  </channel>
+</rss>

@@ -1,0 +1,172 @@
+/* Foremerge blog. The palette, type scale and rules are the site's own;
+   see docs/brand.md in the repository. Ink is the only page background and
+   signal orange is the finding and nothing else, which is why nothing in an
+   article body is allowed to use it except a link. */
+:root {
+  --ink: #0F1317;
+  --panel: #161B20;
+  --line: #262D33;
+  --paper: #F7F5F1;
+  --mist: #B9C0C6;
+  --ash: #8A9199;
+  --slate: #6B747C;
+  --signal: #FF6A2C;
+  --signal-link: #FF8B5C;
+  --amber: #E8A33D;
+  --green-bright: #5FB47C;
+  --sans: "Space Grotesk", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  margin: 0;
+  background: var(--ink);
+  color: var(--mist);
+  font: 400 17px/1.6 var(--mono);
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--signal-link); text-decoration: none; }
+a:hover, a:focus-visible { text-decoration: underline; text-underline-offset: 3px; }
+a:focus-visible { outline: 2px solid var(--signal-link); outline-offset: 3px; }
+code, pre, .mono { font-family: var(--mono); }
+img { max-width: 100%; }
+
+.wrap { max-width: 980px; margin: 0 auto; padding: 0 1.4rem; }
+.wrap.narrow { max-width: 760px; }
+
+nav { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1.4rem 0 0; }
+.lockup { display: block; height: 44px; width: auto; }
+nav .links { display: flex; gap: 1.4rem; font-size: 0.9rem; }
+nav .links a { color: var(--ash); }
+nav .links a:hover, nav .links a:focus-visible { color: var(--paper); }
+
+.eyebrow {
+  font: 500 12px/1 var(--mono); letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--ash); margin: 0 0 0.9rem;
+}
+
+/* --- Index ------------------------------------------------------------- */
+header.blog-hero { padding: 4.5rem 0 2.5rem; }
+.blog-hero h1 {
+  font-family: var(--sans); font-weight: 600; letter-spacing: -0.04em;
+  font-size: clamp(2.2rem, 5vw, 3.4rem); line-height: 1.0;
+  color: var(--paper); margin: 0 0 1.2rem; text-wrap: balance; max-width: 20ch;
+}
+.blog-hero p { font-size: 1.12rem; color: var(--mist); max-width: 60ch; margin: 0; }
+
+.posts { display: flex; flex-direction: column; gap: 1rem; padding-bottom: 1rem; }
+.post-card {
+  display: block; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 12px; padding: 1.4rem 1.5rem; transition: border-color .15s ease;
+}
+.post-card:hover, .post-card:focus-visible { text-decoration: none; border-color: var(--ash); }
+.post-card h2 {
+  font-family: var(--sans); font-weight: 600; letter-spacing: -0.03em;
+  font-size: 1.32rem; line-height: 1.25; color: var(--paper);
+  margin: .5rem 0 .6rem; text-wrap: balance;
+}
+.post-card:hover h2 { color: var(--signal-link); }
+.post-card p { color: var(--mist); font-size: .95rem; margin: 0; max-width: 68ch; }
+.meta { font: 400 .78rem/1 var(--mono); color: var(--slate); letter-spacing: .04em; }
+.meta .dot { padding: 0 .5rem; }
+@media (prefers-reduced-motion: reduce) { .post-card { transition: none; } }
+
+/* --- Article ----------------------------------------------------------- */
+article { padding: 3.5rem 0 0; }
+article h1 {
+  font-family: var(--sans); font-weight: 600; letter-spacing: -0.04em;
+  font-size: clamp(2rem, 4.6vw, 3.05rem); line-height: 1.04;
+  color: var(--paper); margin: .9rem 0 1.1rem; text-wrap: balance;
+}
+.standfirst { font-size: 1.14rem; line-height: 1.55; color: var(--mist); margin: 0 0 1.6rem; }
+.byline {
+  display: flex; flex-wrap: wrap; gap: .5rem 0; align-items: baseline;
+  border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+  padding: .85rem 0; margin-bottom: 2.6rem;
+}
+.tags { display: flex; flex-wrap: wrap; gap: .4rem; margin-left: auto; }
+.tag {
+  font: 400 .72rem/1 var(--mono); letter-spacing: .08em; text-transform: lowercase;
+  color: var(--ash); background: var(--panel); border: 1px solid var(--line);
+  border-radius: 4px; padding: .4em .6em;
+}
+
+.body { font-size: 1.0625rem; }
+.body > p, .body > ul, .body > ol, .body > blockquote { max-width: 68ch; }
+.body h2 {
+  font-family: var(--sans); font-weight: 600; letter-spacing: -0.035em;
+  font-size: clamp(1.5rem, 3vw, 1.78rem); line-height: 1.22; color: var(--paper);
+  margin: 3rem 0 1rem; text-wrap: balance; scroll-margin-top: 1.5rem;
+}
+.body h3 {
+  font-family: var(--sans); font-weight: 600; letter-spacing: -0.03em;
+  font-size: 1.12rem; color: var(--paper); margin: 2.2rem 0 .8rem;
+  scroll-margin-top: 1.5rem;
+}
+.body p { margin: 0 0 1.25rem; }
+.body strong { font-family: var(--sans); font-weight: 500; letter-spacing: -0.02em; color: var(--paper); }
+.body em { color: var(--paper); font-style: italic; }
+.body code { color: var(--paper); font-size: .92em; }
+.body ul, .body ol { padding-left: 1.2rem; margin: 0 0 1.35rem; }
+.body li { margin: .55rem 0; }
+.body li::marker { color: var(--slate); }
+.body hr { border: 0; border-top: 1px solid var(--line); margin: 2.6rem 0; }
+.body pre {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 1.05rem 1.2rem; overflow-x: auto; margin: 0 0 1.4rem;
+  font-size: .84rem; line-height: 1.65; color: var(--mist);
+}
+.body pre code { color: inherit; font-size: inherit; }
+.body blockquote {
+  margin: 0 0 1.4rem; padding: .15rem 0 .15rem 1.3rem;
+  border-left: 2px solid var(--amber); color: var(--mist);
+}
+.body blockquote p:last-child { margin-bottom: 0; }
+.table-scroll { overflow-x: auto; margin: 0 0 1.5rem; }
+.body table { border-collapse: collapse; font-size: .9rem; min-width: 100%; }
+.body th, .body td {
+  border: 1px solid var(--line); padding: .6rem .8rem;
+  text-align: left; vertical-align: top;
+}
+.body th { font-family: var(--sans); font-weight: 500; color: var(--paper); background: var(--panel); }
+
+/* --- Syndication note and end matter ----------------------------------- */
+.syndication {
+  margin: 3rem 0 0; border: 1px solid var(--line); background: var(--panel);
+  border-radius: 10px; padding: 1rem 1.2rem; font-size: .88rem; color: var(--ash);
+}
+.end-cta {
+  margin: 2.5rem 0 0; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--panel); padding: 1.5rem 1.6rem;
+}
+.end-cta h2 {
+  font-family: var(--sans); font-weight: 600; letter-spacing: -0.03em;
+  font-size: 1.15rem; color: var(--paper); margin: 0 0 .6rem;
+}
+.end-cta p { color: var(--mist); font-size: .95rem; margin: 0 0 1rem; max-width: 62ch; }
+.install {
+  background: var(--ink); border: 1px solid var(--line); border-radius: 8px;
+  padding: .8rem 1rem; font-size: .84rem; color: var(--paper);
+  overflow-x: auto; white-space: nowrap;
+}
+.install .p { color: var(--slate); user-select: none; }
+.more { margin: 3rem 0 0; }
+.more .eyebrow { margin-bottom: .8rem; }
+
+footer { margin-top: 5rem; border-top: 1px solid var(--line); padding: 2.2rem 0 3rem; font-size: .88rem; color: var(--ash); }
+footer .wrap { display: flex; flex-wrap: wrap; gap: 1.6rem; justify-content: space-between; align-items: baseline; }
+footer .links { display: flex; flex-wrap: wrap; gap: 1.4rem; }
+
+@media (max-width: 600px) {
+  nav { flex-wrap: wrap; row-gap: .6rem; }
+  nav .links { gap: 1rem; flex-wrap: wrap; }
+  .install { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .tags { margin-left: 0; }
+  /* Mono at 17px leaves about 28 characters to a phone line, which is too
+     short a measure for two thousand words. One step down buys four more. */
+  .body { font-size: .97rem; }
+  .standfirst { font-size: 1.02rem; }
+  .body pre { font-size: .78rem; }
+}

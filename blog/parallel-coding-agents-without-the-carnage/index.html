@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Parallel coding agents without the carnage | Foremerge</title>
+<meta name="description" content="Two agents, two worktrees, zero textual conflict, and a clean merge that broke anyway. Worktrees isolate files, not plans, and Git compares diffs, not intentions.">
+<link rel="canonical" href="https://foremerge.com/blog/parallel-coding-agents-without-the-carnage/">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/app-icon-180.png">
+<meta name="theme-color" content="#0F1317">
+<meta property="og:title" content="Parallel coding agents without the carnage | Foremerge">
+<meta property="og:description" content="Two agents, two worktrees, zero textual conflict, and a clean merge that broke anyway. Worktrees isolate files, not plans, and Git compares diffs, not intentions.">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://foremerge.com/blog/parallel-coding-agents-without-the-carnage/">
+<meta property="og:image" content="https://foremerge.com/og-1200x630.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="alternate" type="application/rss+xml" title="Foremerge blog" href="/blog/feed.xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="/blog/blog.css">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BlogPosting","headline":"Parallel coding agents without the carnage","description":"Two agents, two worktrees, zero textual conflict, and a clean merge that broke anyway. Worktrees isolate files, not plans, and Git compares diffs, not intentions.","datePublished":"2026-08-27","dateModified":"2026-08-27","author":{"@type":"Person","name":"Nick Woodhead","url":"https://github.com/naw103"},"publisher":{"@type":"Organization","name":"Foremerge","logo":{"@type":"ImageObject","url":"https://foremerge.com/brand/png/mark-color-512.png"}},"mainEntityOfPage":{"@type":"WebPage","@id":"https://foremerge.com/blog/parallel-coding-agents-without-the-carnage/"},"image":"https://foremerge.com/og-1200x630.png","inLanguage":"en"}
+</script>
+</head>
+<body>
+<div class="wrap">
+  <nav aria-label="Site">
+    <a href="/" aria-label="Foremerge home"><svg class="lockup" viewBox="0 0 204 48" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Foremerge">
+        <path d="M24 17L30.01 23.01Q31 24 30.01 24.99L24 31L17.99 24.99Q17 24 17.99 23.01Z" fill="#FF6A2C"/>
+        <g fill="none" stroke="#F7F5F1" stroke-width="4.5" stroke-linejoin="round">
+          <path d="M15.74 13.26Q18 11 20.26 13.26L29.87 22.87Q31 24 29.87 25.13L20.26 34.74Q18 37 15.74 34.74L7.26 26.26Q5 24 7.26 21.74Z"/>
+          <path d="M32.26 13.26Q30 11 27.74 13.26L18.13 22.87Q17 24 18.13 25.13L27.74 34.74Q30 37 32.26 34.74L40.74 26.26Q43 24 40.74 21.74Z"/>
+          <path d="M20.8 13.8L28 21" stroke-linecap="butt"/>
+        </g>
+        <path fill="#F7F5F1" d="M63.700 34L60.070 34L60.070 13L73.150 13L73.150 16.270L63.700 16.270L63.700 21.820L72.400 21.820L72.400 25.120L63.700 25.120L63.700 34ZM81.910 34.420L81.910 34.420Q79.690 34.420 77.935 33.505Q76.180 32.590 75.175 30.895Q74.170 29.200 74.170 26.830L74.170 26.830L74.170 26.350Q74.170 23.980 75.175 22.270Q76.180 20.560 77.935 19.660Q79.690 18.760 81.910 18.760L81.910 18.760Q84.130 18.760 85.870 19.660Q87.610 20.560 88.615 22.270Q89.620 23.980 89.620 26.350L89.620 26.350L89.620 26.830Q89.620 29.200 88.615 30.895Q87.610 32.590 85.870 33.505Q84.130 34.420 81.910 34.420ZM81.910 31.360L81.910 31.360Q83.800 31.360 85.000 30.145Q86.200 28.930 86.200 26.740L86.200 26.740L86.200 26.440Q86.200 24.250 85.000 23.035Q83.800 21.820 81.910 21.820L81.910 21.820Q80.020 21.820 78.820 23.035Q77.620 24.250 77.620 26.440L77.620 26.440L77.620 26.740Q77.620 28.930 78.820 30.145Q80.020 31.360 81.910 31.360ZM95.530 34L92.080 34L92.080 19.180L95.470 19.180L95.470 20.890L95.980 20.890Q96.310 19.960 97.090 19.540Q97.870 19.120 98.950 19.120L98.950 19.120L100.750 19.120L100.750 22.180L98.890 22.180Q97.390 22.180 96.460 22.975Q95.530 23.770 95.530 25.420L95.530 25.420L95.530 34ZM108.850 34.420L108.850 34.420Q106.630 34.420 104.935 33.475Q103.240 32.530 102.295 30.805Q101.350 29.080 101.350 26.770L101.350 26.770L101.350 26.410Q101.350 24.070 102.280 22.360Q103.210 20.650 104.890 19.705Q106.570 18.760 108.760 18.760L108.760 18.760Q110.920 18.760 112.540 19.705Q114.160 20.650 115.060 22.360Q115.960 24.070 115.960 26.350L115.960 26.350L115.960 27.580L104.830 27.580Q104.890 29.320 106.060 30.370Q107.230 31.420 108.940 31.420L108.940 31.420Q110.620 31.420 111.430 30.685Q112.240 29.950 112.660 29.020L112.660 29.020L115.510 30.490Q115.090 31.300 114.295 32.215Q113.500 33.130 112.180 33.775Q110.860 34.420 108.850 34.420ZM104.860 24.970L104.860 24.970L112.450 24.970Q112.330 23.500 111.325 22.630Q110.320 21.760 108.730 21.760L108.730 21.760Q107.080 21.760 106.090 22.630Q105.100 23.500 104.860 24.970ZM121.750 34L118.300 34L118.300 19.180L121.690 19.180L121.690 20.830L122.200 20.830Q122.590 20.080 123.505 19.495Q124.420 18.910 125.950 18.910L125.950 18.910Q127.570 18.910 128.560 19.570Q129.550 20.230 130.060 21.250L130.060 21.250L130.540 21.250Q131.050 20.230 132.010 19.570Q132.970 18.910 134.740 18.910L134.740 18.910Q136.120 18.910 137.245 19.510Q138.370 20.110 139.045 21.280Q139.720 22.450 139.720 24.190L139.720 24.190L139.720 34L136.270 34L136.270 24.430Q136.270 23.140 135.580 22.465Q134.890 21.790 133.660 21.790L133.660 21.790Q132.310 21.790 131.515 22.675Q130.720 23.560 130.720 25.210L130.720 25.210L130.720 34L127.300 34L127.300 24.430Q127.300 23.140 126.610 22.465Q125.920 21.790 124.690 21.790L124.690 21.790Q123.310 21.790 122.530 22.675Q121.750 23.560 121.750 25.210L121.750 25.210L121.750 34ZM149.530 34.420L149.530 34.420Q147.310 34.420 145.615 33.475Q143.920 32.530 142.975 30.805Q142.030 29.080 142.030 26.770L142.030 26.770L142.030 26.410Q142.030 24.070 142.960 22.360Q143.890 20.650 145.570 19.705Q147.250 18.760 149.440 18.760L149.440 18.760Q151.600 18.760 153.220 19.705Q154.840 20.650 155.740 22.360Q156.640 24.070 156.640 26.350L156.640 26.350L156.640 27.580L145.510 27.580Q145.570 29.320 146.740 30.370Q147.910 31.420 149.620 31.420L149.620 31.420Q151.300 31.420 152.110 30.685Q152.920 29.950 153.340 29.020L153.340 29.020L156.190 30.490Q155.770 31.300 154.975 32.215Q154.180 33.130 152.860 33.775Q151.540 34.420 149.530 34.420ZM145.540 24.970L145.540 24.970L153.130 24.970Q153.010 23.500 152.005 22.630Q151.000 21.760 149.410 21.760L149.410 21.760Q147.760 21.760 146.770 22.630Q145.780 23.500 145.540 24.970ZM162.430 34L158.980 34L158.980 19.180L162.370 19.180L162.370 20.890L162.880 20.890Q163.210 19.960 163.990 19.540Q164.770 19.120 165.850 19.120L165.850 19.120L167.650 19.120L167.650 22.180L165.790 22.180Q164.290 22.180 163.360 22.975Q162.430 23.770 162.430 25.420L162.430 25.420L162.430 34ZM168.250 26.650L168.250 26.650L168.250 26.200Q168.250 23.860 169.180 22.195Q170.110 20.530 171.670 19.645Q173.230 18.760 175.090 18.760L175.090 18.760Q177.190 18.760 178.285 19.510Q179.380 20.260 179.890 21.130L179.890 21.130L180.400 21.130L180.400 19.180L183.760 19.180L183.760 36.820Q183.760 38.290 182.920 39.145Q182.080 40 180.640 40L180.640 40L170.680 40L170.680 37L179.470 37Q180.340 37 180.340 36.100L180.340 36.100L180.340 31.810L179.830 31.810Q179.500 32.320 178.930 32.845Q178.360 33.370 177.430 33.730Q176.500 34.090 175.090 34.090L175.090 34.090Q173.230 34.090 171.670 33.205Q170.110 32.320 169.180 30.655Q168.250 28.990 168.250 26.650ZM176.050 31.060L176.050 31.060Q177.910 31.060 179.140 29.875Q180.370 28.690 180.370 26.560L180.370 26.560L180.370 26.260Q180.370 24.100 179.155 22.930Q177.940 21.760 176.050 21.760L176.050 21.760Q174.190 21.760 172.945 22.930Q171.700 24.100 171.700 26.260L171.700 26.260L171.700 26.560Q171.700 28.690 172.945 29.875Q174.190 31.060 176.050 31.060ZM193.720 34.420L193.720 34.420Q191.500 34.420 189.805 33.475Q188.110 32.530 187.165 30.805Q186.220 29.080 186.220 26.770L186.220 26.770L186.220 26.410Q186.220 24.070 187.150 22.360Q188.080 20.650 189.760 19.705Q191.440 18.760 193.630 18.760L193.630 18.760Q195.790 18.760 197.410 19.705Q199.030 20.650 199.930 22.360Q200.830 24.070 200.830 26.350L200.830 26.350L200.830 27.580L189.700 27.580Q189.760 29.320 190.930 30.370Q192.100 31.420 193.810 31.420L193.810 31.420Q195.490 31.420 196.300 30.685Q197.110 29.950 197.530 29.020L197.530 29.020L200.380 30.490Q199.960 31.300 199.165 32.215Q198.370 33.130 197.050 33.775Q195.730 34.420 193.720 34.420ZM189.730 24.970L189.730 24.970L197.320 24.970Q197.200 23.500 196.195 22.630Q195.190 21.760 193.600 21.760L193.600 21.760Q191.950 21.760 190.960 22.630Q189.970 23.500 189.730 24.970Z"/>
+      </svg></a>
+    <span class="links">
+      <a href="/blog/">Blog</a>
+      <a href="/#quickstart">Quickstart</a>
+      <a href="https://github.com/naw103/foremerge/tree/main/docs">Docs</a>
+      <a href="https://github.com/naw103/foremerge">GitHub</a>
+    </span>
+  </nav>
+<article>
+  <div class="wrap narrow">
+    <p class="eyebrow"><a href="/blog/">Blog</a></p>
+    <h1>Parallel coding agents without the carnage</h1>
+    <p class="standfirst">Two agents, two worktrees, zero textual conflict, and a clean merge that broke anyway. Worktrees isolate files, not plans, and Git compares diffs, not intentions.</p>
+    <div class="byline"><span class="meta">Nick Woodhead<span class="dot">&middot;</span>27 August 2026</span><span class="tags"><span class="tag">git</span><span class="tag">ai</span><span class="tag">devtools</span><span class="tag">rust</span></span></div>
+    <div class="body">
+<p>We build GPTree with several coding agents working the same repository at once: Claude Code, Codex, and Cursor, each in its own git worktree. The failure that finally made us build tooling for it was small and completely silent.</p>
+<p>One session was told to replace <code>PaymentService</code> with a Stripe-specific implementation. Another was told to add PayPal support to <code>PaymentService</code>. Different worktrees. Different files. Zero textual conflict. Git merged both branches cleanly, and the second change now depended on an extension point the first had deleted. Nothing in the toolchain had an opinion about it at any moment.</p>
+<p>Git compares diffs. It cannot compare plans.</p>
+<h2 id="worktrees-isolate-files-not-plans">Worktrees isolate files, not plans</h2>
+<p>Worktrees became the standard answer to parallel agents for a good reason: two sessions editing one checkout will overwrite each other's files and poison each other's context. Isolated checkouts fix that completely.</p>
+<p>But three failure modes survive file isolation, because they were never about files:</p>
+<ol><li><strong>Destructive versus additive.</strong> One agent removes or replaces a thing another agent is building on. The example above. Merges clean, breaks the design.</li><li><strong>Duplicate work.</strong> Two agents solve the same problem from different angles because nothing assigned ownership. You pay twice and then pay again to reconcile.</li><li><strong>Contract drift.</strong> One agent changes an API, a schema, or a config contract while another codes against the old shape. Compiles, runs, disagrees at runtime.</li></ol>
+<p>A shared task list helps with the second one, if every agent reads it, every time. Nothing in that setup catches the first or third, because the collision is between intentions, and intentions live in prompts, not in any file a tool can watch.</p>
+<h2 id="declare-the-work-before-doing-it">Declare the work before doing it</h2>
+<p>Foremerge is the internal tool we built for this, open-sourced this week. It is a coordination protocol that sits above Git: agents declare what they are about to do, before they do it, in a form precise enough to check.</p>
+<p>A declaration is an intent with one or more semantic scopes, each carrying an operation:</p>
+<pre><code>foremerge intent publish \
+  --agent &quot;$AGENT&quot; \
+  --task &quot;modernize-payments&quot; \
+  --summary &quot;Replace PaymentService with StripePaymentService&quot; \
+  --scope symbol:PaymentService=replace</code></pre>
+<p>Scopes are not file paths. The vocabulary covers <code>symbol</code>, <code>api</code>, <code>schema</code>, <code>config</code>, <code>migration</code>, <code>contract</code>, and more, because file paths miss API, schema, configuration, and cross-language collisions entirely. The operation (<code>replace</code>, <code>extend</code>, and so on) is declared rather than parsed out of the summary, so it does not matter how the agent phrased its plan.</p>
+<p>When a second agent declares work on the same scope, deterministic rules compare the declarations and raise a finding while both pieces of work are still plans. This is real output from 0.4.0, captured while writing this post:</p>
+<pre><code>{
+  &quot;kind&quot;: &quot;destructive_vs_additive&quot;,
+  &quot;severity&quot;: &quot;HIGH&quot;,
+  &quot;scope&quot;: { &quot;kind&quot;: &quot;symbol&quot;, &quot;key&quot;: &quot;PaymentService&quot; },
+  &quot;explanation&quot;: &quot;One intent will replace `PaymentService` while the other will extend it; both declare the same semantic scope.&quot;,
+  &quot;suggestion&quot;: &quot;Coordinate on a stable `PaymentProvider` contract first, then implement StripePaymentProvider and PayPalPaymentProvider behind it and migrate callers deliberately. This is a heuristic suggestion, not an automatic design decision.&quot;
+}</code></pre>
+<p>The finding names the rule that fired, explains itself, and suggests a resolution. It does not block anyone. Claims in Foremerge are leased and advisory: overlap produces a warning and shared context, never a lock, because two agents can often work the same region compatibly and a lock would serialize work that did not need serializing.</p>
+<p>The other half of the protocol is evidence. When an agent finishes, it publishes a ChangeSet, and acceptance is gated on verification that Foremerge runs itself: your named check (a build, a typecheck, a test target you registered) executed against the exact candidate fingerprint. An agent saying "tests pass" is recorded as provenance; it does not satisfy the gate. If the tree changed after validation, the attempt is non-authoritative and the gate says so.</p>
+<p>Mechanically it is one Rust binary. The CLI, a local JSON API, and an MCP server are adapters over the same SQLite store, which lives inside your repository's git common directory, which is exactly why worktrees work well with it: linked worktrees share that directory, so every agent in the repo sees the same declarations while keeping isolated files. Local-first, no cloud, Apache-2.0.</p>
+<h2 id="the-five-minute-version">The five-minute version</h2>
+<p>The fastest path is to let your agent set it up. Paste this into Claude Code, Codex, or Cursor from inside the repository you want to coordinate:</p>
+<pre><code>Set up Foremerge in this repository so we can coordinate parallel agents.
+
+1. Install it:      curl -fsSL https://foremerge.com/install.sh | sh
+2. Initialize:      foremerge init
+3. Wire this client and any others in use: foremerge setup all
+4. Register the check I should be validated against, for example:
+                    foremerge checks set test -- cargo test --all-targets
+5. Confirm:         foremerge doctor --client all
+
+Then read the Foremerge skill that step 3 installed for this client and follow
+it from now on: publish your intent with semantic scopes before editing, claim
+the scope, and check for conflicts before you start.</code></pre>
+<p>The MCP server gives the agent the full lifecycle as tools: publish intent, claim scope, check conflicts, publish ChangeSets, run verification, record the commit that landed. Set it up once per repository and every agent connected to that repository shares the same awareness.</p>
+<p>Doing it by hand instead is the install line, <code>foremerge init</code>, and the commands in the <a href="https://github.com/naw103/foremerge#readme">README</a>, which walks two throwaway agents into the exact conflict above in under five minutes.</p>
+<h2 id="what-it-deliberately-does-not-claim">What it deliberately does not claim</h2>
+<p>This is a pre-1.0, local-first MVP, and the parts it does not do are documented as carefully as the parts it does:</p>
+<ul><li>Detection is deterministic and explainable, but heuristic. It can miss synonymous concepts and warn on work that was always compatible.</li><li>Claims warn. They never lock files, symbols, or agents.</li><li>Passing validation proves that the recorded command passed for the recorded fingerprint. Nothing more.</li><li>The store is per-machine SQLite. Shared multi-machine mode does not exist yet.</li><li>There is a reproducible benchmark harness in the repo, but no published coordinated-versus-uncoordinated results yet. Performance claims wait for numbers.</li></ul>
+<p>The full list is in <a href="https://github.com/naw103/foremerge/blob/main/docs/limitations.md">docs/limitations.md</a>. We think a coordination tool that overclaims is worse than no coordination tool, because severity is the signal an agent uses to decide what to stop for, and a false HIGH is worse than silence.</p>
+<h2 id="where-this-goes">Where this goes</h2>
+<p>The protocol is the part we most want feedback on: is the scope vocabulary the right shape, where would the conflict rules warn on compatible work in your codebase, and which collisions would they miss? Issues and Discussions are open.</p>
+<ul><li>Repo: <a href="https://github.com/naw103/foremerge">github.com/naw103/foremerge</a></li><li>Site and install: <a href="https://foremerge.com">foremerge.com</a></li><li>Crate: <code>cargo install foremerge</code></li></ul>
+<p>If you run parallel agents and have hit collisions worktrees could not see, we would genuinely like to hear what they looked like.</p>
+    </div>
+    <p class="syndication">This article is also published on <a href="https://dev.to/naw103/parallel-coding-agents-without-the-carnage-gf9" rel="nofollow">dev.to</a>, where the comment thread lives. This page is the canonical version.</p>
+    <div class="end-cta">
+  <h2>Foremerge</h2>
+  <p>The open-source coordination protocol for parallel coding agents, built above Git. Agents declare intent and semantic scopes before writing code, so plans that cannot both be true collide in a queryable store instead of in your merge. One Rust binary, Apache-2.0, local-first.</p>
+  <div class="install mono"><span class="p">$ </span>curl -fsSL https://foremerge.com/install.sh | sh</div>
+</div>
+    <div class="more"><p class="eyebrow">More from the blog</p><div class="posts"><a class="post-card" href="/blog/the-coordination-layer/"><span class="meta">15 September 2026</span><h2>AI agents introduced several new layers to the development stack. You are probably missing this one.</h2><p>The stack grew five layers in two years, and each was adopted fast because its absence hurt the same day. The sixth one&#x27;s absence hurts three days later. That is the only reason you are probably missing it.</p></a><a class="post-card" href="/blog/orchestrator-vs-coordinator/"><span class="meta">14 September 2026</span><h2>Agent orchestrators and agent coordinators are not the same layer</h2><p>Both words mean make several agents work together, so they get used interchangeably. They name different layers, and one question tells you which one you are running.</p></a><a class="post-card" href="/blog/31-questions-coordinating-parallel-coding-agents/"><span class="meta">4 September 2026</span><h2>31 hard questions about coordinating parallel coding agents, answered</h2><p>A reader went through the Foremerge source and asked 31 questions about design, trust, and roadmap. The full maintainer Q&amp;A, lightly edited.</p></a></div></div>
+  </div>
+</article>
+</div>
+
+<footer>
+  <div class="wrap">
+    <span>Foremerge &middot; Apache-2.0 &middot; built above Git, not instead of it</span>
+    <span class="links">
+      <a href="/blog/feed.xml">RSS</a>
+      <a href="https://github.com/naw103/foremerge">GitHub</a>
+      <a href="https://github.com/naw103/foremerge/blob/main/docs/architecture.md">Architecture</a>
+      <a href="https://github.com/naw103/foremerge/blob/main/docs/protocol.md">Protocol</a>
+      <a href="https://github.com/naw103/foremerge/blob/main/CHANGELOG.md">Changelog</a>
+    </span>
+  </div>
+</footer>
+
+<!-- Cloudflare Web Analytics --><script type='module' src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "af31c304d4194ed7965efda16e6426f5"}'></script><!-- End Cloudflare Web Analytics -->
+</body>
+</html>
