@@ -3931,7 +3931,8 @@ fn mcp_explains_a_ledger_newer_than_this_build_instead_of_exiting() {
 
     let initialized = &responses[0];
     assert_eq!(initialized["id"], 1);
-    assert_eq!(initialized["result"]["protocolVersion"], "2026-07-28");
+    // The client asked for 2026-07-28; the server answers with what it speaks.
+    assert_eq!(initialized["result"]["protocolVersion"], "2025-11-25");
     assert_eq!(initialized["result"]["serverInfo"]["name"], "foremerge");
     let instructions = initialized["result"]["instructions"]
         .as_str()
@@ -4184,6 +4185,76 @@ fn mcp_explains_a_ledger_it_cannot_even_inspect_instead_of_exiting() {
     assert!(
         !next_step.contains("foremerge init"),
         "init cannot fix a ledger that cannot be read: {next_step}"
+    );
+}
+
+#[test]
+fn a_modern_client_probe_over_stdio_is_refused_and_the_handshake_names_this_revision() {
+    // The 2026-07-28 revision tells a dual-era client to probe `server/discover`
+    // first on stdio and fall back to `initialize` when it is refused. The
+    // server used to answer that probe with a result that satisfied none of
+    // that revision's requirements, which points such a client at a wire
+    // contract this server cannot hold up.
+    let repo = create_repo();
+    let _ = database_from_doctor(&repo.root);
+
+    let mut child = Command::new(foremerge_bin())
+        .arg("--cwd")
+        .arg(&repo.root)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn MCP server");
+    let mut stdin = child.stdin.take().expect("MCP stdin");
+    for request in [
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "server/discover",
+            "params": { "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientInfo": { "name": "modern-probe", "version": "1" }
+            }}
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "initialize",
+            "params": { "protocolVersion": "2026-07-28", "capabilities": {} }
+        }),
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {} }),
+    ] {
+        writeln!(stdin, "{request}").expect("write MCP request");
+    }
+    drop(stdin);
+
+    let output = child.wait_with_output().expect("wait for MCP server");
+    let responses = String::from_utf8(output.stdout)
+        .expect("MCP output is UTF-8")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).expect("every MCP stdout line is JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        responses.len(),
+        3,
+        "every request gets an answer: {responses:?}"
+    );
+    assert_eq!(responses[0]["error"]["code"], -32601, "{:?}", responses[0]);
+    assert!(responses[0].get("result").is_none(), "{:?}", responses[0]);
+    assert_eq!(
+        responses[1]["result"]["protocolVersion"], "2025-11-25",
+        "{:?}",
+        responses[1]
+    );
+    // The fallback is a working session, not a degraded one.
+    assert_eq!(
+        responses[2]["result"]["tools"],
+        Value::Array(mcp::tool_catalog()),
+        "{:?}",
+        responses[2]
     );
 }
 
@@ -5554,7 +5625,8 @@ fn real_mcp_stdio_drives_the_lifecycle_through_named_verification_and_acceptance
             }
         }),
     );
-    assert_eq!(initialized["result"]["protocolVersion"], "2026-07-28");
+    // The client asked for 2026-07-28; the server answers with what it speaks.
+    assert_eq!(initialized["result"]["protocolVersion"], "2025-11-25");
 
     let agent = stdio_tool_call(
         &mut stdin,

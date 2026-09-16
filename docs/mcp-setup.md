@@ -414,9 +414,16 @@ line. That guidance is suppressed when stdin is a pipe, so client sessions are
 unaffected. To read coordination state as a person, use the CLI instead, for
 example `foremerge status` or `foremerge agent list`.
 
-The server currently negotiates MCP protocol version `2026-07-28` when the
-client requests it and otherwise falls back to `2025-11-25`. It also responds to
-`ping` and `server/discover`. Notifications have no response.
+The server implements MCP protocol revision `2025-11-25` and answers
+`initialize` with that version whatever the client asks for. It also responds to
+`ping`. Notifications have no response.
+
+`server/discover` belongs to the `2026-07-28` revision, which this server does
+not implement, so it answers `-32601`. That is deliberate: a client that speaks
+the newer revision probes `server/discover` first and falls back to the
+`initialize` handshake when it is refused, which is the path that works here.
+Support for the newer revision is tracked in
+[issue #21](https://github.com/naw103/foremerge/issues/21).
 
 Successful tool calls return both text content and `structuredContent`. Domain
 failures are returned as a tool result with `isError: true`; malformed JSON-RPC,
