@@ -624,12 +624,21 @@ fn tool_result(value: Value, is_error: bool) -> Value {
     })
 }
 
+/// A JSON-RPC 2.0 error response: `jsonrpc`, `id` and `error`, and nothing
+/// else.
+///
+/// It used to carry a top-level `_meta` with the server's identity. MCP puts
+/// `_meta` inside a result or params object, never beside `error`, and strict
+/// clients validate the envelope: the official TypeScript client rejects the
+/// extra member as an unrecognized key. That made its `server/discover` probe
+/// look unanswered, so instead of falling back to `initialize` at once it
+/// waited out the whole probe timeout, sixty seconds by default, before
+/// connecting.
 fn jsonrpc_error(id: Value, code: i64, message: &str) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
         "error": { "code": code, "message": message },
-        "_meta": { "io.modelcontextprotocol/serverInfo": server_info() },
     })
 }
 
@@ -1334,9 +1343,9 @@ mod tests {
         assert_eq!(listed["result"]["tools"], Value::Array(tool_catalog()));
     }
 
-    /// A client that speaks the 2026-07-28 revision probes `server/discover`
-    /// first and falls back to the `initialize` handshake when that fails, per
-    /// that revision's stdio backward-compatibility rule. Answering the probe
+    /// A dual-era client, one that speaks both revisions, probes
+    /// `server/discover` first and falls back to the `initialize` handshake
+    /// when that fails, per the 2026-07-28 stdio backward-compatibility rule. Answering the probe
     /// at all, with a result missing everything the revision requires, is what
     /// put such a client on the wrong path.
     #[tokio::test]
@@ -1373,6 +1382,79 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(initialized["result"]["protocolVersion"], "2025-11-25");
+    }
+
+    /// Every JSON-RPC error this server sends has exactly the three members a
+    /// JSON-RPC 2.0 error response may have. The unknown-method case matters
+    /// most: it is how a dual-era client's discovery probe is refused, and an
+    /// extra member made the official TypeScript client ignore the refusal and
+    /// wait out its probe timeout.
+    #[tokio::test]
+    async fn every_error_response_is_a_strict_json_rpc_envelope() {
+        let assert_strict = |response: &Value| {
+            let object = response.as_object().expect("a response object");
+            let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            assert_eq!(keys, ["error", "id", "jsonrpc"], "{response}");
+            let mut error_keys: Vec<&str> = response["error"]
+                .as_object()
+                .expect("an error object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            error_keys.sort_unstable();
+            assert_eq!(error_keys, ["code", "message"], "{response}");
+        };
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let unavailable = unsupported_schema();
+        for backend in [Backend::Ready(&service), Backend::Unavailable(&unavailable)] {
+            for request in [
+                json!({ "jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": {} }),
+                json!({ "jsonrpc": "2.0", "id": 2, "method": "no/such/method" }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": { "name": "no_such_tool", "arguments": {} }
+                }),
+                json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {} }),
+            ] {
+                let response = respond(backend, request).await.expect("a response");
+                assert_strict(&response);
+            }
+        }
+        // The parse-error path builds its response with the same function.
+        assert_strict(&jsonrpc_error(Value::Null, -32700, "parse error"));
+    }
+
+    /// The refusal does not depend on the store. A server that cannot open its
+    /// ledger must route a dual-era client to the same working handshake, where
+    /// the instructions then explain what is wrong.
+    #[tokio::test]
+    async fn the_discovery_probe_is_refused_the_same_way_while_the_store_is_unavailable() {
+        let unavailable = unsupported_schema();
+        let backend = Backend::Unavailable(&unavailable);
+        let probe = respond(
+            backend,
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": {} }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(probe["error"]["code"], -32601, "{probe}");
+        let initialized = respond(
+            backend,
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {} }),
+        )
+        .await
+        .unwrap();
+        // No protocolVersion requested at all, as a legacy client may send.
+        assert_eq!(initialized["result"]["protocolVersion"], PROTOCOL);
+        assert!(
+            initialized["result"]["instructions"]
+                .as_str()
+                .is_some_and(|text| text.starts_with("Foremerge unavailable:")),
+            "{initialized}"
+        );
     }
 
     #[tokio::test]

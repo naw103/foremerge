@@ -419,11 +419,17 @@ The server implements MCP protocol revision `2025-11-25` and answers
 `ping`. Notifications have no response.
 
 `server/discover` belongs to the `2026-07-28` revision, which this server does
-not implement, so it answers `-32601`. That is deliberate: a client that speaks
-the newer revision probes `server/discover` first and falls back to the
-`initialize` handshake when it is refused, which is the path that works here.
+not implement, so it answers `-32601`. That is deliberate: a dual-era client,
+one that speaks both revisions, probes `server/discover` first and falls back to
+the `initialize` handshake when it is refused, which is the path that works
+here. A client that speaks only the newer revision cannot use this server.
 Support for the newer revision is tracked in
-[issue #21](https://github.com/naw103/foremerge/issues/21).
+[issue #23](https://github.com/naw103/foremerge/issues/23).
+
+JSON-RPC error responses carry exactly `jsonrpc`, `id` and `error`. Strict
+clients validate that envelope, and the official TypeScript client treats any
+other member as an unrecognized response, so a refused probe with an extra
+member reads as no answer at all.
 
 Successful tool calls return both text content and `structuredContent`. Domain
 failures are returned as a tool result with `isError: true`; malformed JSON-RPC,

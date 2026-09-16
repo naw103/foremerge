@@ -4224,6 +4224,8 @@ fn a_modern_client_probe_over_stdio_is_refused_and_the_handshake_names_this_revi
             "method": "initialize",
             "params": { "protocolVersion": "2026-07-28", "capabilities": {} }
         }),
+        // What real clients send next; a notification gets no response.
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized", "params": {} }),
         json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {} }),
     ] {
         writeln!(stdin, "{request}").expect("write MCP request");
@@ -4243,7 +4245,17 @@ fn a_modern_client_probe_over_stdio_is_refused_and_the_handshake_names_this_revi
         "every request gets an answer: {responses:?}"
     );
     assert_eq!(responses[0]["error"]["code"], -32601, "{:?}", responses[0]);
-    assert!(responses[0].get("result").is_none(), "{:?}", responses[0]);
+    // Exactly the JSON-RPC 2.0 error members. A strict client that finds any
+    // other member treats the refusal as unrecognized and waits out its whole
+    // probe timeout instead of falling back.
+    let mut members: Vec<&str> = responses[0]
+        .as_object()
+        .expect("a response object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    members.sort_unstable();
+    assert_eq!(members, ["error", "id", "jsonrpc"], "{:?}", responses[0]);
     assert_eq!(
         responses[1]["result"]["protocolVersion"], "2025-11-25",
         "{:?}",
