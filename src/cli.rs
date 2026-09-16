@@ -236,7 +236,18 @@ enum IntentCommand {
         summary: String,
         #[arg(long)]
         rationale: Option<String>,
-        #[arg(long = "scope")]
+        /// Repeatable. KIND: symbol, api, schema, config, infra, test,
+        /// migration, env, file, component, contract, domain.
+        /// OPERATION: add, extend, modify (preserve what other work
+        /// depends on) or replace, remove, rename, migrate (do not).
+        /// Only a declared operation can produce a HIGH finding; an
+        /// omitted one is inferred and capped below HIGH.
+        /// Example: symbol:PaymentService=replace
+        #[arg(
+            long = "scope",
+            value_name = "KIND:KEY[=OPERATION]",
+            verbatim_doc_comment
+        )]
         scopes: Vec<String>,
         #[arg(long = "depends-on")]
         depends_on: Vec<String>,
@@ -341,7 +352,18 @@ enum ConflictCommand {
         /// rejected here; pass them with --intent-id instead.
         #[arg(long, conflicts_with = "intent_id")]
         intent: Option<String>,
-        #[arg(long = "scope")]
+        /// Repeatable. KIND: symbol, api, schema, config, infra, test,
+        /// migration, env, file, component, contract, domain.
+        /// OPERATION: add, extend, modify (preserve what other work
+        /// depends on) or replace, remove, rename, migrate (do not).
+        /// Only a declared operation can produce a HIGH finding; an
+        /// omitted one is inferred and capped below HIGH.
+        /// Example: symbol:PaymentService=replace
+        #[arg(
+            long = "scope",
+            value_name = "KIND:KEY[=OPERATION]",
+            verbatim_doc_comment
+        )]
         scopes: Vec<String>,
     },
     /// List persisted conflicts.
@@ -1633,6 +1655,65 @@ fn error_code_from_message(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
+
+    /// `--help` is how an agent without MCP learns to declare an operation,
+    /// and only a declared operation can produce a HIGH finding. The kinds and
+    /// operations in that text are typed by hand, so hold them to the parser.
+    #[test]
+    fn scope_help_names_the_form_and_every_kind_and_operation_the_parser_accepts() {
+        let rejected = Scope::parse("unknown:key").unwrap_err().to_string();
+        let kinds = rejected
+            .rsplit_once("use one of ")
+            .map(|(_, kinds)| kinds.to_string())
+            .expect("the unknown-kind error lists every valid kind");
+        let operations = |keep: fn(Operation) -> bool| {
+            Operation::ALL
+                .iter()
+                .copied()
+                .filter(|operation| keep(*operation))
+                .map(Operation::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let expected = [
+            kinds,
+            operations(Operation::additive),
+            operations(Operation::destructive),
+        ];
+
+        let cli = Cli::command();
+        for path in [["intent", "publish"], ["conflicts", "check"]] {
+            let command = path.join(" ");
+            let scope = cli
+                .find_subcommand(path[0])
+                .and_then(|family| family.find_subcommand(path[1]))
+                .and_then(|found| found.get_arguments().find(|arg| arg.get_id() == "scopes"))
+                .unwrap_or_else(|| panic!("`{command}` has a --scope argument"));
+            let value_names: Vec<&str> = scope
+                .get_value_names()
+                .unwrap_or_default()
+                .iter()
+                .map(|name| name.as_str())
+                .collect();
+            assert_eq!(value_names, ["KIND:KEY[=OPERATION]"], "`{command} --scope`");
+            let help = scope
+                .get_help()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+            for list in &expected {
+                assert!(
+                    help.contains(list.as_str()),
+                    "`{command} --scope` help should list {list}, got: {help}"
+                );
+            }
+            assert!(
+                help.contains("HIGH"),
+                "`{command} --scope` help should say what reaches HIGH, got: {help}"
+            );
+        }
+    }
 
     #[test]
     fn a_forced_shutdown_is_reported_through_a_nonzero_exit_code() {
@@ -1654,8 +1735,6 @@ mod tests {
     /// them to the parser.
     #[test]
     fn work_scope_help_names_the_plain_form_and_every_kind_the_parser_accepts() {
-        use clap::CommandFactory;
-
         let rejected = Scope::parse("unknown:key").unwrap_err().to_string();
         let kinds = rejected
             .rsplit_once("use one of ")
