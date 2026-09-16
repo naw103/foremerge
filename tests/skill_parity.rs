@@ -61,9 +61,10 @@ fn the_plugin_mcp_registration_matches_the_repository_one() {
     );
 }
 
-/// A released plugin whose manifest still claims the previous version is
-/// wrong in a way nothing else catches: the marketplace pins a tag, and the
-/// version it shows comes from this file rather than from the crate.
+/// A released plugin whose manifest still claims the previous version is wrong
+/// in a way nothing else catches: the marketplace shows the version from this
+/// file rather than from the crate, and nothing else in the release checklist
+/// touches it.
 #[test]
 fn the_plugin_manifest_version_matches_the_crate_version() {
     let manifest = read(&repo_root().join("plugins/foremerge/.claude-plugin/plugin.json"));

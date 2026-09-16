@@ -77,7 +77,10 @@ foremerge --json doctor --client claude
 ```
 
 `git_repository: false` means this is not a Git repository. `database_ok: false`
-means the repository has never run `foremerge init`.
+means the repository cannot coordinate: `database_error` says why, and its code
+is `NOT_INITIALIZED` when the repository has simply never run `foremerge init`.
+The MCP server starts either way and reports the same reason, so a plugin that
+connects is not by itself proof that coordination is active.
 
 ## Links
 

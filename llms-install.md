@@ -39,10 +39,15 @@ foremerge --json doctor --client all
 
 - `git_repository: false` means this directory is not a Git repository. Stop
   and say so.
-- `database_ok: false` means the repository has never opted into coordination.
+- `database_ok: false` with no `database_error`, or one whose `code` is
+  `NOT_INITIALIZED`, means the repository has never opted into coordination.
   **Ask the user before running `foremerge init`.** Whether a repository
   coordinates is the operator's decision, and a store created on your
   initiative coordinates nothing while looking as though it does.
+- `database_ok: false` with any other `database_error` means a store exists but
+  cannot be used, so `init` would be refused with the same error. Report the
+  code and the report's `next_step` to the user and stop. `UNSUPPORTED_SCHEMA`
+  means the ledger was written by a newer Foremerge than the one installed.
 
 `doctor` opens the store read-only and never creates one, so a negative answer
 here is trustworthy.
@@ -60,6 +65,12 @@ foremerge --json setup cursor
 Setup refuses to replace a differing existing entry unless the user explicitly
 passes `--force`. Do not pass `--force` on your own initiative.
 
+**`setup` initializes the repository as a side effect**, so it is subject to
+the same permission as step 2: if `doctor` reported the repository
+uninitialized, ask before running it. Registering the server without
+initializing is also a valid end state. The server starts either way and
+reports `NOT_INITIALIZED` until an operator runs `foremerge init`.
+
 For a client Foremerge does not yet install natively, including Cline, add a
 stdio server entry by hand. The server resolves its repository the way Git
 does, from the directory the client spawns it in:
@@ -76,10 +87,10 @@ does, from the directory the client spawns it in:
 ```
 
 **That entry is only correct if the client spawns the server in the
-repository.** Not every client does. Cline currently starts stdio servers with
-a working directory of `/` rather than the open workspace
-([cline#9950](https://github.com/cline/cline/issues/9950)), and the server
-exits before serving a single request:
+repository.** Not every client does. Cline has been reported to start stdio
+servers with a working directory of `/` rather than the open workspace
+([cline#9950](https://github.com/cline/cline/issues/9950)); in that case the
+server exits before serving a single request:
 
 ```
 INVALID_INPUT: no Git repository at /; the MCP server resolves its repository

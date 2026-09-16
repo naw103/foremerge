@@ -479,9 +479,10 @@ See [MCP setup](docs/mcp-setup.md) for transport behavior, schemas, named checks
 example inputs, and multi-worktree configuration.
 
 Source clones include equivalent skills in `.codex/skills`, `.claude/skills`,
-and `.cursor/skills`, plus portable Claude and Cursor MCP templates. A Cargo
-installation embeds the canonical skill so `foremerge setup` can install it
-into another repository without copying this source tree.
+`.cursor/skills`, the portable `.agents/skills` location, and the Claude Code
+plugin, plus portable Claude and Cursor MCP templates. A Cargo installation
+embeds the canonical skill so `foremerge setup` can install it into another
+repository without copying this source tree.
 
 ## Local JSON API
 

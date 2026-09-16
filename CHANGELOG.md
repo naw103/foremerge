@@ -39,6 +39,19 @@ changes when they are called out here with a migration note.
 
 ### Changed
 
+- The repository-resolving MCP server no longer creates coordination state
+  before an operator runs `foremerge init`, so an installed plugin starting its
+  MCP server does not opt a repository into coordination. The server still
+  starts: it reports `NOT_INITIALIZED` in its `initialize` instructions and
+  from every tool call, the way it reports any ledger it cannot open, so the
+  agent is told Foremerge is inactive here rather than losing the server
+  silently. Callers that pass an explicit `--database` keep the existing
+  standalone mode.
+
+  **Migration.** Before this release, starting the MCP server in a repository
+  with no ledger created one. If you relied on that, run `foremerge init` once
+  per repository. Until you do, agents in that repository are uncoordinated and
+  now say so.
 - The README carries a `### Links` section naming the website, the crate, and
   the MCP registry name. The registry's ownership check reads the rendered
   crates.io README, so the name has to be visible text rather than a comment.
