@@ -91,11 +91,21 @@ impl Store {
     /// the system it is inspecting.
     pub fn open_existing_read_only(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let metadata = std::fs::symlink_metadata(&path).with_context(|| {
-            format!(
-                "NOT_INITIALIZED: database does not exist: {}",
-                path.display()
-            )
+        // Only an absent path means "not initialized". Any other failure, a
+        // permission denial above all, is a store that exists and cannot be
+        // read, and `foremerge init` would be refused with the same error. A
+        // diagnosis that names the wrong cause sends the operator to a command
+        // that cannot help.
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!(
+                    "NOT_INITIALIZED: database does not exist: {}",
+                    path.display()
+                )
+            } else {
+                anyhow::Error::new(error)
+                    .context(format!("inspect Foremerge database {}", path.display()))
+            }
         })?;
         if !metadata.is_file() || metadata.file_type().is_symlink() {
             bail!(

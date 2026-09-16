@@ -732,11 +732,13 @@ impl Foremerge {
         }
         for scope in &request.scopes {
             if let Some((key, operation)) = restated_operation(scope) {
-                let declared = intent
-                    .scopes
-                    .iter()
-                    .any(|declared| declared.scope.precise() == scope.precise());
-                if !declared {
+                // Any intent's declaration proves the name is real, not only
+                // this one's. A scope two agents both touch is exactly what a
+                // claim exists to surface, so checking only the claiming
+                // intent would make the second participant unable to claim a
+                // scope the first had declared, and would suppress the overlap
+                // warning instead of raising it.
+                if !scope_is_declared(&tx, scope)? {
                     return Err(restated_operation_error(scope, key, operation, "a claim"));
                 }
             }
@@ -4071,6 +4073,65 @@ mod tests {
             })
             .unwrap_err();
         assert!(format!("{error:#}").contains("provenance must be a JSON object"));
+    }
+
+    /// The declaration that rescues a key does not have to be the claimant's
+    /// own. A scope two agents both touch is exactly what a claim exists to
+    /// surface, so the second one must be able to claim what the first
+    /// declared, and get the overlap warning rather than a refusal.
+    #[test]
+    fn a_key_another_intent_declared_is_claimable_by_a_second_intent() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let register = |name: &str| {
+            service
+                .register_agent(RegisterAgentRequest {
+                    name: name.into(),
+                    model: None,
+                    capabilities: vec![],
+                    worktree: None,
+                })
+                .unwrap()
+                .agent
+        };
+        let declared = Scope::new("api", "GET /search?action=add");
+        let publish = |agent: &Agent, scope: Scope| {
+            service
+                .publish_intent(PublishIntentRequest {
+                    agent_id: agent.id.clone(),
+                    task: format!("{} task", agent.name),
+                    summary: "search".into(),
+                    rationale: None,
+                    scopes: vec![ScopeClaim::new(scope, Operation::Modify)],
+                    depends_on: vec![],
+                    metadata: json!({}),
+                })
+                .unwrap()
+                .intent
+                .id
+        };
+        let first = register("first-agent");
+        let second = register("second-agent");
+        let first_intent = publish(&first, declared.clone());
+        // The second intent declares something else entirely, so only the
+        // first intent's declaration can justify the key.
+        let second_intent = publish(&second, Scope::new("symbol", "Unrelated"));
+        let claim = |agent: &Agent, intent_id: &str| {
+            service.claim_work(ClaimWorkRequest {
+                agent_id: agent.id.clone(),
+                intent_id: intent_id.to_string(),
+                scopes: vec![declared.clone()],
+                reason: None,
+                lease_seconds: 3600,
+            })
+        };
+        claim(&first, &first_intent).expect("the declaring intent may claim it");
+        let outcome = claim(&second, &second_intent)
+            .expect("another intent's declaration proves the name is real");
+        assert_eq!(outcome.claims.len(), 1);
+        assert!(
+            !outcome.warnings.is_empty(),
+            "the overlapping claim is what this must surface: {outcome:?}"
+        );
     }
 
     /// A key is allowed to end in something that reads like an operation, as

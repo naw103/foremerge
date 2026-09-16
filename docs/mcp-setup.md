@@ -221,8 +221,8 @@ Do not call tools for every keystroke. Foremerge events are semantic boundaries.
   "summary": "Add PayPal support to PaymentService",
   "rationale": "Support an additional provider",
   "scopes": [
-    {"kind": "symbol", "key": "PaymentService"},
-    {"kind": "contract", "key": "PaymentService"}
+    {"kind": "symbol", "key": "PaymentService", "operation": "extend"},
+    {"kind": "contract", "key": "PaymentService", "operation": "extend"}
   ],
   "depends_on": [],
   "metadata": {}
@@ -243,8 +243,13 @@ Do not call tools for every keystroke. Foremerge events are semantic boundaries.
 
 `key` names the scope and nothing more. The operation was declared on
 `publish_intent`, so a key that ends in one, such as `PaymentService=replace`,
-is rejected with `INVALID_INPUT` instead of claiming a symbol by that name. The
-same holds for the `query_work` scope. Any other `=` is part of the key.
+is rejected with `INVALID_INPUT` instead of claiming a symbol by that name,
+unless some intent really did declare a scope by that literal name. The same
+holds for the `query_work` scope. Any other `=` is part of the key.
+
+`operation` is required on every `publish_intent` and `check_conflicts` scope:
+a call that omits it fails with `missing field \`operation\``. Only a declared
+operation on both sides can produce a HIGH finding.
 
 ### `query_work`
 
@@ -279,7 +284,7 @@ Unpublished preflight:
 {
   "agent_id": "agt_...",
   "intent": "Replace PaymentService with StripePaymentService",
-  "scopes": [{"kind": "symbol", "key": "PaymentService"}]
+  "scopes": [{"kind": "symbol", "key": "PaymentService", "operation": "replace"}]
 }
 ```
 

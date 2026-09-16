@@ -4089,6 +4089,104 @@ fn mcp_explains_an_uninitialized_repository_without_creating_a_store() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn mcp_explains_a_ledger_it_cannot_even_inspect_instead_of_exiting() {
+    // A ledger that exists but cannot be read, typically a permission denial
+    // on it or its directory, is not an uninitialized repository: `init` is
+    // refused with the same error. The server used to exit here, which is the
+    // failure this release removes, and doctor used to answer NOT_INITIALIZED.
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = create_repo();
+    let database = database_from_doctor(&repo.root);
+    let runtime = database.parent().expect("runtime directory").to_path_buf();
+    let restore = fs::metadata(&runtime)
+        .expect("runtime metadata")
+        .permissions();
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o000)).expect("seal the directory");
+
+    let mut child = Command::new(foremerge_bin())
+        .arg("--cwd")
+        .arg(&repo.root)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn MCP server");
+    let mut stdin = child.stdin.take().expect("MCP stdin");
+    for request in [
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": { "name": "status", "arguments": {} }
+        }),
+    ] {
+        writeln!(stdin, "{request}").expect("write MCP request");
+    }
+    drop(stdin);
+    let output = child.wait_with_output().expect("wait for MCP server");
+    let doctor = cli_success(&repo.root, None, ["doctor"]);
+    fs::set_permissions(&runtime, restore).expect("restore permissions");
+
+    assert!(
+        output.status.success(),
+        "the server must stay up: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let responses = String::from_utf8(output.stdout)
+        .expect("MCP output is UTF-8")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).expect("every MCP stdout line is JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        responses.len(),
+        3,
+        "every request gets an answer: {responses:?}"
+    );
+    assert!(
+        responses[0]["result"]["instructions"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("Foremerge unavailable:")),
+        "{:?}",
+        responses[0]
+    );
+    assert_eq!(
+        responses[1]["result"]["tools"],
+        Value::Array(mcp::tool_catalog()),
+        "tools/list must stay the complete catalog"
+    );
+    assert_eq!(
+        responses[2]["result"]["isError"], true,
+        "{:?}",
+        responses[2]
+    );
+    // Not NOT_INITIALIZED: the repository is initialized, the ledger is simply
+    // unreadable, and `foremerge init` would be refused with the same error.
+    assert_eq!(
+        responses[2]["result"]["structuredContent"]["code"], "ERROR",
+        "{:?}",
+        responses[2]
+    );
+
+    let data = &doctor["data"];
+    assert_eq!(data["database_ok"], false, "{doctor}");
+    assert_ne!(
+        data["database_error"]["code"], "NOT_INITIALIZED",
+        "an unreadable ledger is not an uninitialized repository: {doctor}"
+    );
+    let next_step = data["next_step"].as_str().expect("next step");
+    assert!(
+        !next_step.contains("foremerge init"),
+        "init cannot fix a ledger that cannot be read: {next_step}"
+    );
+}
+
 #[test]
 fn doctor_does_not_offer_init_for_a_ledger_that_exists_but_cannot_be_read() {
     // `init` only fixes a missing store. Offered for a damaged one, it is

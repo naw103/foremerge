@@ -49,8 +49,10 @@ foremerge --json doctor --client all
   code and the report's `next_step` to the user and stop. `UNSUPPORTED_SCHEMA`
   means the ledger was written by a newer Foremerge than the one installed.
 
-`doctor` opens the store read-only and never creates one, so a negative answer
-here is trustworthy.
+`doctor` opens the store read-only: it never creates, initializes or migrates
+one, so a negative answer here is trustworthy. SQLite may make and remove its
+own `-wal` and `-shm` sidecars beside the ledger while the connection is open;
+the ledger itself is not written.
 
 ## 3. Register the MCP server
 

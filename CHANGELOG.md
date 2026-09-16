@@ -69,6 +69,19 @@ changes when they are called out here with a migration note.
   result whose `structuredContent` carries the same `code` and `message`. Both
   tell the agent to report the problem and leave the ledger and the client
   configuration to the user. The error is still written to stderr.
+- A ledger that exists but cannot be inspected, a permission denial above all,
+  made `foremerge mcp` exit before the handshake, the one failure this release
+  set out to remove, and made `foremerge doctor` report `NOT_INITIALIZED` and
+  offer `foremerge init`, which is refused with the same error. Only an absent
+  path is `NOT_INITIALIZED` now; anything else is served through the same
+  degraded path with its own message, and doctor names the condition instead of
+  offering `init`.
+- `work claim` refused a scope whose key ends in an operation even when another
+  intent had declared exactly that name, while `work query` allowed it. Two
+  agents touching one scope is what a claim exists to surface, so the second
+  one was refused, with an error stating that no intent declared the name, at
+  the moment the overlap warning should have fired. Both now accept any key the
+  ledger can show was declared.
 - `foremerge doctor` reported a ledger newer than the running build as healthy.
   It opens the store read-only and never migrates, so it skipped the schema
   check every other command applies. It now reports `database_ok: false` with a

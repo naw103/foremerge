@@ -807,8 +807,15 @@ async fn execute(cli: Cli) -> Result<Completion> {
                             "Install a Foremerge release that supports this ledger's schema (this build is version {}), then restart agent clients so their MCP servers relaunch",
                             env!("CARGO_PKG_VERSION")
                         )),
+                        // "Resolve the ERROR error" reads as nonsense, and an
+                        // untyped failure is exactly where the message, not
+                        // the code, carries the diagnosis.
+                        "ERROR" => Some(
+                            "Fix what database_error reports for this ledger, then run foremerge doctor again"
+                                .to_string(),
+                        ),
                         code => Some(format!(
-                            "Resolve the {code} error in database_error, then run foremerge doctor again"
+                            "Resolve the {code} condition in database_error, then run foremerge doctor again"
                         )),
                     });
             let report = DoctorReport {
@@ -891,32 +898,37 @@ async fn execute(cli: Cli) -> Result<Completion> {
                         cwd.display()
                     )
                 })?;
-                match std::fs::symlink_metadata(&database) {
-                    Ok(_) => {}
-                    // Serve the reason rather than exiting, for the same
-                    // reason an unopenable ledger does: a server that dies
-                    // before the handshake reaches the operator as nothing but
-                    // a closed connection, and the agent it was meant to
-                    // coordinate never hears about it. No store is created.
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                        let reason = format!(
-                            "NOT_INITIALIZED: Foremerge is not initialized in {}; run `foremerge init` before starting its MCP server",
-                            cwd.display()
-                        );
-                        eprintln!("error: {reason}");
-                        return mcp::run_stdio_unavailable(mcp::StoreUnavailable::new(
+                // Serve the reason rather than exiting, for the same reason
+                // an unopenable ledger does: a server that dies before the
+                // handshake reaches the operator as nothing but a closed
+                // connection, and the agent it was meant to coordinate never
+                // hears about it. Every outcome here is a reason to report,
+                // not a reason to die, and none of them creates a store.
+                if let Err(error) = std::fs::symlink_metadata(&database) {
+                    let (code, reason) = if error.kind() == io::ErrorKind::NotFound {
+                        (
                             "NOT_INITIALIZED",
-                            reason,
-                            &database,
-                        ))
-                        .await
-                        .map(|()| completion);
-                    }
-                    Err(error) => {
-                        return Err(error).with_context(|| {
-                            format!("inspect Foremerge database {}", database.display())
-                        });
-                    }
+                            format!(
+                                "NOT_INITIALIZED: Foremerge is not initialized in {}; run `foremerge init` before starting its MCP server",
+                                cwd.display()
+                            ),
+                        )
+                    } else {
+                        // A ledger that exists but cannot even be inspected,
+                        // typically a permission denial on it or its
+                        // directory. `init` cannot fix that, so it must not be
+                        // reported as an uninitialized repository.
+                        (
+                            "ERROR",
+                            format!("inspect Foremerge database {}: {error}", database.display()),
+                        )
+                    };
+                    eprintln!("error: {reason}");
+                    return mcp::run_stdio_unavailable(mcp::StoreUnavailable::new(
+                        code, reason, &database,
+                    ))
+                    .await
+                    .map(|()| completion);
                 }
             }
             match open_service(&database, &cwd) {

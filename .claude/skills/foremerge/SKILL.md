@@ -30,7 +30,9 @@ Read the answer before going further.
   migrated it. Report the error and `next_step` to the user and stop. Do not
   delete, move, or edit the store.
 
-`doctor` opens the store read-only and never creates one, so a false answer
+`doctor` opens the store read-only: it never creates, initializes or migrates
+one, and never writes the ledger itself, though SQLite may make and remove its
+own `-wal` and `-shm` sidecars while the connection is open. So a false answer
 here is trustworthy. A Foremerge tool that answers `Foremerge unavailable: ...`
 is the same situation seen from the MCP server: tell the user the error and its
 remedy, leave the store and the MCP configuration alone, and do not assume other
@@ -65,7 +67,8 @@ CLI equivalent:
 foremerge --json agent register --name payments-agent --model MODEL
 foremerge --json intent publish --agent AGENT_ID --task add-paypal \
   --summary 'Add PayPal support to PaymentService' \
-  --scope symbol:PaymentService --scope contract:payments.provider
+  --scope symbol:PaymentService=extend \
+  --scope contract:payments.provider=extend
 foremerge --json work claim --agent AGENT_ID --intent INTENT_ID \
   --scope symbol:PaymentService
 foremerge --json work start INTENT_ID --agent AGENT_ID
