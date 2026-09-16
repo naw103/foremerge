@@ -4045,7 +4045,11 @@ fn mcp_explains_an_uninitialized_repository_without_creating_a_store() {
         .filter(|line| !line.trim().is_empty())
         .map(|line| serde_json::from_str::<Value>(line).expect("every MCP stdout line is JSON"))
         .collect::<Vec<_>>();
-    assert_eq!(responses.len(), 3, "every request gets an answer: {responses:?}");
+    assert_eq!(
+        responses.len(),
+        3,
+        "every request gets an answer: {responses:?}"
+    );
 
     let instructions = responses[0]["result"]["instructions"]
         .as_str()
@@ -4065,7 +4069,11 @@ fn mcp_explains_an_uninitialized_repository_without_creating_a_store() {
         Value::Array(mcp::tool_catalog()),
         "tools/list must stay the complete catalog"
     );
-    assert_eq!(responses[2]["result"]["isError"], true, "{:?}", responses[2]);
+    assert_eq!(
+        responses[2]["result"]["isError"], true,
+        "{:?}",
+        responses[2]
+    );
     assert_eq!(
         responses[2]["result"]["structuredContent"]["code"], "NOT_INITIALIZED",
         "{:?}",

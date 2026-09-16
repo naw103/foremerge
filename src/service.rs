@@ -731,13 +731,14 @@ impl Foremerge {
             );
         }
         for scope in &request.scopes {
-            if let Some((key, operation)) = restated_operation(scope)
-                && !intent
+            if let Some((key, operation)) = restated_operation(scope) {
+                let declared = intent
                     .scopes
                     .iter()
-                    .any(|declared| declared.scope.precise() == scope.precise())
-            {
-                return Err(restated_operation_error(scope, key, operation, "a claim"));
+                    .any(|declared| declared.scope.precise() == scope.precise());
+                if !declared {
+                    return Err(restated_operation_error(scope, key, operation, "a claim"));
+                }
             }
         }
         // IN_PROGRESS is claimable by the owner so that an agent whose work
@@ -921,16 +922,17 @@ impl Foremerge {
     pub fn query_work(&self, mut query: WorkQuery) -> Result<Vec<WorkItem>> {
         query.scope = query.scope.map(|scope| scope.normalized()).transpose()?;
         let conn = self.store.lock()?;
-        if let Some(scope) = query.scope.as_ref()
-            && let Some((key, operation)) = restated_operation(scope)
-            && !scope_is_declared(&conn, scope)?
-        {
-            return Err(restated_operation_error(
-                scope,
-                key,
-                operation,
-                "a work query",
-            ));
+        if let Some(scope) = query.scope.as_ref() {
+            if let Some((key, operation)) = restated_operation(scope) {
+                if !scope_is_declared(&conn, scope)? {
+                    return Err(restated_operation_error(
+                        scope,
+                        key,
+                        operation,
+                        "a work query",
+                    ));
+                }
+            }
         }
         let limit = query.limit.clamp(1, 500);
         let mut sql = "SELECT i.id FROM intents i WHERE 1 = 1".to_string();
@@ -3470,10 +3472,11 @@ fn scope_is_declared(conn: &Connection, scope: &Scope) -> Result<bool> {
 /// Only a suffix that is exactly an [`Operation`] qualifies. Any other `=` is
 /// ordinary key text, as in `api:GET /search?q=x` or `config:FEATURE=on`.
 fn restated_operation(scope: &Scope) -> Option<(&str, Operation)> {
-    scope
-        .key
-        .rsplit_once('=')
-        .and_then(|(key, suffix)| Operation::parse(suffix).ok().map(|operation| (key, operation)))
+    scope.key.rsplit_once('=').and_then(|(key, suffix)| {
+        Operation::parse(suffix)
+            .ok()
+            .map(|operation| (key, operation))
+    })
 }
 
 /// Refuse a scope whose key restates an operation.
@@ -3483,7 +3486,12 @@ fn restated_operation(scope: &Scope) -> Option<(&str, Operation)> {
 /// without any parsing. It is only reached for a key no intent declared: a key
 /// that genuinely ends in `=replace` is claimable, because the ledger proves it
 /// is a name rather than a mistake.
-fn restated_operation_error(scope: &Scope, key: &str, operation: Operation, taken_by: &str) -> anyhow::Error {
+fn restated_operation_error(
+    scope: &Scope,
+    key: &str,
+    operation: Operation,
+    taken_by: &str,
+) -> anyhow::Error {
     let meant = key.trim();
     // With nothing left of the key, there is no scope to suggest, and
     // suggesting `symbol:` would be worse than suggesting nothing.
@@ -4123,7 +4131,10 @@ mod tests {
                 ..Default::default()
             })
             .expect_err("an undeclared restated operation is still refused");
-        assert!(format!("{error:#}").starts_with("INVALID_INPUT:"), "{error:#}");
+        assert!(
+            format!("{error:#}").starts_with("INVALID_INPUT:"),
+            "{error:#}"
+        );
     }
 
     /// `intent publish` and `conflicts check` take `KIND:KEY=OPERATION`, and
