@@ -9,6 +9,8 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-16
+
 ### Added
 
 - The agent skill now ships at `.agents/skills/foremerge/SKILL.md` as well, the
@@ -656,7 +658,8 @@ schema 4 store rather than migrate it backwards.
 - Apache-2.0 licensing, contribution and security policies, CI, release checks,
   limitations, roadmap, and a reproducible benchmark specification.
 
-[Unreleased]: https://github.com/naw103/foremerge/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/naw103/foremerge/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/naw103/foremerge/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/naw103/foremerge/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/naw103/foremerge/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/naw103/foremerge/compare/v0.2.0...v0.3.0
