@@ -1,0 +1,27 @@
+{
+  "name": "foremerge",
+  "owner": {
+    "name": "Nick Woodhead",
+    "url": "https://github.com/naw103"
+  },
+  "metadata": {
+    "description": "The Foremerge coordination plugin for Claude Code.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "foremerge",
+      "source": "./plugins/foremerge",
+      "description": "Agents publish intent and claim semantic scopes before writing code, so two plans that cannot both be true collide in a queryable store instead of in your merge. Local-first, deterministic, Apache-2.0. Requires the foremerge binary on PATH and a repository that has run foremerge init.",
+      "category": "workflow",
+      "keywords": [
+        "git",
+        "coordination",
+        "parallel-agents",
+        "worktrees",
+        "merge-conflicts",
+        "mcp"
+      ]
+    }
+  ]
+}
