@@ -29,7 +29,16 @@ changes when they are called out here with a migration note.
 
   Implementing the `2026-07-28` wire contract, rather than declining it
   honestly, is tracked in
-  [#21](https://github.com/naw103/foremerge/issues/21).
+  [#23](https://github.com/naw103/foremerge/issues/23).
+- JSON-RPC error responses from the MCP server carried a top-level `_meta`
+  member beside `error`, which JSON-RPC 2.0 does not allow and MCP never puts
+  there. Strict clients reject the envelope. With the official TypeScript
+  client negotiating automatically, that made a refused `server/discover` probe
+  look unanswered, so the client waited out its whole probe timeout, sixty
+  seconds by default, before falling back and connecting. Error responses now
+  carry exactly `jsonrpc`, `id` and `error`, and the same client connects in
+  about a third of a second. Present since 0.4.0 on every error response; it
+  became visible when the probe started being refused.
 
 ## [0.4.1] - 2026-09-16
 
