@@ -79,6 +79,12 @@ foremerge --json doctor --client claude
 `git_repository: false` means this is not a Git repository. `database_ok: false`
 means the repository has never run `foremerge init`.
 
+Claude Code starts the plugin's MCP server as soon as the plugin is enabled, so
+in a repository that has not run `foremerge init` the server exits immediately
+and `/mcp` lists it as failed. Its error names `NOT_INITIALIZED`. That is the
+opt-in working as intended, not a broken install: run `foremerge init` in the
+repository and restart the server.
+
 ## Links
 
 - Website: https://foremerge.com

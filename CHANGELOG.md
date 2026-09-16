@@ -39,10 +39,14 @@ changes when they are called out here with a migration note.
 
 ### Changed
 
-- The repository-resolving MCP server now refuses to create coordination state
-  before an operator runs `foremerge init`. This preserves explicit opt-in when
-  an installed plugin starts its MCP server automatically. Advanced callers
-  that provide an explicit `--database` retain the existing standalone mode.
+- **Breaking.** The repository-resolving MCP server now refuses to create
+  coordination state before an operator runs `foremerge init`, exiting with
+  `NOT_INITIALIZED` instead. This preserves explicit opt-in when an installed
+  plugin starts its MCP server automatically. Advanced callers that provide an
+  explicit `--database` retain the existing standalone mode. *Migration:* an
+  MCP entry that previously created the store on first launch now exits until
+  `foremerge init` has been run once in that repository; `foremerge --json
+  doctor` reports the same thing as `database_ok: false`.
 - The README carries a `### Links` section naming the website, the crate, and
   the MCP registry name. The registry's ownership check reads the rendered
   crates.io README, so the name has to be visible text rather than a comment.

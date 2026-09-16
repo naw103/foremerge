@@ -164,8 +164,11 @@ today are Claude Code, Codex and Cursor. It cannot see a hand-written entry for
 a client it does not know about, so a clean `doctor` is not evidence that a
 Cline entry works. Verify that one through the client itself: ask it to list
 its MCP tools and confirm the Foremerge tools are present. If the client
-reports the server exited, read its MCP error output before changing anything,
-because the `INVALID_INPUT` message above names the cause exactly.
+reports the server exited, read its MCP error output before changing anything.
+The two startup refusals both name their own cause: the `INVALID_INPUT` message
+above means the client spawned the server outside a repository, and
+`NOT_INITIALIZED` means the repository itself has never run `foremerge init`.
+Neither is fixed by editing the entry again.
 
 The same check run from a shell tells you whether the entry's arguments are
 right, without involving the client at all:
@@ -178,6 +181,11 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol
 A working entry answers with a `result` naming `foremerge`. Running it from `/`
 is the point: it reproduces the working directory a client like Cline would
 give the server.
+
+A `NOT_INITIALIZED` reply instead means the arguments are already right and step
+2 has not been done in that repository. The server refuses to create the store
+on its own, so this is where you stop and ask the user whether to run
+`foremerge init`, rather than running it to make the check pass.
 
 ## What not to do
 
