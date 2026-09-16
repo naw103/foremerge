@@ -842,7 +842,9 @@ async fn execute(cli: Cli) -> Result<Completion> {
             // runs. Outside a repository that resolution has no answer, and
             // continuing would create a stray store beside the spawn directory
             // rather than coordinating anything, so fail where the operator can
-            // still read the reason.
+            // still read the reason. Plugin hosts may start MCP automatically,
+            // so the default repository store must also exist already: starting
+            // a client is not permission to opt a repository into coordination.
             if cli.database.is_none() {
                 git::discover(&cwd).with_context(|| {
                     format!(
@@ -850,6 +852,33 @@ async fn execute(cli: Cli) -> Result<Completion> {
                         cwd.display()
                     )
                 })?;
+                match std::fs::symlink_metadata(&database) {
+                    Ok(_) => {}
+                    // Serve the reason rather than exiting, for the same
+                    // reason an unopenable ledger does: a server that dies
+                    // before the handshake reaches the operator as nothing but
+                    // a closed connection, and the agent it was meant to
+                    // coordinate never hears about it. No store is created.
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        let reason = format!(
+                            "NOT_INITIALIZED: Foremerge is not initialized in {}; run `foremerge init` before starting its MCP server",
+                            cwd.display()
+                        );
+                        eprintln!("error: {reason}");
+                        return mcp::run_stdio_unavailable(mcp::StoreUnavailable::new(
+                            "NOT_INITIALIZED",
+                            reason,
+                            &database,
+                        ))
+                        .await
+                        .map(|()| completion);
+                    }
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("inspect Foremerge database {}", database.display())
+                        });
+                    }
+                }
             }
             match open_service(&database, &cwd) {
                 Ok(service) => mcp::run_stdio(service).await?,

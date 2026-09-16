@@ -105,7 +105,14 @@ const UNAVAILABLE_GUIDANCE: &str = "Tell the user and leave the fix to them: do 
 /// What the operator does about a store the server could not open.
 fn remedy(code: &str) -> String {
     const RELAUNCH: &str = "then restart the client session so it relaunches `foremerge mcp`";
-    if code == "UNSUPPORTED_SCHEMA" {
+    if code == "NOT_INITIALIZED" {
+        // Initializing a repository is the operator's decision, so the server
+        // says what to run rather than running it. A client starting is not
+        // permission to opt a repository into coordination.
+        format!(
+            "Run `foremerge init` in this repository if you want its agents coordinated, {RELAUNCH}. Until then Foremerge is inactive here, which is a valid state: nothing else is wrong."
+        )
+    } else if code == "UNSUPPORTED_SCHEMA" {
         // Name the binary: the client may launch a different one than the
         // `foremerge` on the operator's PATH, and the version alone cannot
         // tell a development build from the release it will become.

@@ -3988,6 +3988,100 @@ fn mcp_explains_a_ledger_newer_than_this_build_instead_of_exiting() {
 }
 
 #[test]
+fn mcp_explains_an_uninitialized_repository_without_creating_a_store() {
+    // A plugin host may start the MCP server as soon as the plugin is enabled.
+    // That launch is not permission to opt a repository into coordination, so
+    // the server creates nothing. Exiting instead would reach the operator as
+    // a closed connection, and the agent would never learn that Foremerge is
+    // inactive here, which is exactly the silence this release is fixing.
+    let repo = create_repo();
+    let runtime = repo.root.join(".git/foremerge");
+    assert!(!runtime.exists());
+
+    let mut child = Command::new(foremerge_bin())
+        .arg("--cwd")
+        .arg(&repo.root)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn MCP server");
+    let mut stdin = child.stdin.take().expect("MCP stdin");
+    let requests = [
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2026-07-28",
+                "capabilities": {},
+                "clientInfo": { "name": "foremerge-e2e", "version": "1" }
+            }
+        }),
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": { "name": "status", "arguments": {} }
+        }),
+    ];
+    for request in requests {
+        writeln!(stdin, "{request}").expect("write MCP request");
+    }
+    drop(stdin);
+
+    let output = child.wait_with_output().expect("wait for MCP server");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "MCP process failed\nstdout: {}\nstderr: {stderr}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let responses = String::from_utf8(output.stdout)
+        .expect("MCP output is UTF-8")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).expect("every MCP stdout line is JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(responses.len(), 3, "every request gets an answer: {responses:?}");
+
+    let instructions = responses[0]["result"]["instructions"]
+        .as_str()
+        .expect("initialize instructions");
+    assert!(
+        instructions.starts_with("Foremerge unavailable: NOT_INITIALIZED:"),
+        "{instructions}"
+    );
+    // The remedy is addressed to the operator, and `foremerge init` is theirs
+    // to run, so the agent has to be able to name it.
+    assert!(
+        instructions.contains("foremerge init"),
+        "the instructions must name the operator's action: {instructions}"
+    );
+    assert_eq!(
+        responses[1]["result"]["tools"],
+        Value::Array(mcp::tool_catalog()),
+        "tools/list must stay the complete catalog"
+    );
+    assert_eq!(responses[2]["result"]["isError"], true, "{:?}", responses[2]);
+    assert_eq!(
+        responses[2]["result"]["structuredContent"]["code"], "NOT_INITIALIZED",
+        "{:?}",
+        responses[2]
+    );
+    assert!(
+        stderr.contains("error: NOT_INITIALIZED:"),
+        "the reason must still reach the client's server log: {stderr}"
+    );
+    assert!(
+        !runtime.exists(),
+        "starting MCP must not create coordination state before `foremerge init`"
+    );
+}
+
+#[test]
 fn doctor_does_not_offer_init_for_a_ledger_that_exists_but_cannot_be_read() {
     // `init` only fixes a missing store. Offered for a damaged one, it is
     // refused with the very error doctor just found.

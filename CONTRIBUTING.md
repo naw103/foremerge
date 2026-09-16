@@ -54,8 +54,9 @@ offer to enable the Foremerge MCP server and skill; clients prompt before
 enabling project-level configuration, so nothing runs without your consent.
 
 `.codex/skills/foremerge/SKILL.md` is the canonical copy. `src/integrations.rs`
-embeds it at compile time and `foremerge setup` installs it for every client,
-so edit that file and copy it byte-for-byte to the four twins:
+embeds it at compile time and `foremerge setup` installs it for each native
+client it supports, so edit that file and copy it byte-for-byte to the four
+twins:
 
 | Copy | Why it exists |
 | --- | --- |
@@ -73,13 +74,14 @@ behind the crate version. Bump
 Expect the skill to appear more than once in some clients while you work in
 this repository. Cursor reads `.cursor/skills/` and `.agents/skills/` and also
 scans `.claude/skills/` and `.codex/skills/` for compatibility, so all four
-copies are discoverable at once and none of these clients deduplicate by skill
-name. That is cosmetic here, because the copies are byte-identical and the
-parity test keeps them that way, but it does spend context. The copies are kept
-rather than collapsed because each one is some client's own documented
-convention, and a repository that dogfoods its integration should carry the
-layout its users will have. If a client ever resolves two copies to *different*
-instructions, that is the parity test failing, not a client bug.
+copies are discoverable at once. Cursor currently surfaces those copies
+separately rather than deduplicating them by skill name. The parity test keeps
+their instructions byte-identical, but the duplicate discovery can still spend
+context and clutter skill selection. The copies are kept rather than collapsed
+because each one is some client's own documented convention, and a repository
+that dogfoods its integration should carry the layout its users will have. If a
+client ever resolves two copies to *different* instructions, that is the parity
+test failing, not a client bug.
 
 ### The plugin is catalogued separately from the plugin directory
 
