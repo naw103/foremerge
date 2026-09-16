@@ -3826,6 +3826,233 @@ fn mcp_outside_a_repository_fails_instead_of_creating_a_stray_store() {
     );
 }
 
+/// Stamp an initialized ledger with the schema after the one this build
+/// writes, which is what a newer build leaves behind. Returns the supported
+/// and the stamped version.
+fn stamp_newer_schema(database: &Path) -> (i64, i64) {
+    let supported: i64 = schema_stamp(database)
+        .parse()
+        .expect("schema stamp is an integer");
+    let newer = supported + 1;
+    Connection::open(database)
+        .expect("open ledger")
+        .execute(
+            "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+            [newer.to_string()],
+        )
+        .expect("stamp a newer schema");
+    (supported, newer)
+}
+
+fn schema_stamp(database: &Path) -> String {
+    Connection::open(database)
+        .expect("open ledger")
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read schema stamp")
+}
+
+#[test]
+fn mcp_explains_a_ledger_newer_than_this_build_instead_of_exiting() {
+    // A server that exits before the handshake is reported by clients only as
+    // a closed connection. The tools never appear and agents carry on
+    // uncoordinated without saying so, so the reason has to reach the agent
+    // through the protocol itself.
+    let repo = create_repo();
+    let database = database_from_doctor(&repo.root);
+    let (supported, newer) = stamp_newer_schema(&database);
+    let ledger_bytes = fs::read(&database).expect("read ledger");
+    let expected = format!(
+        "UNSUPPORTED_SCHEMA: database schema {newer} is newer than this build supports ({supported})"
+    );
+
+    let mut child = Command::new(foremerge_bin())
+        .arg("--cwd")
+        .arg(&repo.root)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn MCP server");
+    let mut stdin = child.stdin.take().expect("MCP stdin");
+    let requests = [
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2026-07-28",
+                "capabilities": {},
+                "clientInfo": { "name": "foremerge-e2e", "version": "1" }
+            }
+        }),
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized", "params": {} }),
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": { "name": "status", "arguments": {} }
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": { "name": "register_agent", "arguments": { "name": "blocked-agent" } }
+        }),
+    ];
+    for request in requests {
+        writeln!(stdin, "{request}").expect("write MCP request");
+    }
+    drop(stdin);
+
+    let output = child.wait_with_output().expect("wait for MCP server");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "MCP process failed\nstdout: {}\nstderr: {stderr}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let responses = String::from_utf8(output.stdout)
+        .expect("MCP output is UTF-8")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).expect("every MCP stdout line is JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        responses.len(),
+        4,
+        "every request gets an answer: {responses:?}"
+    );
+
+    let initialized = &responses[0];
+    assert_eq!(initialized["id"], 1);
+    assert_eq!(initialized["result"]["protocolVersion"], "2026-07-28");
+    assert_eq!(initialized["result"]["serverInfo"]["name"], "foremerge");
+    let instructions = initialized["result"]["instructions"]
+        .as_str()
+        .expect("initialize instructions");
+    assert!(
+        instructions.starts_with(&format!("Foremerge unavailable: {expected}")),
+        "{instructions}"
+    );
+    assert!(
+        instructions.contains(&database.display().to_string()),
+        "the instructions must name the ledger: {instructions}"
+    );
+
+    assert_eq!(responses[1]["id"], 2);
+    assert_eq!(
+        responses[1]["result"]["tools"],
+        Value::Array(mcp::tool_catalog()),
+        "tools/list must stay the complete catalog"
+    );
+
+    for (response, id) in responses[2..].iter().zip([3, 4]) {
+        assert_eq!(response["id"], id);
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        let error = &response["result"]["structuredContent"];
+        assert_eq!(error["code"], "UNSUPPORTED_SCHEMA", "{response}");
+        let message = error["message"].as_str().expect("error message");
+        assert!(message.starts_with(&expected), "{response}");
+        assert_eq!(error["error"], format!("Foremerge unavailable: {message}"));
+        // Not every client shows the agent the instructions, so the result
+        // itself has to say not to take the fix into its own hands.
+        assert!(
+            error["guidance"]
+                .as_str()
+                .is_some_and(|guidance| guidance.contains("do not change the MCP client")),
+            "{response}"
+        );
+        // The text content is what the agent actually reads.
+        assert!(
+            response["result"]["content"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains(&format!("Foremerge unavailable: {expected}"))),
+            "{response}"
+        );
+    }
+
+    assert!(
+        stderr.contains(&format!("error: {expected}")),
+        "the error must still reach the client's server log: {stderr}"
+    );
+    assert!(
+        fs::read(&database).expect("read ledger") == ledger_bytes,
+        "a server that cannot open the ledger must leave it byte-for-byte alone"
+    );
+}
+
+#[test]
+fn doctor_does_not_offer_init_for_a_ledger_that_exists_but_cannot_be_read() {
+    // `init` only fixes a missing store. Offered for a damaged one, it is
+    // refused with the very error doctor just found.
+    let repo = create_repo();
+    let database = database_from_doctor(&repo.root);
+    Connection::open(&database)
+        .expect("open ledger")
+        .execute(
+            "UPDATE meta SET value = 'not-a-number' WHERE key = 'schema_version'",
+            [],
+        )
+        .expect("damage the schema stamp");
+
+    let doctor = cli_success(&repo.root, None, ["doctor"]);
+    let data = &doctor["data"];
+    assert_eq!(data["database_ok"], false, "{doctor}");
+    assert_eq!(data["database_error"]["code"], "CORRUPT_STORE", "{doctor}");
+    let next_step = data["next_step"].as_str().expect("next step");
+    assert!(next_step.contains("CORRUPT_STORE"), "{next_step}");
+    let refused = cli_failure(&repo.root, None, ["init"]);
+    assert_eq!(refused["error"]["code"], "CORRUPT_STORE", "{refused}");
+}
+
+#[test]
+fn doctor_reports_a_ledger_newer_than_this_build_as_unusable() {
+    // Doctor opens the store read-only and never migrates, so it skipped the
+    // schema check that makes every other command refuse this ledger, and
+    // called it healthy.
+    let repo = create_repo();
+    let database = database_from_doctor(&repo.root);
+    let (supported, newer) = stamp_newer_schema(&database);
+
+    let doctor = cli_success(&repo.root, None, ["doctor"]);
+    let data = &doctor["data"];
+    assert_eq!(data["database_ok"], false, "{doctor}");
+    assert_eq!(data["ready"], false, "{doctor}");
+    assert_eq!(data["acceptance_ready"], false, "{doctor}");
+    assert_eq!(
+        data["database_error"]["code"], "UNSUPPORTED_SCHEMA",
+        "{doctor}"
+    );
+    assert!(
+        data["database_error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with(&format!(
+                "UNSUPPORTED_SCHEMA: database schema {newer} is newer than this build supports ({supported})"
+            ))),
+        "{doctor}"
+    );
+    let next_step = data["next_step"].as_str().expect("next step");
+    assert!(
+        next_step.contains("supports this ledger's schema"),
+        "init would be refused with the same error, so it cannot be the next step: {next_step}"
+    );
+    assert_eq!(
+        schema_stamp(&database),
+        newer.to_string(),
+        "doctor must not touch the ledger"
+    );
+
+    // What doctor now reports is what every other command meets.
+    let refused = cli_failure(&repo.root, None, ["status"]);
+    assert_eq!(refused["error"]["code"], "UNSUPPORTED_SCHEMA", "{refused}");
+}
+
 #[cfg(unix)]
 #[test]
 fn setup_codex_in_a_second_repository_is_a_no_op() {

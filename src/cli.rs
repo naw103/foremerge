@@ -701,14 +701,29 @@ async fn execute(cli: Cli) -> Result<Completion> {
         Commands::Doctor { client } => {
             // Diagnostics are observational: do not create the runtime
             // directory/database or run migrations merely by inspecting it.
-            let (database_ok, event_chain_ok, events_verified) =
-                match Store::open_existing_read_only(&database) {
-                    Ok(store) => match store.audit_event_chain(1000) {
-                        Ok(audit) => (true, Some(audit.valid), audit.events_verified),
-                        Err(_) => (true, Some(false), 0),
-                    },
-                    Err(_) => (false, None, 0),
-                };
+            // A read-only open skips migration, and with it the schema check
+            // that makes every other command, and the MCP server, refuse a
+            // ledger written by a newer build. Doctor called that ledger
+            // healthy while nothing else could open it.
+            let (diagnostic_store, database_error) = match Store::open_existing_read_only(&database)
+                .and_then(|store| store.ensure_supported_schema().map(|()| store))
+            {
+                Ok(store) => (Some(store), None),
+                Err(error) => (
+                    None,
+                    Some(DoctorError {
+                        code: error_code(&error),
+                        message: format!("{error:#}"),
+                    }),
+                ),
+            };
+            let (database_ok, event_chain_ok, events_verified) = match diagnostic_store.as_ref() {
+                Some(store) => match store.audit_event_chain(1000) {
+                    Ok(audit) => (true, Some(audit.valid), audit.events_verified),
+                    Err(_) => (true, Some(false), 0),
+                },
+                None => (false, None, 0),
+            };
             let repo = git::discover(&cwd).ok();
             let token_path = git::runtime_dir(&cwd).join("token");
             let client_diagnostics = client.map(|value| {
@@ -742,10 +757,26 @@ async fn execute(cli: Cli) -> Result<Completion> {
                 && checks_diagnosis
                     .as_ref()
                     .is_some_and(|diagnosis| diagnosis.acceptance_possible);
+            // `init` only fixes a store that does not exist yet. For any other
+            // failure it would be refused, usually with the same error.
+            let database_next_step =
+                database_error
+                    .as_ref()
+                    .and_then(|error| match error.code.as_str() {
+                        "NOT_INITIALIZED" => None,
+                        "UNSUPPORTED_SCHEMA" => Some(format!(
+                            "Install a Foremerge release that supports this ledger's schema (this build is version {}), then restart agent clients so their MCP servers relaunch",
+                            env!("CARGO_PKG_VERSION")
+                        )),
+                        code => Some(format!(
+                            "Resolve the {code} error in database_error, then run foremerge doctor again"
+                        )),
+                    });
             let report = DoctorReport {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 database: database.to_string_lossy().into_owned(),
                 database_ok,
+                database_error,
                 event_chain_ok,
                 events_verified,
                 git_available: git::available(),
@@ -762,7 +793,9 @@ async fn execute(cli: Cli) -> Result<Completion> {
                 mcp_transport: "stdio (newline-delimited JSON-RPC; MCP 2026-07-28 with 2025-11-25 initialize compatibility)".to_string(),
                 ready: infrastructure_ready,
                 acceptance_ready,
-                next_step: if !database_ok {
+                next_step: if let Some(next_step) = database_next_step {
+                    next_step
+                } else if !database_ok {
                     "foremerge init".to_string()
                 } else if let Some(next_step) = next_client_step {
                     next_step
@@ -818,8 +851,25 @@ async fn execute(cli: Cli) -> Result<Completion> {
                     )
                 })?;
             }
-            let service = open_service(&database, &cwd)?;
-            mcp::run_stdio(service).await?;
+            match open_service(&database, &cwd) {
+                Ok(service) => mcp::run_stdio(service).await?,
+                // Exiting here is reported by clients only as a closed
+                // connection, and their agents carry on uncoordinated without
+                // saying so. Stay up and serve the reason instead. The error
+                // still goes to stderr, which clients keep as the server log.
+                Err(error) => {
+                    eprintln!("error: {error:#}");
+                    eprintln!(
+                        "foremerge mcp: serving without the coordination store; initialize reports this error and every tool call returns it"
+                    );
+                    mcp::run_stdio_unavailable(mcp::StoreUnavailable::new(
+                        error_code(&error),
+                        format!("{error:#}"),
+                        &database,
+                    ))
+                    .await?;
+                }
+            }
         }
         Commands::Checks(command) => {
             // The trusted check registry is repository-scoped: resolve it

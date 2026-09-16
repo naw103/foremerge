@@ -412,6 +412,13 @@ Successful tool calls return both text content and `structuredContent`. Domain
 failures are returned as a tool result with `isError: true`; malformed JSON-RPC,
 unknown methods, and invalid tool names use JSON-RPC errors.
 
+If the server cannot open its coordination store, it still answers
+`initialize`, `ping`, `server/discover`, and `tools/list`. The `initialize`
+instructions start with `Foremerge unavailable:` and give the reason, and every
+tool call returns `isError: true` with `code`, `message`, `guidance` for the
+agent, and `remedy` for the operator in `structuredContent`. See
+[Tools answer "Foremerge unavailable"](#tools-answer-foremerge-unavailable).
+
 Do not use pretty-printed multi-line JSON on stdin because newline framing is
 significant. Do not write banners or shell prompts into the process.
 
@@ -432,7 +439,28 @@ clients, because that erases ownership and model provenance.
 - Run `foremerge mcp --help` in a terminal.
 - Confirm the configured binary path is absolute or on the client's `PATH`.
 - Ensure global flags such as `--database` appear before the `mcp` subcommand.
-- Check the MCP client's stderr log for database or Git discovery errors.
+- Check the MCP client's stderr log for Git discovery errors. Outside a Git
+  repository the server exits rather than coordinate against a stray store.
+
+### Tools answer "Foremerge unavailable"
+
+The server started but could not open the coordination ledger. It stays up so
+the reason reaches the agent: the `initialize` instructions and every tool
+result carry the error code, the message, and a remedy, and the error is also
+written to the server's stderr log. The instructions ask the agent to tell you
+and to leave the ledger and the client configuration alone. Until it is fixed,
+the session is not coordinated with other agents.
+
+- `UNSUPPORTED_SCHEMA` means a newer Foremerge build has already migrated the
+  ledger. Upgrade the binary the client launches to a release that supports
+  that schema, then restart the client session so it relaunches
+  `foremerge mcp`. The remedy names that binary, which can differ from the
+  `foremerge` on your `PATH`. If no release supports the schema yet, a
+  development build migrated the ledger.
+- For any other code, run `foremerge doctor` in the repository. Its
+  `database_error` field reports why the store cannot be used. A transient
+  cause, such as another process holding the database lock, clears when the
+  client session restarts.
 
 ### Agents cannot see each other's work
 

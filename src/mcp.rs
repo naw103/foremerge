@@ -3,6 +3,7 @@ use crate::{Foremerge, checks};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io::IsTerminal;
+use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const CURRENT_PROTOCOL: &str = "2026-07-28";
@@ -30,7 +31,116 @@ To read coordination state yourself, use the ordinary CLI:
 Press Ctrl-C to exit.
 ";
 
+/// What a server with a working store tells the agent during initialize.
+const INSTRUCTIONS: &str = "Publish intent and the scopes you will change, declaring what you do to each, before editing. publish_intent returns related_work: assess each entry and call record_assessment before writing code. then claim and start work. Claims are advisory. Resolve durable HIGH conflicts, publish a clean ChangeSet, run a trusted named verification check, and accept before ordinary Git integration. Record the landing commit afterward.";
+
+/// Why the MCP server is running without its coordination store.
+///
+/// Exiting when the store cannot be opened is reported by clients only as a
+/// closed connection: the tools never appear, nothing reaches the agent, and
+/// the agent carries on uncoordinated without saying so. A ledger migrated by
+/// a newer build went unnoticed that way for days. So the server stays up,
+/// completes the handshake, and puts this in front of the agent instead, in
+/// the initialize instructions and in the result of every tool call.
+#[derive(Debug, Clone)]
+pub struct StoreUnavailable {
+    code: String,
+    message: String,
+    database: String,
+    remedy: String,
+}
+
+impl StoreUnavailable {
+    /// `code` is the open error's typed prefix, such as `UNSUPPORTED_SCHEMA`,
+    /// and `message` its full text.
+    pub fn new(code: impl Into<String>, message: impl Into<String>, database: &Path) -> Self {
+        let code = code.into();
+        let remedy = remedy(&code);
+        Self {
+            code,
+            message: message.into(),
+            database: database.display().to_string(),
+            remedy,
+        }
+    }
+
+    fn instructions(&self) -> String {
+        format!(
+            "Foremerge unavailable: {}. The server is running, but it could not open the coordination ledger at {}, so every Foremerge tool returns this error and this session is not coordinated with other agents. {UNAVAILABLE_GUIDANCE} For the user: {}",
+            self.message.trim_end().trim_end_matches('.'),
+            self.database,
+            self.remedy
+        )
+    }
+
+    /// Answer a tool call with the reason instead of a result. An unknown tool
+    /// is still a protocol error, exactly as when the store is available.
+    fn tool_call(&self, params: &Value) -> Result<Value, (i64, String)> {
+        let name = params
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| (-32602, "tools/call requires a name".to_string()))?;
+        if !tool_catalog().iter().any(|tool| tool["name"] == name) {
+            return Err((-32602, format!("unknown tool: {name}")));
+        }
+        Ok(tool_result(
+            json!({
+                "error": format!("Foremerge unavailable: {}", self.message),
+                "code": self.code,
+                "message": self.message,
+                "database": self.database,
+                "guidance": UNAVAILABLE_GUIDANCE,
+                "remedy": self.remedy,
+            }),
+            true,
+        ))
+    }
+}
+
+/// What an agent does on meeting an unavailable store. Tool results carry it
+/// as well as the instructions, because not every client shows the agent the
+/// instructions, and the remedy is addressed to whoever configures the client.
+const UNAVAILABLE_GUIDANCE: &str = "Tell the user and leave the fix to them: do not delete, move, or edit the ledger, and do not change the MCP client configuration.";
+
+/// What the operator does about a store the server could not open.
+fn remedy(code: &str) -> String {
+    const RELAUNCH: &str = "then restart the client session so it relaunches `foremerge mcp`";
+    if code == "UNSUPPORTED_SCHEMA" {
+        // Name the binary: the client may launch a different one than the
+        // `foremerge` on the operator's PATH, and the version alone cannot
+        // tell a development build from the release it will become.
+        let binary = std::env::current_exe().map_or_else(
+            |_| "foremerge".to_string(),
+            |path| path.display().to_string(),
+        );
+        format!(
+            "This server is {binary} (version {}). Upgrade the binary this client launches to a Foremerge release that supports the ledger's schema, {RELAUNCH}. If no release supports that schema yet, a development build has migrated this ledger.",
+            env!("CARGO_PKG_VERSION")
+        )
+    } else {
+        format!(
+            "Run `foremerge doctor` in the repository to diagnose the ledger and fix the cause, {RELAUNCH}. If the cause was transient, such as another process holding the database lock, the restart alone is enough."
+        )
+    }
+}
+
+/// The state the server answers from.
+#[derive(Clone, Copy)]
+enum Backend<'a> {
+    Ready(&'a Foremerge),
+    Unavailable(&'a StoreUnavailable),
+}
+
 pub async fn run_stdio(service: Foremerge) -> anyhow::Result<()> {
+    serve_stdio(Backend::Ready(&service)).await
+}
+
+/// Serve MCP without a store, so the client can still tell the agent why.
+pub async fn run_stdio_unavailable(unavailable: StoreUnavailable) -> anyhow::Result<()> {
+    serve_stdio(Backend::Unavailable(&unavailable)).await
+}
+
+async fn serve_stdio(backend: Backend<'_>) -> anyhow::Result<()> {
     let stdin = tokio::io::stdin();
     // A terminal on stdin means a person is here, not a client. Real clients
     // get byte-identical behaviour because their stdin is a pipe.
@@ -45,7 +155,7 @@ pub async fn run_stdio(service: Foremerge) -> anyhow::Result<()> {
             continue;
         }
         let response = match serde_json::from_str::<Value>(&line) {
-            Ok(message) => handle_message(&service, message).await,
+            Ok(message) => respond(backend, message).await,
             Err(error) => {
                 if interactive {
                     eprintln!("\n{}", interactive_parse_hint(line.trim()));
@@ -134,6 +244,10 @@ fn interactive_parse_hint(input: &str) -> String {
 }
 
 pub async fn handle_message(service: &Foremerge, message: Value) -> Option<Value> {
+    respond(Backend::Ready(service), message).await
+}
+
+async fn respond(backend: Backend<'_>, message: Value) -> Option<Value> {
     let id = message.get("id").cloned()?;
     let method = message.get("method").and_then(Value::as_str).unwrap_or("");
     let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
@@ -143,11 +257,15 @@ pub async fn handle_message(service: &Foremerge, message: Value) -> Option<Value
                 .get("protocolVersion")
                 .and_then(Value::as_str)
                 .unwrap_or(LEGACY_PROTOCOL);
+            let instructions = match backend {
+                Backend::Ready(_) => INSTRUCTIONS.to_string(),
+                Backend::Unavailable(unavailable) => unavailable.instructions(),
+            };
             Ok(json!({
                 "protocolVersion": if requested == CURRENT_PROTOCOL { CURRENT_PROTOCOL } else { LEGACY_PROTOCOL },
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": server_info(),
-                "instructions": "Publish intent and the scopes you will change, declaring what you do to each, before editing. publish_intent returns related_work: assess each entry and call record_assessment before writing code. then claim and start work. Claims are advisory. Resolve durable HIGH conflicts, publish a clean ChangeSet, run a trusted named verification check, and accept before ordinary Git integration. Record the landing commit afterward."
+                "instructions": instructions
             }))
         }
         "server/discover" => Ok(json!({
@@ -156,7 +274,10 @@ pub async fn handle_message(service: &Foremerge, message: Value) -> Option<Value
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tool_catalog() })),
-        "tools/call" => call_tool(service, params).await,
+        "tools/call" => match backend {
+            Backend::Ready(service) => call_tool(service, params).await,
+            Backend::Unavailable(unavailable) => unavailable.tool_call(&params),
+        },
         _ => {
             return Some(jsonrpc_error(
                 id,
@@ -1126,5 +1247,154 @@ mod tests {
                 .unwrap()
                 .starts_with("agt_")
         );
+    }
+
+    const LEDGER: &str = "/repo/.git/foremerge/state.sqlite3";
+
+    fn unsupported_schema() -> StoreUnavailable {
+        StoreUnavailable::new(
+            "UNSUPPORTED_SCHEMA",
+            "UNSUPPORTED_SCHEMA: database schema 10 is newer than this build supports (9); upgrade Foremerge to open it",
+            Path::new(LEDGER),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_working_store_keeps_the_lifecycle_instructions() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let initialized = handle_message(
+            &service,
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(initialized["result"]["instructions"], INSTRUCTIONS);
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_store_still_completes_the_handshake_and_lists_every_tool() {
+        let unavailable = unsupported_schema();
+        let backend = Backend::Unavailable(&unavailable);
+        let initialized = respond(
+            backend,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": { "protocolVersion": CURRENT_PROTOCOL, "capabilities": {} }
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(initialized["result"]["protocolVersion"], CURRENT_PROTOCOL);
+        assert_eq!(initialized["result"]["serverInfo"]["name"], "foremerge");
+        let instructions = initialized["result"]["instructions"].as_str().unwrap();
+        assert!(
+            instructions.starts_with(
+                "Foremerge unavailable: UNSUPPORTED_SCHEMA: database schema 10 is newer than this build supports (9); upgrade Foremerge to open it. "
+            ),
+            "{instructions}"
+        );
+        assert!(instructions.contains(LEDGER), "{instructions}");
+        assert!(
+            instructions.contains("restart the client session"),
+            "{instructions}"
+        );
+        assert!(
+            instructions.contains(UNAVAILABLE_GUIDANCE),
+            "{instructions}"
+        );
+        assert!(!instructions.contains('\u{2014}'), "{instructions}");
+
+        let ping = respond(
+            backend,
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "ping" }),
+        )
+        .await
+        .unwrap();
+        assert!(ping.get("error").is_none(), "{ping}");
+
+        let listed = respond(
+            backend,
+            json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {} }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(listed["result"]["tools"], Value::Array(tool_catalog()));
+    }
+
+    #[tokio::test]
+    async fn every_tool_answers_with_the_reason_while_the_store_is_unavailable() {
+        let unavailable = unsupported_schema();
+        let backend = Backend::Unavailable(&unavailable);
+        for tool in tool_catalog() {
+            let name = tool["name"].as_str().unwrap();
+            let response = respond(
+                backend,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": { "name": name, "arguments": {} }
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response["result"]["isError"], true, "{name}: {response}");
+            let error = &response["result"]["structuredContent"];
+            assert_eq!(error["code"], "UNSUPPORTED_SCHEMA", "{name}: {response}");
+            assert_eq!(error["message"], unavailable.message, "{name}: {response}");
+            assert_eq!(
+                error["error"],
+                format!("Foremerge unavailable: {}", unavailable.message),
+                "{name}: {response}"
+            );
+            assert_eq!(error["database"], LEDGER, "{name}: {response}");
+            assert_eq!(
+                error["guidance"], UNAVAILABLE_GUIDANCE,
+                "{name}: {response}"
+            );
+            assert!(
+                error["remedy"]
+                    .as_str()
+                    .is_some_and(|remedy| remedy.contains("supports the ledger's schema")),
+                "{name}: {response}"
+            );
+        }
+
+        // An unknown tool is still a protocol error, as with a working store.
+        let unknown = respond(
+            backend,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": { "name": "no_such_tool", "arguments": {} }
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(unknown["error"]["code"], -32602, "{unknown}");
+    }
+
+    #[test]
+    fn a_store_that_fails_for_another_reason_points_at_doctor() {
+        let unavailable = StoreUnavailable::new(
+            "ERROR",
+            "open SQLite database: unable to open database file.",
+            Path::new(LEDGER),
+        );
+        assert!(
+            unavailable.remedy.contains("foremerge doctor"),
+            "{}",
+            unavailable.remedy
+        );
+        let instructions = unavailable.instructions();
+        assert!(
+            instructions
+                .starts_with("Foremerge unavailable: open SQLite database: unable to open database file. The server"),
+            "{instructions}"
+        );
+        assert!(!instructions.contains('\u{2014}'), "{instructions}");
     }
 }

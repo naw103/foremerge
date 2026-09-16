@@ -175,6 +175,58 @@ impl Store {
         Ok(())
     }
 
+    /// The schema version the store was last written with, refusing one newer
+    /// than this build. Absent means a brand new database, or one predating
+    /// the stamp.
+    fn supported_schema_version(conn: &Connection) -> Result<i64> {
+        let recorded_version: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let stored_version: i64 = match recorded_version {
+            // Parsed strictly. A CAST would silently read a malformed value as
+            // zero, which would rerun every one-time backfill against a store
+            // that has already had them applied.
+            Some(value) => value.trim().parse::<i64>().map_err(|_| {
+                anyhow::anyhow!(
+                    "CORRUPT_STORE: schema_version is not an integer: {value:?}; this database was not written by Foremerge or is damaged"
+                )
+            })?,
+            None => 0,
+        };
+        if stored_version > DATABASE_SCHEMA_VERSION {
+            // Migrating downwards would rewrite the stamp and let this build
+            // write a store it does not understand.
+            bail!(
+                "UNSUPPORTED_SCHEMA: database schema {stored_version} is newer than this build supports ({DATABASE_SCHEMA_VERSION}); upgrade Foremerge to open it"
+            );
+        }
+        Ok(stored_version)
+    }
+
+    /// Refuse a store stamped with a newer schema than this build supports,
+    /// without writing to it.
+    ///
+    /// [`Store::open`] refuses such a store while migrating. A read-only open
+    /// never migrates, so diagnostics need the check on its own, or they call
+    /// a store healthy that every other command refuses.
+    pub fn ensure_supported_schema(&self) -> Result<()> {
+        let conn = self.lock()?;
+        let stamped: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta')",
+            [],
+            |row| row.get(0),
+        )?;
+        // A store without the table predates the stamp, which migration handles.
+        if stamped {
+            Self::supported_schema_version(&conn)?;
+        }
+        Ok(())
+    }
+
     fn migrate_in(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             r#"
@@ -524,31 +576,7 @@ impl Store {
         // are gated on this: re-running them on every open is what let a
         // duplicate legacy detection row be minted for conflicts that already
         // had a native one.
-        let recorded_version: Option<String> = conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = 'schema_version'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let stored_version: i64 = match recorded_version {
-            // Parsed strictly. A CAST would silently read a malformed value as
-            // zero, which would rerun every one-time backfill against a store
-            // that has already had them applied.
-            Some(value) => value.trim().parse::<i64>().map_err(|_| {
-                anyhow::anyhow!(
-                    "CORRUPT_STORE: schema_version is not an integer: {value:?}; this database was not written by Foremerge or is damaged"
-                )
-            })?,
-            None => 0,
-        };
-        if stored_version > DATABASE_SCHEMA_VERSION {
-            // Migrating downwards would rewrite the stamp and let this build
-            // write a store it does not understand.
-            bail!(
-                "UNSUPPORTED_SCHEMA: database schema {stored_version} is newer than this build supports ({DATABASE_SCHEMA_VERSION}); upgrade Foremerge to open it"
-            );
-        }
+        let stored_version = Self::supported_schema_version(conn)?;
         let has_supersedes: bool = conn.query_row(
             "SELECT EXISTS(
                SELECT 1 FROM pragma_table_info('changesets') WHERE name = 'supersedes_changeset_id'
@@ -2724,6 +2752,43 @@ mod schema_repair_tests {
             future.to_string(),
             "refusing must not rewrite the stamp"
         );
+    }
+
+    #[test]
+    fn a_read_only_open_refuses_a_newer_schema_without_touching_it() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let database = temp.path().join("foremerge").join("state.sqlite3");
+        drop(Store::open(&database).unwrap());
+        Store::open_existing_read_only(&database)
+            .unwrap()
+            .ensure_supported_schema()
+            .expect("a store this build wrote is supported");
+
+        let future = (DATABASE_SCHEMA_VERSION + 1).to_string();
+        Connection::open(&database)
+            .unwrap()
+            .execute(
+                "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+                [&future],
+            )
+            .unwrap();
+        let error = Store::open_existing_read_only(&database)
+            .unwrap()
+            .ensure_supported_schema()
+            .expect_err("a newer store must be refused read-only too");
+        assert!(
+            format!("{error:#}").starts_with("UNSUPPORTED_SCHEMA:"),
+            "unexpected error: {error:#}"
+        );
+        let recorded: String = Connection::open(&database)
+            .unwrap()
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recorded, future, "the check must not rewrite the stamp");
     }
 
     #[test]

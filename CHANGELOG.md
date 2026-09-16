@@ -9,6 +9,27 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+### Fixed
+
+- `foremerge mcp` no longer exits when it cannot open the coordination ledger.
+  A client that loses its server reports only a closed connection (Claude Code
+  shows `foremerge (CONNECTION_CLOSED)`), the tools never appear, and agents
+  carry on without coordination and without saying so. A ledger migrated by a
+  newer build, which older builds refuse with `UNSUPPORTED_SCHEMA`, went
+  unnoticed that way for days. The server now completes the handshake and
+  keeps `tools/list` working, puts the error code, message, and a remedy in the
+  `initialize` instructions, and answers every tool call with an `isError`
+  result whose `structuredContent` carries the same `code` and `message`. Both
+  tell the agent to report the problem and leave the ledger and the client
+  configuration to the user. The error is still written to stderr.
+- `foremerge doctor` reported a ledger newer than the running build as healthy.
+  It opens the store read-only and never migrates, so it skipped the schema
+  check every other command applies. It now reports `database_ok: false` with a
+  `database_error` code and message, and is not `ready`. Its next step for a
+  ledger that exists but cannot be used is no longer `foremerge init`, which
+  would be refused: it names the upgrade for `UNSUPPORTED_SCHEMA` and the error
+  to resolve otherwise.
+
 ## [0.4.0] - 2026-08-26
 
 ### Changed
