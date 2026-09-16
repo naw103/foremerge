@@ -836,7 +836,7 @@ async fn execute(cli: Cli) -> Result<Completion> {
                 shared_across_worktrees: repo.is_some(),
                 api_bind: DEFAULT_BIND.to_string(),
                 token_configured: token_path.is_file(),
-                mcp_transport: "stdio (newline-delimited JSON-RPC; MCP 2026-07-28 with 2025-11-25 initialize compatibility)".to_string(),
+                mcp_transport: "stdio (newline-delimited JSON-RPC; MCP 2025-11-25)".to_string(),
                 ready: infrastructure_ready,
                 acceptance_ready,
                 next_step: if let Some(next_step) = database_next_step {

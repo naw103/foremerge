@@ -9,6 +9,28 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+### Fixed
+
+- The MCP server advertised protocol revision `2026-07-28` while speaking
+  `2025-11-25`. It echoed that version back to any client that asked for it,
+  and answered `server/discover`, which belongs to the newer revision, with a
+  result carrying none of what that revision requires: no `supportedVersions`,
+  no `resultType`, no `ttlMs` or `cacheScope`. Meanwhile `initialize` and
+  `ping`, both removed in the newer revision, were the only working path. A
+  client that speaks only the newer era had every reason to believe it was
+  talking to a modern server.
+
+  The server now answers `initialize` with `2025-11-25` whatever is asked for,
+  and refuses `server/discover` with `-32601`. That refusal is what the newer
+  revision's own stdio backward-compatibility rule tells a dual-era client to
+  fall back from, so such a client reaches the handshake that works. Clients
+  negotiating `2025-11-25`, which is every client observed against this server,
+  are unaffected.
+
+  Implementing the `2026-07-28` wire contract, rather than declining it
+  honestly, is tracked in
+  [#21](https://github.com/naw103/foremerge/issues/21).
+
 ## [0.4.1] - 2026-09-16
 
 ### Added

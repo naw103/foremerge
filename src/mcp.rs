@@ -6,8 +6,15 @@ use std::io::IsTerminal;
 use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-const CURRENT_PROTOCOL: &str = "2026-07-28";
-const LEGACY_PROTOCOL: &str = "2025-11-25";
+/// The one MCP revision this server implements.
+///
+/// It used to answer `2026-07-28` to a client that asked for it, while
+/// speaking this revision's wire shape: `initialize` and `ping` exist, results
+/// carry no `resultType`, and `server/discover` returned neither
+/// `supportedVersions` nor the caching hints that revision requires. A client
+/// that speaks only the newer era would have taken that answer at face value
+/// and continued against a server that cannot hold up its end.
+const PROTOCOL: &str = "2025-11-25";
 
 /// Shown once when a person runs `foremerge mcp` in a terminal.
 ///
@@ -260,25 +267,20 @@ async fn respond(backend: Backend<'_>, message: Value) -> Option<Value> {
     let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
     let result = match method {
         "initialize" => {
-            let requested = params
-                .get("protocolVersion")
-                .and_then(Value::as_str)
-                .unwrap_or(LEGACY_PROTOCOL);
+            // Answered with what this server speaks, whatever was asked for.
+            // Echoing a client's newer version back is how the mismatch
+            // started.
             let instructions = match backend {
                 Backend::Ready(_) => INSTRUCTIONS.to_string(),
                 Backend::Unavailable(unavailable) => unavailable.instructions(),
             };
             Ok(json!({
-                "protocolVersion": if requested == CURRENT_PROTOCOL { CURRENT_PROTOCOL } else { LEGACY_PROTOCOL },
+                "protocolVersion": PROTOCOL,
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": server_info(),
                 "instructions": instructions
             }))
         }
-        "server/discover" => Ok(json!({
-            "capabilities": { "tools": {} },
-            "protocolVersion": CURRENT_PROTOCOL,
-        })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tool_catalog() })),
         "tools/call" => match backend {
@@ -1234,7 +1236,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(initialized["result"]["protocolVersion"], LEGACY_PROTOCOL);
+        assert_eq!(initialized["result"]["protocolVersion"], PROTOCOL);
 
         let registered = handle_message(
             &service,
@@ -1288,12 +1290,14 @@ mod tests {
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "initialize",
-                "params": { "protocolVersion": CURRENT_PROTOCOL, "capabilities": {} }
+                "params": { "protocolVersion": "2026-07-28", "capabilities": {} }
             }),
         )
         .await
         .unwrap();
-        assert_eq!(initialized["result"]["protocolVersion"], CURRENT_PROTOCOL);
+        // Asked for a revision this server does not speak, it still answers
+        // with the one it does.
+        assert_eq!(initialized["result"]["protocolVersion"], PROTOCOL);
         assert_eq!(initialized["result"]["serverInfo"]["name"], "foremerge");
         let instructions = initialized["result"]["instructions"].as_str().unwrap();
         assert!(
@@ -1328,6 +1332,47 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(listed["result"]["tools"], Value::Array(tool_catalog()));
+    }
+
+    /// A client that speaks the 2026-07-28 revision probes `server/discover`
+    /// first and falls back to the `initialize` handshake when that fails, per
+    /// that revision's stdio backward-compatibility rule. Answering the probe
+    /// at all, with a result missing everything the revision requires, is what
+    /// put such a client on the wrong path.
+    #[tokio::test]
+    async fn a_modern_discovery_probe_is_refused_so_the_client_falls_back() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let probe = handle_message(
+            &service,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "server/discover",
+                "params": { "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientInfo": { "name": "modern", "version": "1" }
+                }}
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(probe["error"]["code"], -32601, "{probe}");
+        assert!(probe.get("result").is_none(), "{probe}");
+
+        // The fallback then works, and names this revision rather than the
+        // client's.
+        let initialized = handle_message(
+            &service,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "initialize",
+                "params": { "protocolVersion": "2026-07-28", "capabilities": {} }
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(initialized["result"]["protocolVersion"], "2025-11-25");
     }
 
     #[tokio::test]
