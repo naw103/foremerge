@@ -89,9 +89,14 @@ changes when they are called out here with a migration note.
   names the scope to claim instead. Only an exact operation name after the last
   `=` is refused, and only when no intent declares a scope by that literal
   name, so keys such as `config:FEATURE=on`, `api:GET /search?q=x` and a
-  genuinely declared `config:MERGE_MODE=replace` claim as before. Claims already stored under such a key
-  are left in place and lapse with their lease. `--help` for both commands now
-  documents the plain `KIND:KEY` form.
+  genuinely declared `config:MERGE_MODE=replace` claim as before. Claims
+  already stored under such a key are left in place and lapse with their lease.
+  `--help` for both commands now documents the plain `KIND:KEY` form.
+- `--help` for `intent publish --scope` and `conflicts check --scope` now
+  documents the `KIND:KEY=OPERATION` form, the twelve kinds and the seven
+  operations the parser accepts, and that only a declared operation can produce
+  a HIGH finding: an omitted one is inferred and capped below HIGH. A test
+  holds that text to the parser.
 
 ## [0.4.0] - 2026-08-26
 
