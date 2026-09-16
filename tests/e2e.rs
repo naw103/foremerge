@@ -3826,6 +3826,40 @@ fn mcp_outside_a_repository_fails_instead_of_creating_a_stray_store() {
     );
 }
 
+#[test]
+fn mcp_inside_a_repository_requires_explicit_initialization() {
+    // Plugin hosts may start an MCP server as soon as the plugin is enabled.
+    // That launch is not permission to opt a repository into coordination:
+    // initialization remains an explicit operator action.
+    let repo = create_repo();
+    let runtime = repo.root.join(".git/foremerge");
+    assert!(!runtime.exists());
+
+    let output = Command::new(foremerge_bin())
+        .arg("--json")
+        .arg("--cwd")
+        .arg(&repo.root)
+        .arg("mcp")
+        .output()
+        .expect("run Foremerge MCP before initialization");
+
+    assert!(!output.status.success(), "MCP must require initialization");
+    assert!(
+        output.stdout.is_empty(),
+        "MCP startup errors must not corrupt the JSON-RPC stream: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let message = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        message.contains("NOT_INITIALIZED") && message.contains("foremerge init"),
+        "the refusal must explain the required operator action: {message}"
+    );
+    assert!(
+        !runtime.exists(),
+        "starting MCP must not create coordination state before `foremerge init`"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn setup_codex_in_a_second_repository_is_a_no_op() {
