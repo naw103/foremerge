@@ -145,8 +145,14 @@ changelog guidance.
 Migrations run automatically on open, in one transaction, and only forward. A
 build refuses to open a store stamped with a schema newer than it understands
 rather than migrating it backwards, so upgrading one worktree's binary while
-another still runs an older one will make the older one fail closed. Upgrade
-every agent on a shared repository together.
+another still runs an older one will make the older one fail closed. From 0.4.3
+a build that already has the ledger open checks again on every call, so an MCP
+server that was running when another build migrated the ledger stops instead of
+writing to it. Upgrade every agent on a shared repository together, following
+[Upgrading Foremerge](mcp-setup.md#upgrading-foremerge). Nothing makes a
+migrated ledger readable by an older build again; `foremerge ledger reset` sets
+it aside and starts a fresh one or restores a backup, as described in
+[Recovering a ledger](mcp-setup.md#recovering-a-ledger).
 
 ## What Foremerge does not replace
 

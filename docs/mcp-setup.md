@@ -475,15 +475,31 @@ and to leave the ledger and the client configuration alone. Until it is fixed,
 the session is not coordinated with other agents.
 
 - `UNSUPPORTED_SCHEMA` means a newer Foremerge build has already migrated the
-  ledger. Upgrade the binary the client launches to a release that supports
-  that schema, then restart the client session so it relaunches
-  `foremerge mcp`. The remedy names that binary, which can differ from the
-  `foremerge` on your `PATH`. If no release supports the schema yet, a
-  development build migrated the ledger.
+  ledger. From 0.4.3 the message names that build's version when the ledger
+  recorded it. Upgrade the binary the client launches to that version or newer,
+  run `foremerge setup` with it, then restart the client session so it
+  relaunches `foremerge mcp`. The remedy names the binary the client launched,
+  which can differ from the `foremerge` on your `PATH`. If no release supports
+  the schema, a development build migrated the ledger: see
+  [Recovering a ledger](#recovering-a-ledger).
 - For any other code, run `foremerge doctor` in the repository. Its
   `database_error` field reports why the store cannot be used. A transient
   cause, such as another process holding the database lock, clears when the
   client session restarts.
+
+### Tools answer `UNSUPPORTED_SCHEMA` or `LEDGER_REPLACED` mid-session
+
+The server opened the ledger normally, and the ledger changed afterwards. Every
+call rechecks, so the server stops rather than writing into a ledger it no
+longer understands.
+
+- `UNSUPPORTED_SCHEMA` means another Foremerge build migrated the ledger while
+  this server was running, typically a newer `foremerge` run from a shell.
+  Follow [Upgrading Foremerge](#upgrading-foremerge) so every client launches
+  that build, then restart the session.
+- `LEDGER_REPLACED` means the ledger file was moved or replaced, for example by
+  `foremerge ledger reset`. Restart the session so the server opens the
+  current ledger.
 
 ### Agents cannot see each other's work
 
@@ -518,6 +534,66 @@ the session is not coordinated with other agents.
 
 That does not prevent the stdio MCP mode from using its configured SQLite
 database. The MVP has no daemon autostart or automatic endpoint discovery.
+
+## Upgrading Foremerge
+
+A newer build migrates the coordination ledger the first time it opens it, and
+the migration only goes forward: an older build then refuses the ledger with
+`UNSUPPORTED_SCHEMA`. Every process that opens a repository's ledger, whether
+your shell or each client's MCP server, has to run the same version.
+
+`foremerge setup` writes the absolute path of the binary that ran it into each
+client's MCP configuration, because clients started from a desktop launcher do
+not inherit your shell's `PATH`. The installers put that binary in different
+places: `install.sh` in `~/.local/bin` and `cargo install` in `~/.cargo/bin`.
+Upgrading with a different method than you installed with leaves two binaries:
+your shell runs the new one and your clients still launch the old one, and the
+first command you run migrates the ledger out from under them.
+
+To upgrade:
+
+1. Upgrade with the method you installed with. If you have used both, remove
+   one copy. `foremerge doctor` lists every installation it finds in
+   `installations` and warns when their versions differ.
+2. Close the agent client sessions in each coordinated repository.
+3. Run `foremerge setup all` (or the clients you use) from each repository with
+   the upgraded binary, so every client configuration launches it.
+4. Run `foremerge doctor --client all`. Each client's `mcp_command` should be
+   the binary you upgraded, with no `warnings`.
+5. Restart the client sessions.
+
+When a release's changelog carries a migration note, the ledger cannot be
+opened by the previous release after step 5. Keep a copy of
+`$(git rev-parse --path-format=absolute --git-common-dir)/foremerge/state.sqlite3`
+from before the upgrade if you may want to roll back, and restore it with
+`foremerge ledger reset --from` using the previous release.
+
+## Recovering a ledger
+
+`foremerge ledger reset` is the supported way out when no build you can install
+opens a ledger, typically after a development build migrated it, or when you
+want to go back to a backup.
+
+```sh
+foremerge ledger reset                        # report what it would do
+foremerge ledger reset --yes                  # set the ledger aside, start fresh
+foremerge ledger reset --yes --from BACKUP    # set it aside, restore BACKUP
+```
+
+- Nothing is deleted. The ledger and its `-wal` and `-shm` files move intact
+  into `backups/<timestamp>-schema<N>/` beside it, where a build that supports
+  that schema can still open them.
+- It refuses with `LEDGER_IN_USE`, naming the processes, while anything else
+  has the ledger open. Close every agent client session using the repository
+  first. The check uses `/proc` on Linux and `lsof` on macOS; where neither is
+  available the command warns instead, so close the sessions yourself.
+- `--from` copies the backup rather than moving it, checks its integrity, and
+  refuses a backup whose schema is newer than the running build.
+- The repository's trusted checks (`checks.json`) and API token are separate
+  files and are not touched.
+
+The history in the set-aside ledger is not merged into the new one. Restart the
+client sessions afterwards so their MCP servers open the new ledger.
 
 ## Security notes
 
