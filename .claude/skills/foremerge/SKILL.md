@@ -28,7 +28,8 @@ Read the answer before going further.
 - `database_ok: false` with any other `database_error` means the store exists
   but cannot be used, for example `UNSUPPORTED_SCHEMA` after a newer build has
   migrated it. Report the error and `next_step` to the user and stop. Do not
-  delete, move, or edit the store.
+  delete, move, or edit the store, and do not run `foremerge ledger reset`:
+  setting a ledger aside is the user's decision.
 
 `doctor` opens the store read-only: it never creates, initializes or migrates
 one, and never writes the ledger itself, though SQLite may make and remove its
@@ -36,7 +37,9 @@ own `-wal` and `-shm` sidecars while the connection is open. So a false answer
 here is trustworthy. A Foremerge tool that answers `Foremerge unavailable: ...`
 is the same situation seen from the MCP server: tell the user the error and its
 remedy, leave the store and the MCP configuration alone, and do not assume other
-agents can see your work.
+agents can see your work. So is a tool that starts failing mid-session with
+`UNSUPPORTED_SCHEMA` or `LEDGER_REPLACED`: the ledger changed underneath this
+session's server, which stops rather than writing to it.
 
 If the client integration is missing, run the relevant installer from the repository:
 

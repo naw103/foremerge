@@ -136,7 +136,10 @@ Or build from source with Rust 1.85+: `cargo install --locked --git
 https://github.com/naw103/foremerge foremerge`, or `cargo install --locked
 --path .` from a checkout. Windows binaries are on the
 [releases page](https://github.com/naw103/foremerge/releases). To update,
-re-run the installer. Then, inside the repository you want to coordinate:
+upgrade the same way you installed, then re-run `foremerge setup` and restart
+your agent clients; [Upgrading Foremerge](docs/mcp-setup.md#upgrading-foremerge)
+explains why each step matters. Then, inside the repository you want to
+coordinate:
 
 ```sh
 foremerge init

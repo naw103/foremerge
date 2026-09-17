@@ -9,6 +9,32 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+This release changes no database schema. It prepares ledgers and installations
+for the first release that does, so that upgrading to it is recoverable.
+
+### Added
+
+- `foremerge ledger reset` sets the coordination ledger aside and starts a
+  fresh one, or with `--from BACKUP` restores a backup. A ledger migrated by a
+  newer build is refused by every older one, and until now the only way out was
+  deleting `state.sqlite3` by hand, with no backup and no record of what it
+  held. The command moves the ledger and its `-wal` and `-shm` files intact into
+  `backups/<timestamp>-schema<N>/`, reports what they held, and refuses with
+  `LEDGER_IN_USE`, naming the processes, while anything else has the ledger
+  open. Without `--yes` it only reports what it would do.
+  ([#19](https://github.com/naw103/foremerge/issues/19))
+- `foremerge doctor` lists every `foremerge` binary on `PATH` and in the two
+  installer directories (`~/.local/bin`, `~/.cargo/bin`) as `installations`,
+  and warns when their versions differ. With `--client`, each client reports
+  the binary its MCP entry launches as `mcp_command`, with a warning when that
+  binary is not the running one and reports another version. `foremerge setup`
+  prints the same installation warnings. Two installers put two binaries in two
+  places, and setup pins each client to whichever one ran it, so upgrading one
+  way left the shell and the clients on different versions without any sign of
+  it.
+- An upgrade guide and a recovery guide in `docs/mcp-setup.md`.
+  ([#20](https://github.com/naw103/foremerge/issues/20))
+
 ### Changed
 
 - Every MCP tool description now says when to use the tool instead of its
@@ -32,6 +58,25 @@ changes when they are called out here with a migration note.
   to about 31 kB, and a test holds it to a budget.
 
 ### Fixed
+
+- An MCP server, daemon, or any other process that already had the ledger open
+  kept using it after another build migrated it. The schema was checked only
+  when a process opened the ledger, so a long-running server went on writing
+  rows in its own schema's shape into a ledger that had moved on. Every call now reads the schema stamp again,
+  inside the write transaction for writes, and fails with `UNSUPPORTED_SCHEMA`
+  once the ledger is newer than the build. A call also fails with
+  `LEDGER_REPLACED` when the file at the ledger's path is no longer the one the
+  process opened, so a server does not keep writing to a ledger that was moved
+  aside.
+- `UNSUPPORTED_SCHEMA` said only "upgrade Foremerge to open it", which is not
+  actionable when nothing tells you which version to install, and impossible
+  when a development build did the migrating. A build now records its version
+  in the ledger when it creates or migrates one, marking development builds as
+  such, and the refusal names that version, this build's version, and the next
+  step: install that version and re-run `foremerge setup`, or, for a
+  development build, `foremerge ledger reset`. Ledgers migrated by earlier
+  builds carry no record, and the refusal says a newer build migrated them.
+  `doctor`'s `next_step` and the MCP server's remedy name the same steps.
 
 - `query_work` and `list_agents` could not be called from a client that
   validates tool results. Both answer with a JSON array, and the MCP server put
