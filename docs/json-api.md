@@ -414,17 +414,16 @@ Then name it in the request:
 fm_curl \
   -H 'content-type: application/json' \
   -X POST "$FOREMERGE_URL/v1/changesets/chg_REPLACE_ME/validate" \
-  -d "$(jq -n --arg worktree "$PWD" '{
-    check:"test",
-    worktree:$worktree
-  }')" | jq .
+  -d '{"check":"test"}' | jq .
 ```
 
-`worktree` is optional and defaults to the ChangeSet's recorded worktree. The
-registry is resolved from the repository the coordination store is bound to,
-never from the request or the daemon's working directory. A body carrying a
-raw `command` array, or any field other than `check` and `worktree`, is
-rejected with `INVALID_INPUT` before anything runs, and an unconfigured name
+The check runs in the ChangeSet's recorded worktree, at its root; the request
+cannot name another directory, because the fingerprint is the same from anywhere
+inside a worktree while a command's behaviour is not. The registry is resolved
+from the repository the coordination store is bound to, never from the request
+or the daemon's working directory. A body carrying a raw `command` array, a
+`worktree`, or any field other than `check`, is rejected with `INVALID_INPUT`
+before anything runs, and an unconfigured name
 returns `NOT_FOUND`. To run an arbitrary argument vector, use
 `foremerge changeset validate <id> -- <argv...>` on the CLI.
 

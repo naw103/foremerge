@@ -856,15 +856,16 @@ components:
       description: >-
         Names a check from the repository's trusted registry, configured with
         `foremerge checks set`. The registry supplies the argument vector and
-        timeout; raw commands are rejected.
+        timeout; raw commands are rejected. The check runs in the ChangeSet's
+        recorded worktree, which the request cannot change.
       required: [check]
       additionalProperties: false
       properties:
         check:
           type: string
           minLength: 1
-        worktree:
-          type: [string, "null"]
+          maxLength: 64
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
     AcceptRequest:
       type: object
       properties:

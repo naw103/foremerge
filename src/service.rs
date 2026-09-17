@@ -1511,7 +1511,7 @@ impl Foremerge {
             changeset_id,
             ValidationRequest {
                 command: check.command,
-                worktree: request.worktree,
+                worktree: None,
                 timeout_seconds: check.timeout_seconds,
             },
         )
@@ -1550,6 +1550,18 @@ impl Foremerge {
         let repository_service = service.clone();
         let current = blocking(move || {
             let current = git::snapshot(&snapshot_worktree)?;
+            // The fingerprint describes the whole worktree, so it is identical
+            // from any directory inside it, but a command's behaviour is not.
+            // Run only at the worktree root the fingerprint was taken for, or a
+            // failing root check could be passed by running it in a nested
+            // package, and the result would still be recorded as verified.
+            if canonical_path(&snapshot_worktree) != canonical_path(&current.root) {
+                bail!(
+                    "INVALID_INPUT: validation must run at a worktree root, not inside one; {} is inside {}",
+                    snapshot_worktree.display(),
+                    current.root.display()
+                );
+            }
             if let Some(recorded_worktree) = recorded_worktree.as_deref() {
                 let recorded_repo = git::discover(recorded_worktree)?;
                 if canonical_path(&recorded_repo.common_dir)
@@ -1588,7 +1600,7 @@ impl Foremerge {
         let mut command = Command::new(&request.command[0]);
         command
             .args(&request.command[1..])
-            .current_dir(&worktree)
+            .current_dir(&current.root)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
