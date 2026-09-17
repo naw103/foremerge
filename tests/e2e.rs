@@ -1604,7 +1604,24 @@ async fn mcp_tool_call(service: &Foremerge, id: u64, name: &str, arguments: Valu
         response["result"]["isError"], false,
         "MCP tool {name} failed: {response}"
     );
-    response["result"]["structuredContent"].clone()
+    // MCP only allows a JSON object in structuredContent, and Claude Code rejects
+    // anything else, so a list result (query_work, list_agents) travels in the
+    // text block alone.
+    match response["result"].get("structuredContent") {
+        Some(structured) => {
+            assert!(
+                structured.is_object(),
+                "MCP tool {name} sent non-object structuredContent: {response}"
+            );
+            structured.clone()
+        }
+        None => serde_json::from_str::<Value>(
+            response["result"]["content"][0]["text"]
+                .as_str()
+                .expect("MCP text content"),
+        )
+        .expect("MCP text content is JSON"),
+    }
 }
 
 #[tokio::test]
@@ -1661,7 +1678,11 @@ async fn mcp_exposes_the_complete_work_lifecycle_with_named_verification() {
     )
     .await;
     assert_eq!(started["status"], "IN_PROGRESS");
-    mcp_tool_call(&service, 6, "query_work", json!({ "agent_id": agent_id })).await;
+    // An array result: mcp_tool_call reads it from the text block and fails the
+    // test if it ever comes back as structuredContent again.
+    let work = mcp_tool_call(&service, 6, "query_work", json!({ "agent_id": agent_id })).await;
+    assert_eq!(work.as_array().map(Vec::len), Some(1), "{work}");
+    assert_eq!(work[0]["intent"]["id"], intent_id);
     let changeset = mcp_tool_call(
         &service,
         7,

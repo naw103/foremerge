@@ -617,11 +617,18 @@ fn to_value<T: serde::Serialize>(value: T) -> anyhow::Result<Value> {
 }
 
 fn tool_result(value: Value, is_error: bool) -> Value {
-    json!({
+    let mut result = json!({
         "content": [{ "type": "text", "text": serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string()) }],
-        "structuredContent": value,
         "isError": is_error,
-    })
+    });
+    // MCP defines structuredContent as a JSON object, and clients that validate
+    // results (Claude Code among them) reject the whole response when it holds
+    // anything else. query_work and list_agents answer with arrays, so a
+    // non-object result travels in the text block alone.
+    if value.is_object() {
+        result["structuredContent"] = value;
+    }
+    result
 }
 
 /// A JSON-RPC 2.0 error response: `jsonrpc`, `id` and `error`, and nothing
@@ -1036,6 +1043,23 @@ pub fn tool_catalog() -> Vec<Value> {
 mod tests {
     use super::*;
     use crate::Store;
+
+    /// Claude Code rejected every query_work and list_agents call while their
+    /// array results were sent as structuredContent, which MCP defines as an object.
+    #[test]
+    fn structured_content_is_only_sent_for_object_results() {
+        let object = tool_result(json!({ "id": "agt_1" }), false);
+        assert_eq!(object["structuredContent"], json!({ "id": "agt_1" }));
+
+        let array = tool_result(json!([{ "id": "int_1" }]), false);
+        assert!(array.get("structuredContent").is_none(), "{array}");
+        assert_eq!(array["isError"], false);
+        let text = array["content"][0]["text"].as_str().expect("text content");
+        assert_eq!(
+            serde_json::from_str::<Value>(text).unwrap(),
+            json!([{ "id": "int_1" }])
+        );
+    }
 
     #[test]
     fn a_bare_tool_name_is_answered_with_the_line_that_would_have_worked() {
