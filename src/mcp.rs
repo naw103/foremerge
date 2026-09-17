@@ -1,5 +1,5 @@
+use crate::Foremerge;
 use crate::model::*;
-use crate::{Foremerge, checks};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io::IsTerminal;
@@ -363,18 +363,6 @@ struct IdToolRequest {
     id: String,
 }
 
-/// Resolve a named check from the registry of the repository this service's
-/// store is bound to. MCP callers never influence which registry is trusted:
-/// neither the server's spawn directory nor tool arguments select it.
-fn trusted_check(service: &Foremerge, name: &str) -> anyhow::Result<checks::NamedCheck> {
-    let common_dir = service.repository_common_dir()?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "INVALID_INPUT: verification checks are repository-scoped and this coordination store is not bound to a Git repository yet; register an agent with a worktree inside the repository first"
-        )
-    })?;
-    checks::get_at(&checks::registry_path(&common_dir), name)
-}
-
 async fn call_tool(service: &Foremerge, params: Value) -> Result<Value, (i64, String)> {
     let name = params
         .get("name")
@@ -467,24 +455,16 @@ async fn call_tool(service: &Foremerge, params: Value) -> Result<Value, (i64, St
             .await
         }
         "run_verification" => match parse::<RunVerificationToolRequest>(arguments) {
-            Ok(request) => {
-                let check_service = service.clone();
-                let check_name = request.check.clone();
-                match mcp_blocking(move || trusted_check(&check_service, &check_name)).await {
-                    Ok(check) => service
-                        .validate_changeset(
-                            &request.changeset_id,
-                            ValidationRequest {
-                                command: check.command,
-                                worktree: None,
-                                timeout_seconds: check.timeout_seconds,
-                            },
-                        )
-                        .await
-                        .and_then(to_value),
-                    Err(error) => Err(error),
-                }
-            }
+            Ok(request) => service
+                .validate_changeset_with_check(
+                    &request.changeset_id,
+                    CheckValidationRequest {
+                        check: request.check,
+                        worktree: None,
+                    },
+                )
+                .await
+                .and_then(to_value),
             Err(error) => Err(error),
         },
         "resolve_conflict" => {

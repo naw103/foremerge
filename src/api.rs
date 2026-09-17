@@ -621,13 +621,23 @@ async fn validate_changeset(
     State(state): State<ApiState>,
     headers: HeaderMap,
     Path(id): Path<String>,
-    ApiJson(request): ApiJson<ValidationRequest>,
+    ApiJson(body): ApiJson<Value>,
 ) -> ApiResult<Validation> {
     authorize(&state, &headers)?;
+    // The HTTP body never supplies the argument vector: a request names a
+    // check from the repository's trusted registry, as over MCP. Raw commands
+    // stay on the CLI, where the operator types them.
+    if body.get("command").is_some() {
+        return Err(ApiError::from(anyhow::anyhow!(
+            "INVALID_INPUT: raw validation commands are not accepted over HTTP; configure one with 'foremerge checks set <name> -- <argv...>' and send {{\"check\":\"<name>\"}}"
+        )));
+    }
+    let request: CheckValidationRequest = serde_json::from_value(body)
+        .map_err(|error| ApiError::from(anyhow::anyhow!("INVALID_INPUT: {error}")))?;
     Ok(success(
         state
             .service
-            .validate_changeset(&id, request)
+            .validate_changeset_with_check(&id, request)
             .await
             .map_err(ApiError::from)?,
     ))

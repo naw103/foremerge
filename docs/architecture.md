@@ -166,7 +166,8 @@ The MCP adapter exposes the same operations to coding agents over standard I/O.
 Neither transport contains an independent coordination implementation.
 MCP verification resolves a trusted check name through repository-private
 configuration before calling the same validation service used by other
-frontends; raw validation argv is not accepted from MCP.
+frontends. The HTTP validate operation resolves check names the same way;
+raw validation argv is accepted only from the CLI.
 
 Axum liveness performs no I/O, readiness uses a non-waiting store probe, and
 full event-chain audit is authenticated and paged through a separate read-only
