@@ -18,7 +18,9 @@ changes when they are called out here with a migration note.
   guess, for example, that `query_work`'s `status` takes an intent lifecycle
   status or that `accept_changeset`'s `git_ref` must resolve to the worktree
   HEAD. A test now fails if a parameter is added without a description. Tool
-  names, schemas and behaviour are unchanged.
+  names, validation constraints, annotations and behaviour are unchanged; the
+  serialized schemas differ only by the added `description` fields, which live
+  inside `inputSchema`.
 
   The descriptions also state plainly several things that were true but easy
   to get wrong: acceptance enforces a ChangeSet's `dependencies`, which must be
