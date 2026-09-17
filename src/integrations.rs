@@ -388,6 +388,12 @@ fn executable_name() -> &'static str {
 }
 
 /// The version a `foremerge` binary reports, run with a bounded timeout.
+///
+/// Only ever called for a path this process located itself, in a `PATH` or
+/// installer directory. A command taken from a client's configuration is never
+/// run: that file is repository content, and a wrapper script that ignores its
+/// arguments and starts a server would open, and so migrate, a ledger, which
+/// is exactly what diagnostics must never do.
 fn binary_version(path: &Path) -> Option<String> {
     let mut probe = Command::new(path);
     probe.arg("--version");
@@ -417,8 +423,15 @@ fn version_of(path: &Path, current_exe: &Path) -> (Option<String>, bool) {
 /// shell and the clients on different versions, and the newer one migrates the
 /// ledger out from under the older.
 pub fn installations(current_exe: &Path) -> Vec<Installation> {
+    // Absolute entries only. A relative `PATH` entry resolves against this
+    // process's working directory, which is a repository, so a `foremerge` in
+    // repository content would be run.
     let mut directories: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|value| std::env::split_paths(&value).collect())
+        .map(|value| {
+            std::env::split_paths(&value)
+                .filter(|directory| directory.is_absolute())
+                .collect()
+        })
         .unwrap_or_default();
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         directories.push(home.join(".local").join("bin"));
@@ -481,22 +494,39 @@ pub fn installation_warnings(installations: &[Installation]) -> Vec<String> {
         .collect()
 }
 
-/// When a client is configured to launch a different binary than this one,
-/// and that binary reports a different version, say so: `doctor` otherwise
-/// describes this binary while the client runs another.
-fn launched_binary_warning(client: Client, command: &str, current_exe: &Path) -> Option<String> {
+/// When a client is configured to launch a different binary than this one, say
+/// so: `doctor` otherwise describes this binary while the client runs another.
+///
+/// The configured command is compared, never run. Its version is reported only
+/// when the path is one of the installations this process found for itself; a
+/// command pointing anywhere else is named without a version, because the only
+/// way to learn one would be to execute a program named by repository content.
+fn launched_binary_warning(
+    client: Client,
+    command: &str,
+    current_exe: &Path,
+    installations: &[Installation],
+) -> Option<String> {
     let path = Path::new(command);
     if !path.is_absolute() || !path.is_file() || paths_match(path, current_exe) {
         return None;
     }
-    let (version, _) = version_of(path, current_exe);
-    if version.as_deref() == Some(env!("CARGO_PKG_VERSION")) {
+    let known = installations
+        .iter()
+        .find(|installation| paths_match(Path::new(&installation.path), path));
+    if known.is_some_and(|installation| {
+        installation.version.as_deref() == Some(env!("CARGO_PKG_VERSION"))
+    }) {
+        // A second copy of this same version launches the same code.
         return None;
     }
+    let described = match known.and_then(|installation| installation.version.as_deref()) {
+        Some(version) => format!("Foremerge {version}"),
+        None => "a binary this command did not run and cannot identify".to_string(),
+    };
     Some(format!(
-        "{} launches {command} (Foremerge {}), not this binary ({}, Foremerge {}). Run `foremerge setup {}` with the binary you mean to keep, then restart the client.",
+        "{} launches {command} ({described}), not this binary ({}, Foremerge {}). Check that it is the Foremerge you mean to keep, run `foremerge setup {}` with it, then restart the client.",
         client.name(),
-        version.as_deref().unwrap_or("of an unknown version"),
         current_exe.display(),
         env!("CARGO_PKG_VERSION"),
         client.name()
@@ -518,11 +548,16 @@ pub fn install(
         .collect()
 }
 
-pub fn diagnose(root: &Path, clients: &[Client], current_exe: &Path) -> Vec<ClientDiagnostic> {
+pub fn diagnose(
+    root: &Path,
+    clients: &[Client],
+    current_exe: &Path,
+    installations: &[Installation],
+) -> Vec<ClientDiagnostic> {
     clients
         .iter()
         .copied()
-        .map(|client| diagnose_client(root, client, current_exe))
+        .map(|client| diagnose_client(root, client, current_exe, installations))
         .collect()
 }
 
@@ -643,7 +678,12 @@ fn configure_client_mcp(
     }
 }
 
-fn diagnose_client(root: &Path, client: Client, current_exe: &Path) -> ClientDiagnostic {
+fn diagnose_client(
+    root: &Path,
+    client: Client,
+    current_exe: &Path,
+    installations: &[Installation],
+) -> ClientDiagnostic {
     let skill_path = client.skill_path(root);
     let skill_installed = skill_path.is_file();
     // Unreadable or non-UTF-8 content is never Foremerge's own file, so it is
@@ -684,7 +724,7 @@ fn diagnose_client(root: &Path, client: Client, current_exe: &Path) -> ClientDia
     };
     let warning = mcp_command
         .as_deref()
-        .and_then(|command| launched_binary_warning(client, command, current_exe));
+        .and_then(|command| launched_binary_warning(client, command, current_exe, installations));
     // Setup refuses to replace managed content that differs from this release,
     // so offering a plain `setup` here would name a command that cannot
     // succeed. Report what actually blocks it and ask for --force instead.

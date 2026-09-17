@@ -27,7 +27,9 @@ for the first release that does, so that upgrading to it is recoverable.
   installer directories (`~/.local/bin`, `~/.cargo/bin`) as `installations`,
   and warns when their versions differ. With `--client`, each client reports
   the binary its MCP entry launches as `mcp_command`, with a warning when that
-  binary is not the running one and reports another version. `foremerge setup`
+  binary is not the running one. That command is compared, never run: it comes
+  from repository content, and a wrapper script that starts a server would open
+  the ledger a diagnostic must leave alone. `foremerge setup`
   prints the same installation warnings. Two installers put two binaries in two
   places, and setup pins each client to whichever one ran it, so upgrading one
   way left the shell and the clients on different versions without any sign of
@@ -62,8 +64,10 @@ for the first release that does, so that upgrading to it is recoverable.
 - An MCP server, daemon, or any other process that already had the ledger open
   kept using it after another build migrated it. The schema was checked only
   when a process opened the ledger, so a long-running server went on writing
-  rows in its own schema's shape into a ledger that had moved on. Every call now reads the schema stamp again,
-  inside the write transaction for writes, and fails with `UNSUPPORTED_SCHEMA`
+  rows in its own schema's shape into a ledger that had moved on. Every call
+  now reads the schema stamp again, inside the write transaction for writes,
+  and the readiness probe and the event-chain audit check it too. They fail
+  with `UNSUPPORTED_SCHEMA`
   once the ledger is newer than the build. A call also fails with
   `LEDGER_REPLACED` when the file at the ledger's path is no longer the one the
   process opened, so a server does not keep writing to a ledger that was moved
