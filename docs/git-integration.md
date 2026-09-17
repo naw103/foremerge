@@ -154,10 +154,14 @@ repository's trusted registry, which supplies the argument vector and timeout:
 
 ```json
 {
-  "check": "test",
-  "worktree": "/path/to/agent-worktree"
+  "check": "test"
 }
 ```
+
+The check runs at the root of the ChangeSet's recorded worktree. No surface can
+run it from a subdirectory: the fingerprint is identical anywhere inside a
+worktree, so a nested directory could otherwise turn a failing root command into
+a pass that is recorded as verified.
 
 Foremerge records exit status, standard output, standard error, duration, and
 the ChangeSet fingerprint associated with the run. A zero exit status is a
