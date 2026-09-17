@@ -460,7 +460,6 @@ async fn call_tool(service: &Foremerge, params: Value) -> Result<Value, (i64, St
                     &request.changeset_id,
                     CheckValidationRequest {
                         check: request.check,
-                        worktree: None,
                     },
                 )
                 .await

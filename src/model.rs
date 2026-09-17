@@ -718,13 +718,15 @@ pub struct ValidationRequest {
 }
 
 /// Validation by name from the repository's trusted check registry. The
-/// command that runs comes from the registry, never from the request.
+/// command that runs comes from the registry, never from the request, and it
+/// runs in the ChangeSet's recorded worktree, never in a directory the caller
+/// names. A caller-chosen directory would leave the fingerprint unchanged while
+/// changing what a registered command does, for example running a root test
+/// command inside a nested package whose tests pass.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckValidationRequest {
     pub check: String,
-    #[serde(default)]
-    pub worktree: Option<String>,
 }
 
 fn default_timeout_seconds() -> u64 {
