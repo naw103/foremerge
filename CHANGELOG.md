@@ -9,6 +9,17 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+### Changed
+
+- Every MCP tool description now says when to use the tool instead of its
+  neighbours, what it changes, which states and owners it requires, and what it
+  returns, and every input parameter, including nested ones, carries its own
+  description. Before, most parameters were undocumented and agents had to
+  guess, for example, that `query_work`'s `status` takes an intent lifecycle
+  status or that `accept_changeset`'s `git_ref` must resolve to the worktree
+  HEAD. A test now fails if a parameter is added without a description. Tool
+  names, schemas and behaviour are unchanged.
+
 ### Fixed
 
 - `query_work` and `list_agents` could not be called from a client that

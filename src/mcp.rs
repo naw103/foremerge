@@ -664,9 +664,10 @@ fn scope_claim_schema() -> Value {
         "properties": {
             "kind": {
                 "type": "string",
-                "enum": ["symbol", "api", "schema", "config", "infra", "test", "migration", "env", "file", "component", "contract", "domain"]
+                "enum": ["symbol", "api", "schema", "config", "infra", "test", "migration", "env", "file", "component", "contract", "domain"],
+                "description": SCOPE_KIND_DESCRIPTION
             },
-            "key": { "type": "string", "minLength": 1 },
+            "key": { "type": "string", "minLength": 1, "description": SCOPE_KEY_DESCRIPTION },
             "operation": {
                 "type": "string",
                 "enum": ["add", "extend", "modify", "replace", "remove", "rename", "migrate"],
@@ -678,15 +679,19 @@ fn scope_claim_schema() -> Value {
     })
 }
 
+const SCOPE_KIND_DESCRIPTION: &str = "What sort of thing the scope names: a code symbol, an API route, a data schema, a config key, infrastructure, a test, a migration, an environment variable, a file path, a component, a contract, or a broader domain.";
+const SCOPE_KEY_DESCRIPTION: &str = "The name within that kind, for example PaymentService, POST /orders, or src/billing.rs. Comparison is case-insensitive.";
+
 fn scope_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
             "kind": {
                 "type": "string",
-                "enum": ["symbol", "api", "schema", "config", "infra", "test", "migration", "env", "file", "component", "contract", "domain"]
+                "enum": ["symbol", "api", "schema", "config", "infra", "test", "migration", "env", "file", "component", "contract", "domain"],
+                "description": SCOPE_KIND_DESCRIPTION
             },
-            "key": { "type": "string", "minLength": 1 }
+            "key": { "type": "string", "minLength": 1, "description": SCOPE_KEY_DESCRIPTION }
         },
         "required": ["kind", "key"],
         "additionalProperties": false
@@ -741,10 +746,10 @@ pub fn tool_catalog() -> Vec<Value> {
         tool(
             "accept_changeset",
             "Accept a validated ChangeSet",
-            "Apply Foremerge's final conflict, dependency, fingerprint, validation, and Git gates, then pin the accepted commit. Acceptance overrides (allow_high_conflicts, allow_unverified, override_reason) are operator actions, available on the CLI and the HTTP API and rejected over MCP; ask a human operator instead.",
+            "Accept a ChangeSet as done so other agents may build on it. Use this after run_verification passes; use record_commit later, once the work has actually landed on the target branch. Foremerge re-checks every gate before accepting: the worktree must be clean and unchanged since publication, verification must have passed (unless the repository's policy is advisory and nothing was verified), no HIGH conflict on the intent may be open, and every depends_on intent must already be accepted and contained in this commit. On success it marks the ChangeSet and intent ACCEPTED, pins the commit as accepted_commit, writes refs/foremerge/accepted/<changeset_id>, and returns the updated ChangeSet. A failed gate returns an error naming it (CHECK_FAILED, BLOCKING_CONFLICT, STALE_CHANGESET) and changes nothing. Overriding a gate is an operator action on the CLI or HTTP API and is refused over MCP, so ask a human when a gate should be bypassed.",
             json!({
-                "changeset_id": { "type": "string", "minLength": 1 },
-                "git_ref": { "type": "string", "minLength": 1 }
+                "changeset_id": { "type": "string", "minLength": 1, "description": "The ChangeSet to accept (chg_...), as returned by publish_changeset." },
+                "git_ref": { "type": "string", "minLength": 1, "description": "Optional commit to accept. Defaults to the ref recorded at publication, then the worktree HEAD. Whatever it names must resolve to the current worktree HEAD." }
             }),
             &["changeset_id"],
             false,
@@ -754,12 +759,12 @@ pub fn tool_catalog() -> Vec<Value> {
             tool(
                 "check_conflicts",
                 "Check intent conflicts",
-                "Compare a published or proposed intent with active work before code changes exist.",
+                "Ask whether planned work collides with other agents' active work, before any code changes exist. Read-only: nothing is stored. Pass intent_id alone to list the persisted OPEN or COORDINATING conflicts on a published intent (use this before publish_changeset and before run_verification, since conflicts are raised when the later intent publishes). Pass intent text with scopes, or intent_id with replacement scopes, for a what-if check against every non-terminal intent; those findings carry ephemeral eph_ ids and are not recorded. Returns conflicts (each with severity, explanation, evidence and a suggested coordination step), checked_intents, blocking (true when any finding is HIGH), and the active policy. To record a decision about overlap, use record_assessment or resolve_conflict instead.",
                 json!({
-                    "agent_id": { "type": "string" },
-                    "intent_id": { "type": "string", "minLength": 1 },
-                    "intent": { "type": "string", "minLength": 1 },
-                    "scopes": { "type": "array", "items": scope_claim.clone(), "default": [] }
+                    "agent_id": { "type": "string", "description": "Optional caller agent id. Informational only; it does not change which work is compared." },
+                    "intent_id": { "type": "string", "minLength": 1, "description": "A published intent (int_...) to check. Provide this or intent." },
+                    "intent": { "type": "string", "minLength": 1, "description": "Free-form summary of work not yet published, for a what-if check. Provide this or intent_id. Passing an intent id here is rejected; use intent_id." },
+                    "scopes": { "type": "array", "items": scope_claim.clone(), "default": [], "description": "Scopes to compare, each with the operation you would perform. With intent text, these are the proposed scopes. With intent_id, non-empty scopes replace the intent's own for this check only." }
                 }),
                 &[],
                 true,
@@ -773,13 +778,13 @@ pub fn tool_catalog() -> Vec<Value> {
         tool(
             "claim_work",
             "Claim semantic work",
-            "Create advisory, leased claims on symbols, APIs, schemas, config, infra, tests, migrations, env vars, files, contracts, components, or domains. Overlap warns but never locks.",
+            "Tell other agents you are working on specific scopes of your own intent, for a limited time. Use this after publish_intent and record_assessment, and before start_work. Claims are advisory and never lock: if another agent's live claim covers the same scope, you still get the claim, and a claim-overlap conflict is recorded and returned as a warning. The first claim moves the intent from INTENT to CLAIMED. Claiming a scope the intent already holds renews its lease instead of adding a second claim, which is how long-running work keeps its claims. Only the intent's owner may claim, and only while the intent is INTENT, CLAIMED or IN_PROGRESS. Returns the created or renewed claims, overlap warnings, and advisory_only: true.",
             json!({
-                "agent_id": { "type": "string" },
-                "intent_id": { "type": "string" },
-                "scopes": { "type": "array", "items": scope.clone(), "minItems": 1 },
-                "reason": { "type": "string" },
-                "lease_seconds": { "type": "integer", "minimum": 60, "maximum": 86400, "default": 3600 }
+                "agent_id": { "type": "string", "description": "Your agent id (agt_...). Must own the intent." },
+                "intent_id": { "type": "string", "description": "Your intent (int_...) that the claims belong to." },
+                "scopes": { "type": "array", "items": scope.clone(), "minItems": 1, "description": "The scopes to claim. Use the scopes declared on the intent; operations are not repeated here." },
+                "reason": { "type": "string", "description": "Optional note shown to other agents explaining why you hold the claim." },
+                "lease_seconds": { "type": "integer", "minimum": 60, "maximum": 86400, "default": 3600, "description": "How long the claim lasts before it expires, from 60 seconds to 24 hours. Default one hour. Claim again to renew." }
             }),
             &["agent_id", "intent_id", "scopes"],
             false,
@@ -788,13 +793,13 @@ pub fn tool_catalog() -> Vec<Value> {
         tool(
             "coordinate_with_agent",
             "Coordinate with another agent",
-            "Send a durable directed message linked to a conflict or ChangeSet.",
+            "Send a stored message to another registered agent, usually to agree how two overlapping pieces of work should coexist. Use it when check_conflicts or related_work shows a clash you need the other agent to act on; afterwards, a party to the conflict records the agreement with resolve_conflict, naming this message's id. Linking a conflict_id moves that conflict from OPEN to COORDINATING. The message is appended to a durable log with status UNREAD; it does not interrupt or control the other agent, which finds it on its next read (CLI: foremerge coordinate inbox). Returns the stored message, including its msg_ id.",
             json!({
-                "from_agent_id": { "type": "string" },
-                "to_agent_id": { "type": "string" },
-                "message": { "type": "string", "minLength": 1 },
-                "conflict_id": { "type": "string" },
-                "changeset_id": { "type": "string" }
+                "from_agent_id": { "type": "string", "description": "Your agent id (agt_...)." },
+                "to_agent_id": { "type": "string", "description": "The recipient's agent id (agt_...), for example the owner of the conflicting intent." },
+                "message": { "type": "string", "minLength": 1, "description": "What you propose or need, in plain language." },
+                "conflict_id": { "type": "string", "description": "Optional conflict (cfl_...) this message is about. Must exist. May be combined with changeset_id." },
+                "changeset_id": { "type": "string", "description": "Optional ChangeSet (chg_...) this message is about. Must exist." }
             }),
             &["from_agent_id", "to_agent_id", "message"],
             false,
@@ -803,11 +808,11 @@ pub fn tool_catalog() -> Vec<Value> {
         with_destructive_hint(tool(
             "discard_work",
             "Discard work",
-            "Discard a nonterminal intent, release its claims, and dismiss conflicts linked to the discarded work.",
+            "Abandon one of your own intents that will not be finished, for example a duplicate or work another agent took over. It sets the intent to DISCARDED, releases all of its active claims, and dismisses its OPEN or COORDINATING conflicts so they stop blocking the other party. The history stays in the event log, but a discarded intent cannot be resumed; publish a new intent instead. Only the owner may discard, and not once the intent is ACCEPTED, COMMITTED or already DISCARDED. Returns the updated intent. To agree that two intents can coexist, use resolve_conflict instead.",
             json!({
-                "agent_id": { "type": "string", "minLength": 1 },
-                "intent_id": { "type": "string", "minLength": 1 },
-                "reason": { "type": "string", "minLength": 1 }
+                "agent_id": { "type": "string", "minLength": 1, "description": "Your agent id (agt_...). Must own the intent." },
+                "intent_id": { "type": "string", "minLength": 1, "description": "The intent (int_...) to discard." },
+                "reason": { "type": "string", "minLength": 1, "description": "Why the work is being abandoned. Required and recorded in the event log." }
             }),
             &["agent_id", "intent_id", "reason"],
             false,
@@ -816,8 +821,8 @@ pub fn tool_catalog() -> Vec<Value> {
         tool(
             "get_changeset",
             "Get a ChangeSet",
-            "Read one ChangeSet, including immutable accepted and integration commit provenance.",
-            json!({ "id": { "type": "string", "minLength": 1 } }),
+            "Read one ChangeSet by id. Use it to check a ChangeSet's status (PROVISIONAL, VALIDATED, ACCEPTED, COMMITTED or SUPERSEDED), its fingerprint, and its commit provenance: accepted_commit, pinned at acceptance and never changed, and integration_commit, set by record_commit. Read-only. Use get_intent for the work item itself, and query_work or status to find ChangeSets you do not have an id for.",
+            json!({ "id": { "type": "string", "minLength": 1, "description": "The ChangeSet id (chg_...)." } }),
             &["id"],
             true,
             true,
@@ -825,8 +830,8 @@ pub fn tool_catalog() -> Vec<Value> {
         tool(
             "get_intent",
             "Get an intent",
-            "Read one intent with its agent and current open-conflict snapshot.",
-            json!({ "id": { "type": "string", "minLength": 1 } }),
+            "Read one intent by id, with its owning agent and a snapshot of its OPEN or COORDINATING conflicts. Use it to see an intent's current status (INTENT, CLAIMED, IN_PROGRESS, PROVISIONAL, VALIDATED, ACCEPTED, COMMITTED or DISCARDED), declared scopes and depends_on, for example before assessing someone else's related work. Read-only. Use query_work to search intents by agent, status or scope, and status for everything at once.",
+            json!({ "id": { "type": "string", "minLength": 1, "description": "The intent id (int_...)." } }),
             &["id"],
             true,
             true,
@@ -834,7 +839,7 @@ pub fn tool_catalog() -> Vec<Value> {
         tool(
             "list_agents",
             "List coding agents",
-            "Read every registered coding agent in deterministic registration order.",
+            "List every registered agent in registration order, with its id, name, model, capabilities, worktree, Git branch and head at registration, and status. Read-only and takes no arguments. Use it to find the agent id of another participant before coordinate_with_agent. Use status for the active agents alongside their current work.",
             json!({}),
             &[],
             true,
@@ -843,55 +848,58 @@ pub fn tool_catalog() -> Vec<Value> {
         tool(
             "publish_changeset",
             "Publish a provisional ChangeSet",
-            "Capture implementation summary, affected files/symbols/contracts, dependencies, tests, decisions, provenance, and Git state.",
+            "Record a finished unit of implementation for your intent so it can be verified and accepted. Use it once the change is committed in your worktree, after check_conflicts and before run_verification. Foremerge snapshots the worktree (defaulting to your registered one), resolves the candidate commit and its diff base, and stores a fingerprint that verification and acceptance are later checked against. files and symbols are inferred from the Git diff when you leave them empty. The ChangeSet starts PROVISIONAL and the intent becomes PROVISIONAL. Publishing again while the previous ChangeSet is PROVISIONAL or VALIDATED creates a new one, marks the old one SUPERSEDED, and resets verification. Only the intent's owner may publish, while the intent is CLAIMED, IN_PROGRESS, PROVISIONAL or VALIDATED. Git itself is not modified. Returns the ChangeSet, including its chg_ id, fingerprint, and open_conflicts on the intent at that moment.",
             json!({
-                "agent_id": { "type": "string" },
-                "intent_id": { "type": "string" },
-                "summary": { "type": "string", "minLength": 1 },
-                "files": { "type": "array", "items": { "type": "string" }, "default": [] },
-                "symbols": { "type": "array", "items": { "type": "string" }, "default": [] },
-                "contracts": { "type": "array", "items": { "type": "string" }, "default": [] },
-                "dependencies": { "type": "array", "items": { "type": "string" }, "default": [] },
+                "agent_id": { "type": "string", "description": "Your agent id (agt_...). Must own the intent." },
+                "intent_id": { "type": "string", "description": "The intent (int_...) this implementation fulfils." },
+                "summary": { "type": "string", "minLength": 1, "description": "What the change does, in one or two sentences." },
+                "files": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Changed file paths. Leave empty to infer them from the worktree's changes." },
+                "symbols": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Code symbols added or changed. Leave empty to infer them from the Git diff." },
+                "contracts": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Named interfaces or agreements this change affects, for example payment-provider." },
+                "dependencies": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Other work or packages this change relies on, as free-form references. Acceptance ordering is governed by the intent's depends_on, not this list." },
                 "tests": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "command": { "type": "string" },
-                            "status": { "type": "string" },
-                            "summary": { "type": "string" }
+                            "command": { "type": "string", "description": "The command you ran, for example cargo test." },
+                            "status": { "type": "string", "description": "Its outcome as you observed it, for example passed or failed." },
+                            "summary": { "type": "string", "description": "Optional short note on what ran or failed." }
                         },
                         "required": ["command", "status"],
                         "additionalProperties": false
                     },
-                    "default": []
+                    "default": [],
+                    "description": "Tests you ran yourself. Recorded as history only; acceptance relies on run_verification, not on this list."
                 },
                 "decisions": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "title": { "type": "string" },
-                            "rationale": { "type": "string" },
+                            "title": { "type": "string", "description": "The decision, for example Use a provider trait." },
+                            "rationale": { "type": "string", "description": "Why you chose it." },
                             "alternatives": {
                                 "type": "array",
                                 "items": { "type": "string" },
-                                "default": []
+                                "default": [],
+                                "description": "Options you considered and rejected."
                             }
                         },
                         "required": ["title", "rationale"],
                         "additionalProperties": false
                     },
-                    "default": []
+                    "default": [],
+                    "description": "Design decisions a reviewer or later agent should know about."
                 },
-                "provenance": { "type": "object", "default": {} },
-                "git_ref": { "type": "string" },
+                "provenance": { "type": "object", "default": {}, "description": "Optional JSON object of your own context, such as a prompt or task reference. Foremerge adds Git provenance under provenance.git." },
+                "git_ref": { "type": "string", "description": "Candidate commit to publish. Defaults to the worktree's HEAD." },
                 "base_ref": {
                     "type": "string",
                     "minLength": 1,
                     "description": "True diff base when known (for example the fork point of this agent branch); defaults to the candidate commit's first parent."
                 },
-                "worktree": { "type": "string" }
+                "worktree": { "type": "string", "description": "Path of the Git worktree holding the change. Defaults to your registered worktree, then the server's working directory. Must belong to your registered repository." }
             }),
             &["agent_id", "intent_id", "summary"],
             false,
@@ -900,15 +908,15 @@ pub fn tool_catalog() -> Vec<Value> {
         tool(
             "publish_intent",
             "Publish intent",
-            "Publish task intent and the scopes it will change, declaring what it does to each. Returns related_work: other agents' active intents that touch yours, with the overlap stated as fact. Assess each one and call record_assessment before writing code.",
+            "Announce work you are about to do, and the scopes it will change, before editing any code. This is the first call for every task, after register_agent. The intent is stored with status INTENT and compared against every other active intent. Returns the intent (with its int_ id), any conflicts detected immediately, and related_work: other agents' active intents that touch yours, with each overlapping scope and both declared operations stated as fact. Assess each related_work entry and call record_assessment before writing code, then claim_work and start_work. Use check_conflicts instead for a what-if check that stores nothing.",
             json!({
-                "agent_id": { "type": "string" },
-                "task": { "type": "string", "minLength": 1 },
-                "summary": { "type": "string", "minLength": 1 },
-                "rationale": { "type": "string" },
-                "scopes": { "type": "array", "items": scope_claim.clone(), "default": [] },
-                "depends_on": { "type": "array", "items": { "type": "string" }, "default": [] },
-                "metadata": { "type": "object", "default": {} }
+                "agent_id": { "type": "string", "description": "Your agent id (agt_...) from register_agent." },
+                "task": { "type": "string", "minLength": 1, "description": "Short name of the task this belongs to, for example payments-provider. Intents with the same task text share one task record." },
+                "summary": { "type": "string", "minLength": 1, "description": "What you are going to change, in one sentence." },
+                "rationale": { "type": "string", "description": "Optional reason for the change." },
+                "scopes": { "type": "array", "items": scope_claim.clone(), "default": [], "description": "Every scope this work will touch, each with the operation performed on it. Conflict detection relies on these, so declare them all." },
+                "depends_on": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Intent ids (int_...) that must be accepted before this one can be. Acceptance also requires their accepted commits to be in this work's history." },
+                "metadata": { "type": "object", "default": {}, "description": "Optional JSON object of extra context stored with the intent." }
             }),
             &["agent_id", "task", "summary"],
             false,
@@ -917,12 +925,18 @@ pub fn tool_catalog() -> Vec<Value> {
         tool(
             "query_work",
             "Query active work",
-            "Find owners, intents, semantic claims, pending ChangeSets, and conflict counts.",
+            "Search intents by owner, status or scope, to answer questions like who is changing this symbol, or which work still has open conflicts. Read-only. Each result joins an intent to its agent, its claims, its latest ChangeSet (id and full object), the ids of intents that depend on it, and its count of OPEN or COORDINATING conflicts. Results are an array, capped by limit. With no filters it returns intents of every status, including finished ones. Use get_intent when you already have an id, and status for a grouped overview of everything at once.",
             json!({
-                "agent_id": { "type": "string" },
-                "status": { "type": "string" },
-                "scope": scope,
-                "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 50 }
+                "agent_id": { "type": "string", "description": "Only intents owned by this agent (agt_...)." },
+                "status": { "type": "string", "description": "Only intents in this lifecycle status: INTENT, CLAIMED, IN_PROGRESS, PROVISIONAL, VALIDATED, ACCEPTED, COMMITTED or DISCARDED. Case-insensitive." },
+                "scope": {
+                    "type": "object",
+                    "properties": scope["properties"].clone(),
+                    "required": ["kind", "key"],
+                    "additionalProperties": false,
+                    "description": "Only intents that declared or claimed exactly this scope."
+                },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 50, "description": "Maximum number of intents to return, from 1 to 500. Default 50." }
             }),
             &[],
             true,
@@ -931,20 +945,21 @@ pub fn tool_catalog() -> Vec<Value> {
         tool(
             "record_assessment",
             "Record an assessment of related work",
-            "Record what you concluded about one entry from related_work. Foremerge states which scopes overlap and how the declared operations relate; deciding what that means is yours. Call this once per related intent before you write code.",
+            "Record what you concluded about one entry from related_work. Foremerge states which scopes overlap and how the declared operations relate; deciding what that means is yours. Call this once per related intent, after publish_intent and before you write code. Each call appends a new assessment rather than replacing an earlier one, and changes no statuses: it does not open, resolve or dismiss conflicts. Act on the verdict with coordinate_with_agent, resolve_conflict or discard_work as needed. Only the intent's owner may assess it. Returns the stored assessment with its asm_ id.",
             json!({
-                "agent_id": { "type": "string", "minLength": 1 },
-                "intent_id": { "type": "string", "minLength": 1 },
-                "related_intent_id": { "type": "string", "minLength": 1 },
+                "agent_id": { "type": "string", "minLength": 1, "description": "Your agent id (agt_...). Must own intent_id." },
+                "intent_id": { "type": "string", "minLength": 1, "description": "Your intent (int_...) whose publish returned the related_work." },
+                "related_intent_id": { "type": "string", "minLength": 1, "description": "The other agent's intent (int_...) from the related_work entry you are assessing." },
                 "verdict": {
                     "type": "string",
                     "enum": ["conflicts", "compatible", "duplicate", "depends_on"],
                     "description": "conflicts: the two plans cannot both land as written. compatible: they can. duplicate: the same work twice. depends_on: yours needs theirs to land first."
                 },
-                "rationale": { "type": "string", "minLength": 1 },
+                "rationale": { "type": "string", "minLength": 1, "description": "Why you reached that verdict, specific enough for a later reader to check." },
                 "action": {
                     "type": "string",
-                    "enum": ["proceeding", "rescoping", "waiting", "abandoning"]
+                    "enum": ["proceeding", "rescoping", "waiting", "abandoning"],
+                    "description": "What you will do next. proceeding: continue as planned. rescoping: change your scopes first. waiting: hold until the other work lands. abandoning: drop your intent (then call discard_work)."
                 }
             }),
             &[
@@ -961,10 +976,10 @@ pub fn tool_catalog() -> Vec<Value> {
         tool(
             "record_commit",
             "Record integration commit",
-            "After ordinary Git or PR integration, record the durable target commit while preserving the immutable accepted commit.",
+            "Record where accepted work finally landed, after it has been merged through ordinary Git or a pull request. Use it last, after accept_changeset and the merge. The commit must contain the accepted commit in its history, otherwise the call fails with TARGET_DIVERGED. On success it stores integration_commit, moves the ChangeSet to COMMITTED, and returns the updated ChangeSet. accepted_commit is kept unchanged, so the record shows both what was verified and where it landed. Foremerge does not merge or push anything itself.",
             json!({
-                "changeset_id": { "type": "string", "minLength": 1 },
-                "git_ref": { "type": "string", "minLength": 1 }
+                "changeset_id": { "type": "string", "minLength": 1, "description": "An ACCEPTED ChangeSet (chg_...)." },
+                "git_ref": { "type": "string", "minLength": 1, "description": "The landed commit, as a SHA or ref such as main, resolved in the ChangeSet's worktree." }
             }),
             &["changeset_id", "git_ref"],
             false,
@@ -973,12 +988,12 @@ pub fn tool_catalog() -> Vec<Value> {
         tool(
             "register_agent",
             "Register coding agent",
-            "Register an agent/model and its isolated Git worktree in the shared coordination graph.",
+            "Register yourself as a participant and get the agent id every other write tool needs. Call it once at the start of each session, before publish_intent. Every call creates a new agent record, even for a name already in use; a warning is returned when an active agent with the same name and worktree exists, because that record's intents cannot be claimed by the new one. Passing a worktree records its Git branch and head and binds this store to that repository, which run_verification requires. Returns the agent, including its agt_ id, and any warnings.",
             json!({
-                "name": { "type": "string", "minLength": 1 },
-                "model": { "type": "string" },
-                "capabilities": { "type": "array", "items": { "type": "string" }, "default": [] },
-                "worktree": { "type": "string" }
+                "name": { "type": "string", "minLength": 1, "description": "A readable name for this agent, for example payments-stripe." },
+                "model": { "type": "string", "description": "Optional model identifier, for example the LLM you are running as." },
+                "capabilities": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Optional skills or areas, for example rust or payments, shown to other agents." },
+                "worktree": { "type": "string", "description": "Path to your Git worktree. Recommended; it must be inside a Git repository." }
             }),
             &["name"],
             false,
@@ -987,12 +1002,12 @@ pub fn tool_catalog() -> Vec<Value> {
         tool(
             "resolve_conflict",
             "Resolve a persisted conflict",
-            "Record an audited resolution decision for a durable cfl_* conflict so blocked work can proceed. Over MCP only an agent whose intent is a party to the conflict may resolve it, after real agreement with the other party (name the coordination message in the rationale); the decision is recorded under the resolver's agent id.",
+            "Record an audited resolution decision for a durable cfl_* conflict so blocked work can proceed. Over MCP only an agent whose intent is a party to the conflict may resolve it, after real agreement with the other party (name the coordination message in the rationale); the decision is recorded under the resolver's agent id. Use coordinate_with_agent first to reach that agreement, and discard_work instead when one side is simply dropping its work. Resolving moves the conflict to RESOLVED, which clears it from the acceptance gate for both intents; it does not change any code. It fails if the conflict is already resolved or dismissed. Returns the updated conflict.",
             json!({
-                "conflict_id": { "type": "string", "pattern": "^cfl_" },
-                "agent_id": { "type": "string", "minLength": 1 },
-                "resolution": { "type": "string", "minLength": 1 },
-                "rationale": { "type": "string", "minLength": 1 }
+                "conflict_id": { "type": "string", "pattern": "^cfl_", "description": "The conflict to resolve (cfl_...), from check_conflicts, publish_intent or status." },
+                "agent_id": { "type": "string", "minLength": 1, "description": "Your agent id (agt_...). Your intent must be one of the conflict's two parties." },
+                "resolution": { "type": "string", "minLength": 1, "description": "Short title for the agreed outcome, for example sequenced: provider abstraction lands first, or split scopes. No fixed vocabulary." },
+                "rationale": { "type": "string", "minLength": 1, "description": "Why this resolves the clash, naming the msg_ coordination message ids where you agreed it." }
             }),
             &["conflict_id", "agent_id", "resolution", "rationale"],
             false,
@@ -1001,14 +1016,15 @@ pub fn tool_catalog() -> Vec<Value> {
         tool(
             "run_verification",
             "Run a trusted verification check",
-            "Run one named check from the trusted Foremerge registry of the repository this store is bound to. Raw commands are intentionally not accepted over MCP, and the registry cannot be selected by the caller or the server's working directory.",
+            "Run one named check from the trusted Foremerge registry of the repository this store is bound to. Raw commands are intentionally not accepted over MCP, and the registry cannot be selected by the caller or the server's working directory. Use it after publish_changeset and before accept_changeset; acceptance relies on this result, not on tests you report yourself. The check's command runs in the ChangeSet's worktree with the registry's timeout, and it can write files there. The worktree must still match the fingerprint recorded at publication, or the call fails with STALE_CHANGESET and you must publish again. A pass moves the ChangeSet to VALIDATED; a failure leaves or returns it to PROVISIONAL. Returns the validation record: whether it passed, the exit code, captured stdout and stderr, the duration, and the fingerprint it ran against.",
             json!({
-                "changeset_id": { "type": "string", "minLength": 1 },
+                "changeset_id": { "type": "string", "minLength": 1, "description": "The ChangeSet (chg_...) to verify. Must be PROVISIONAL or VALIDATED." },
                 "check": {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 64,
-                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+                    "description": "Name of a check an operator registered with foremerge checks set, for example test. Unknown names are rejected."
                 }
             }),
             &["changeset_id", "check"],
@@ -1018,10 +1034,10 @@ pub fn tool_catalog() -> Vec<Value> {
         tool(
             "start_work",
             "Start claimed work",
-            "Advance an agent's claimed intent into IN_PROGRESS before implementation.",
+            "Mark your claimed intent as being implemented. Call it after claim_work, immediately before you begin editing code. It moves the intent from CLAIMED to IN_PROGRESS and fails in any other state, or if you do not own the intent. It does not create or renew claims; use claim_work for that. Returns the updated intent with open_conflicts, the OPEN or COORDINATING conflicts on it at that moment, so resolve any HIGH ones before going further.",
             json!({
-                "agent_id": { "type": "string", "minLength": 1 },
-                "intent_id": { "type": "string", "minLength": 1 }
+                "agent_id": { "type": "string", "minLength": 1, "description": "Your agent id (agt_...). Must own the intent." },
+                "intent_id": { "type": "string", "minLength": 1, "description": "Your CLAIMED intent (int_...)." }
             }),
             &["agent_id", "intent_id"],
             false,
@@ -1030,7 +1046,7 @@ pub fn tool_catalog() -> Vec<Value> {
         tool(
             "status",
             "Read coordinator status",
-            "Read one consistent snapshot of active agents, lifecycle groups, claims, conflicts, and ChangeSets.",
+            "Get the whole coordination picture in one call, taken from a single consistent read: active agents, all intents grouped by lifecycle status, unexpired claims, OPEN or COORDINATING conflicts with both parties named, and ChangeSets grouped by status. Read-only and takes no arguments. Use it to orient at the start of a session or before choosing work. Use query_work to filter by agent, status or scope, and get_intent or get_changeset for full detail on one item.",
             json!({}),
             &[],
             true,
@@ -1142,6 +1158,44 @@ mod tests {
         assert!(
             !hint.contains("tools/call"),
             "a tool needing arguments must not be offered as a call:\n{hint}"
+        );
+    }
+
+    /// Agents choose and fill tools from these strings alone, and registries
+    /// such as Glama grade servers on them, so an undocumented parameter is a
+    /// regression even when the schema is otherwise valid.
+    #[test]
+    fn every_tool_parameter_is_described() {
+        fn undocumented(tool: &str, path: &str, properties: &Value, missing: &mut Vec<String>) {
+            for (name, schema) in properties.as_object().into_iter().flatten() {
+                let here = format!("{path}.{name}");
+                let described = schema
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| !text.trim().is_empty());
+                if !described {
+                    missing.push(format!("{tool}: {here}"));
+                }
+                if let Some(nested) = schema.get("properties") {
+                    undocumented(tool, &here, nested, missing);
+                }
+                if let Some(nested) = schema
+                    .get("items")
+                    .and_then(|items| items.get("properties"))
+                {
+                    undocumented(tool, &format!("{here}[]"), nested, missing);
+                }
+            }
+        }
+        let mut missing = Vec::new();
+        for tool in tool_catalog() {
+            let name = tool["name"].as_str().unwrap();
+            undocumented(name, "", &tool["inputSchema"]["properties"], &mut missing);
+        }
+        assert!(
+            missing.is_empty(),
+            "undocumented parameters:\n{}",
+            missing.join("\n")
         );
     }
 
