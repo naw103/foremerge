@@ -15,6 +15,7 @@ pub mod db;
 pub mod exclusions;
 pub mod git;
 pub mod integrations;
+pub mod ledger;
 pub mod mcp;
 pub mod model;
 pub mod service;

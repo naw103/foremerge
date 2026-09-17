@@ -7001,3 +7001,275 @@ fn work_claim_and_query_refuse_a_trailing_operation_but_keep_equals_in_keys() {
         "both intents declared and claimed the flag: {owners}"
     );
 }
+
+/// Start an MCP server for `repo` and complete the handshake, so the server
+/// has opened, and holds open, the repository's ledger.
+fn start_initialized_mcp(
+    repo: &Path,
+) -> (
+    Child,
+    std::process::ChildStdin,
+    std::io::BufReader<std::process::ChildStdout>,
+) {
+    let mut child = Command::new(foremerge_bin())
+        .arg("--cwd")
+        .arg(repo)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn MCP server");
+    let mut stdin = child.stdin.take().expect("MCP stdin");
+    let mut reader = std::io::BufReader::new(child.stdout.take().expect("MCP stdout"));
+    let initialized = stdio_request(
+        &mut stdin,
+        &mut reader,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "foremerge-e2e", "version": "1" }
+            }
+        }),
+    );
+    assert!(initialized["result"].is_object(), "{initialized}");
+    writeln!(
+        stdin,
+        "{}",
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized", "params": {} })
+    )
+    .expect("write initialized notification");
+    (child, stdin, reader)
+}
+
+#[test]
+fn a_running_mcp_server_stops_writing_once_another_build_migrates_the_ledger() {
+    // COR-767: servers started before a newer build migrated GPTree's ledger
+    // kept writing to it in their own schema's shape. Opening checked the
+    // schema once; nothing checked it again.
+    let repo = create_repo();
+    let database = database_from_doctor(&repo.root);
+    let (mut child, mut stdin, mut reader) = start_initialized_mcp(&repo.root);
+    stdio_tool_call(
+        &mut stdin,
+        &mut reader,
+        2,
+        "register_agent",
+        json!({ "name": "before-migration" }),
+    );
+
+    let (_, newer) = stamp_newer_schema(&database);
+    Connection::open(&database)
+        .expect("open ledger")
+        .execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_written_by', '9.9.9')",
+            [],
+        )
+        .expect("record the migrating build");
+
+    for (id, name, arguments) in [
+        (3, "register_agent", json!({ "name": "after-migration" })),
+        (4, "status", json!({})),
+    ] {
+        let response = stdio_request(
+            &mut stdin,
+            &mut reader,
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": { "name": name, "arguments": arguments }
+            }),
+        );
+        assert_eq!(response["result"]["isError"], true, "{name}: {response}");
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("error text");
+        assert!(
+            text.contains(&format!("UNSUPPORTED_SCHEMA: database schema {newer}"))
+                && text.contains("Foremerge 9.9.9"),
+            "{name}: {text}"
+        );
+    }
+    drop(stdin);
+    child.wait().expect("MCP server exits");
+
+    let names: Vec<String> = Connection::open(&database)
+        .expect("open ledger")
+        .prepare("SELECT name FROM agents ORDER BY name")
+        .expect("prepare")
+        .query_map([], |row| row.get(0))
+        .expect("query agents")
+        .collect::<Result<_, _>>()
+        .expect("read agents");
+    assert_eq!(
+        names,
+        vec!["before-migration".to_string()],
+        "nothing may be written after the migration"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ledger_reset_refuses_while_a_server_holds_the_ledger_and_keeps_everything_it_moves() {
+    let repo = create_repo();
+    let database = database_from_doctor(&repo.root);
+    cli_success(&repo.root, None, ["agent", "register", "--name", "kept"]);
+
+    let (mut child, stdin, _reader) = start_initialized_mcp(&repo.root);
+    let pid = child.id();
+
+    // A dry run names what stands in the way instead of refusing.
+    let plan = cli_success(&repo.root, None, ["ledger", "reset"]);
+    assert_eq!(plan["data"]["applied"], false, "{plan}");
+    assert_eq!(plan["data"]["current"]["counts"]["agents"], 1, "{plan}");
+    assert!(
+        plan["data"]["in_use_by"]
+            .as_array()
+            .expect("in_use_by")
+            .iter()
+            .any(|holder| holder["pid"] == pid),
+        "the server holding the ledger must be named: {plan}"
+    );
+
+    let refused = cli_failure(&repo.root, None, ["ledger", "reset", "--yes"]);
+    assert_eq!(refused["error"]["code"], "LEDGER_IN_USE", "{refused}");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(&format!("pid {pid}"))),
+        "{refused}"
+    );
+    assert!(database.is_file(), "a refused reset moves nothing");
+
+    drop(stdin);
+    child.wait().expect("MCP server exits");
+
+    let reset = cli_success(&repo.root, None, ["ledger", "reset", "--yes"]);
+    let data = &reset["data"];
+    assert_eq!(data["applied"], true, "{reset}");
+    assert_eq!(data["set_aside"]["counts"]["agents"], 1, "{reset}");
+    assert_eq!(data["ledger"]["counts"]["agents"], 0, "{reset}");
+    let backup_dir = PathBuf::from(data["backup_dir"].as_str().expect("backup_dir"));
+    assert_eq!(
+        backup_dir.parent(),
+        database.parent().map(|p| p.join("backups")).as_deref()
+    );
+    let backup = backup_dir.join("state.sqlite3");
+    assert!(backup.is_file(), "the old ledger is kept intact: {reset}");
+
+    let status = cli_success(&repo.root, None, ["status"]);
+    assert_eq!(status["data"]["agents"], json!([]), "{status}");
+
+    // The backup restores, with the history it held.
+    let restored = cli_success(
+        &repo.root,
+        None,
+        [
+            OsStr::new("ledger"),
+            OsStr::new("reset"),
+            OsStr::new("--yes"),
+            OsStr::new("--from"),
+            backup.as_os_str(),
+        ],
+    );
+    assert_eq!(
+        restored["data"]["ledger"]["counts"]["agents"], 1,
+        "{restored}"
+    );
+    let status = cli_success(&repo.root, None, ["status"]);
+    assert_eq!(status["data"]["agents"][0]["name"], "kept", "{status}");
+    let doctor = cli_success(&repo.root, None, ["doctor"]);
+    assert_eq!(doctor["data"]["event_chain_ok"], true, "{doctor}");
+}
+
+#[test]
+fn ledger_reset_recovers_a_ledger_no_release_can_open_and_refuses_a_newer_backup() {
+    let repo = create_repo();
+    let database = database_from_doctor(&repo.root);
+    let (_, newer) = stamp_newer_schema(&database);
+    cli_failure(&repo.root, None, ["status"]);
+
+    let reset = cli_success(&repo.root, None, ["ledger", "reset", "--yes"]);
+    assert_eq!(
+        reset["data"]["set_aside"]["schema_version"], newer,
+        "{reset}"
+    );
+    let backup = PathBuf::from(reset["data"]["backup_dir"].as_str().expect("backup_dir"))
+        .join("state.sqlite3");
+    cli_success(&repo.root, None, ["status"]);
+
+    let refused = cli_failure(
+        &repo.root,
+        None,
+        [
+            OsStr::new("ledger"),
+            OsStr::new("reset"),
+            OsStr::new("--yes"),
+            OsStr::new("--from"),
+            backup.as_os_str(),
+        ],
+    );
+    assert_eq!(refused["error"]["code"], "UNSUPPORTED_SCHEMA", "{refused}");
+    cli_success(&repo.root, None, ["status"]);
+}
+
+#[test]
+fn ledger_reset_without_a_ledger_says_there_is_nothing_to_reset() {
+    let repo = create_repo();
+    let refused = cli_failure(&repo.root, None, ["ledger", "reset", "--yes"]);
+    assert_eq!(refused["error"]["code"], "NOT_INITIALIZED", "{refused}");
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_warns_about_a_second_installation_at_another_version() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = create_repo();
+    cli_success(&repo.root, None, ["init"]);
+    let other = repo.temp.path().join("other-bin");
+    fs::create_dir(&other).expect("create bin dir");
+    let stale = other.join("foremerge");
+    fs::write(&stale, "#!/bin/sh\necho 'foremerge 0.0.1'\n").expect("write stub");
+    fs::set_permissions(&stale, fs::Permissions::from_mode(0o755)).expect("chmod stub");
+    let home = repo.temp.path().join("home");
+    fs::create_dir(&home).expect("create home");
+
+    let output = cli_command(&repo.root, None)
+        .arg("doctor")
+        .env("PATH", format!("{}:/usr/bin:/bin", other.display()))
+        .env("HOME", &home)
+        .env_remove("CARGO_HOME")
+        .output()
+        .expect("run doctor");
+    let doctor = parse_cli_json(&output);
+    let data = &doctor["data"];
+    let installations = data["installations"].as_array().expect("installations");
+    assert!(
+        installations.iter().any(
+            |value| value["path"] == stale.display().to_string() && value["version"] == "0.0.1"
+        ),
+        "{doctor}"
+    );
+    assert!(
+        installations
+            .iter()
+            .any(|value| value["this_binary"] == true),
+        "{doctor}"
+    );
+    let warnings = data["warnings"].as_array().expect("warnings");
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|text| text.contains("Foremerge 0.0.1 is also installed at"))),
+        "{doctor}"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("warning: Foremerge 0.0.1"),
+        "warnings reach a human reader too"
+    );
+}

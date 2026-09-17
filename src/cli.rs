@@ -1,7 +1,7 @@
 use crate::api::{self, ApiState};
 use crate::git;
 use crate::model::*;
-use crate::{Foremerge, Store, checks, exclusions, integrations, mcp};
+use crate::{Foremerge, Store, checks, exclusions, integrations, ledger, mcp};
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde_json::{Value, json};
@@ -108,8 +108,32 @@ enum Commands {
     /// Create an isolated Git worktree.
     #[command(subcommand)]
     Worktree(WorktreeCommand),
+    /// Recover the coordination ledger: set it aside, start fresh, or restore a backup.
+    #[command(subcommand)]
+    Ledger(LedgerCommand),
     /// Raw JSON API escape hatch using configured local auth.
     Request(RequestArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum LedgerCommand {
+    /// Move the ledger into a timestamped backup directory, then create a fresh
+    /// ledger or restore one from a backup.
+    ///
+    /// Use it when no Foremerge build you can install opens the ledger, for
+    /// example after a development build migrated it, or to roll back to a
+    /// backup. Nothing is deleted: the current ledger and its WAL move intact
+    /// into `backups/` beside it. Refuses while any other process, such as an
+    /// agent client's MCP server, has the ledger open. Without --yes it only
+    /// reports what it would do.
+    Reset {
+        /// Restore this ledger file (a backup) instead of starting empty.
+        #[arg(long, value_name = "BACKUP")]
+        from: Option<PathBuf>,
+        /// Apply the reset. Without it nothing is changed.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -703,11 +727,17 @@ async fn execute(cli: Cli) -> Result<Completion> {
                         .map(|error| format!("{}: {error}", report.client))
                 })
                 .collect();
+            let warnings =
+                integrations::installation_warnings(&integrations::installations(&executable));
+            for warning in &warnings {
+                eprintln!("warning: {warning}");
+            }
             let data = json!({
                 "repository": repo.root,
                 "database": service.store().path(),
                 "token_file": token_path,
                 "clients": reports,
+                "warnings": warnings,
                 "next_step": format!("foremerge --json doctor --client {doctor_client}")
             });
             if failures.is_empty() {
@@ -765,13 +795,24 @@ async fn execute(cli: Cli) -> Result<Completion> {
             };
             let repo = git::discover(&cwd).ok();
             let token_path = git::runtime_dir(&cwd).join("token");
+            let executable = std::env::current_exe().context("resolve Foremerge executable")?;
+            let executable = executable.canonicalize().unwrap_or(executable);
             let client_diagnostics = client.map(|value| {
                 integrations::diagnose(
                     repo.as_ref()
                         .map_or(cwd.as_path(), |value| value.root.as_path()),
                     &value.clients(),
+                    &executable,
                 )
             });
+            let installations = integrations::installations(&executable);
+            let mut warnings = integrations::installation_warnings(&installations);
+            warnings.extend(
+                client_diagnostics
+                    .iter()
+                    .flatten()
+                    .filter_map(|value| value.warning.clone()),
+            );
             let clients_ready = client_diagnostics
                 .as_ref()
                 .is_none_or(|values| values.iter().all(|value| value.ready));
@@ -804,7 +845,7 @@ async fn execute(cli: Cli) -> Result<Completion> {
                     .and_then(|error| match error.code.as_str() {
                         "NOT_INITIALIZED" => None,
                         "UNSUPPORTED_SCHEMA" => Some(format!(
-                            "Install a Foremerge release that supports this ledger's schema (this build is version {}), then restart agent clients so their MCP servers relaunch",
+                            "Install a Foremerge release that supports this ledger's schema (database_error names the build that migrated it; this build is version {}), run `foremerge setup` with it, then restart agent clients so their MCP servers relaunch. If no release supports it, `foremerge ledger reset` sets the ledger aside and starts a fresh one or restores a backup",
                             env!("CARGO_PKG_VERSION")
                         )),
                         // "Resolve the ERROR error" reads as nonsense, and an
@@ -853,8 +894,13 @@ async fn execute(cli: Cli) -> Result<Completion> {
                 },
                 clients: client_diagnostics,
                 checks: checks_diagnosis.clone(),
+                installations,
+                warnings: warnings.clone(),
             };
             emit(cli.json, serde_json::to_value(report)?)?;
+            for warning in &warnings {
+                eprintln!("warning: {warning}");
+            }
             if let Some(diagnosis) = checks_diagnosis {
                 for warning in &diagnosis.warnings {
                     eprintln!("warning: {warning}");
@@ -1005,6 +1051,24 @@ async fn execute(cli: Cli) -> Result<Completion> {
                     "mcp_mutation_allowed": false,
                 }),
             )?;
+        }
+        Commands::Ledger(LedgerCommand::Reset { from, yes }) => {
+            // Same guard as `open_service`: outside a repository the default
+            // path names a stray store nobody meant.
+            if cli.database.is_none() && git::discover(&cwd).is_err() {
+                bail!(
+                    "INVALID_INPUT: no Git repository at {}; run this inside the repository whose ledger you want to reset, or pass --database PATH",
+                    cwd.display()
+                );
+            }
+            let from = from.map(|path| {
+                if path.is_absolute() {
+                    path
+                } else {
+                    cwd.join(path)
+                }
+            });
+            emit(cli.json, ledger::reset(&database, from.as_deref(), yes)?)?;
         }
         Commands::Request(request) => run_raw_request(&cwd, request, cli.json).await?,
         Commands::Worktree(WorktreeCommand::Create { branch, path, base }) => {
