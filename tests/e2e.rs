@@ -6004,6 +6004,123 @@ fn unverified_work_is_recorded_as_unverified_rather_than_faked() {
     assert_eq!(accepted_event["payload"]["verification"], "UNVERIFIED");
 }
 
+/// Acceptance enforces a ChangeSet's `dependencies`, not an intent's
+/// `depends_on`. The MCP tool descriptions once said the reverse, and an agent
+/// following them would either skip a dependency it needed enforced or name a
+/// package in `dependencies` and make its own work impossible to accept. This
+/// pins the real contract so the descriptions can be held to it.
+#[test]
+fn acceptance_enforces_changeset_dependencies_and_not_intent_depends_on() {
+    // One published ChangeSet under an advisory policy, with the intent's
+    // depends_on and the ChangeSet's dependencies set independently.
+    let publish = |depends_on: Option<&str>, dependency: Option<&str>| {
+        let repo = create_repo();
+        let root = repo.root.clone();
+        cli_success(&root, None, ["init"]);
+        cli_success(&root, None, ["checks", "policy", "advisory"]);
+        let agent = cli_success(
+            &root,
+            None,
+            [
+                "agent",
+                "register",
+                "--name",
+                "worker",
+                "--worktree",
+                root.to_str().unwrap(),
+            ],
+        )["data"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mut intent_args = vec![
+            "intent",
+            "publish",
+            "--agent",
+            &agent,
+            "--task",
+            "t",
+            "--summary",
+            "Extend the thing",
+            "--scope",
+            "component:Thing=extend",
+        ];
+        if let Some(target) = depends_on {
+            intent_args.extend(["--depends-on", target]);
+        }
+        let intent = cli_success(&root, None, intent_args)["data"]["intent"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        cli_success(
+            &root,
+            None,
+            [
+                "work",
+                "claim",
+                "--agent",
+                &agent,
+                "--intent",
+                &intent,
+                "--scope",
+                "component:Thing",
+            ],
+        );
+        cli_success(&root, None, ["work", "start", "--agent", &agent, &intent]);
+        fs::write(root.join("thing.txt"), "thing\n").expect("write file");
+        git(&root, ["add", "-A"]);
+        git(&root, ["commit", "--quiet", "-m", "extend the thing"]);
+        let root_text = root.to_string_lossy().into_owned();
+        let mut changeset_args = vec![
+            "changeset",
+            "publish",
+            "--agent",
+            &agent,
+            "--intent",
+            &intent,
+            "--summary",
+            "Extend the thing",
+            "--worktree",
+            &root_text,
+        ];
+        if let Some(target) = dependency {
+            changeset_args.extend(["--dependency", target]);
+        }
+        let changeset = data_string(&cli_success(&root, None, changeset_args), "id").to_string();
+        (repo, changeset)
+    };
+
+    // An intent's depends_on is recorded but never checked: even an intent id
+    // that does not exist does not hold acceptance back.
+    let (repo, changeset) = publish(Some("int_does_not_exist"), None);
+    let accepted = cli_success(&repo.root, None, ["changeset", "accept", &changeset]);
+    assert_eq!(accepted["data"]["status"], "ACCEPTED", "{accepted}");
+
+    // A ChangeSet's dependencies are intent ids, checked at acceptance. The
+    // same missing intent there blocks it.
+    let (repo, changeset) = publish(None, Some("int_does_not_exist"));
+    let refused = cli_failure(&repo.root, None, ["changeset", "accept", &changeset]);
+    assert_eq!(
+        refused["error"]["code"], "UNSATISFIED_DEPENDENCY",
+        "{refused}"
+    );
+
+    // And a package name is not an intent id, so listing one makes the
+    // ChangeSet impossible to accept.
+    let (repo, changeset) = publish(None, Some("serde"));
+    let refused = cli_failure(&repo.root, None, ["changeset", "accept", &changeset]);
+    assert_eq!(
+        refused["error"]["code"], "UNSATISFIED_DEPENDENCY",
+        "{refused}"
+    );
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("intent serde does not exist")),
+        "{refused}"
+    );
+}
+
 /// An advisory policy is for repositories with nothing to verify. It must never
 /// wave through a check that ran and failed, which is evidence of breakage
 /// rather than an absence of evidence.
