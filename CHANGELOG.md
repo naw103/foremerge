@@ -9,6 +9,17 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+### Fixed
+
+- `query_work` and `list_agents` could not be called from a client that
+  validates tool results. Both answer with a JSON array, and the MCP server put
+  that array in `structuredContent`, which the protocol defines as an object.
+  The official MCP TypeScript client rejects the whole response with
+  `Invalid result for tools/call: expected record, received array`, and Claude
+  Code rejects it too, so two of the read tools were unusable while `status` and
+  the rest worked. An array result now travels in the text block alone, as JSON,
+  and `structuredContent` is sent only when the result is an object.
+
 ## [0.4.2] - 2026-09-16
 
 ### Fixed
