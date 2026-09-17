@@ -147,15 +147,21 @@ committed or when semantic impact extends beyond the textual diff.
 ## Validation and freshness
 
 A validation runs in an explicitly selected worktree or the ChangeSet's recorded
-worktree. Its command is an argument vector:
+worktree. Its command is an argument vector, never a shell string. On the CLI
+the operator supplies it directly (`foremerge changeset validate <id> --
+cargo test --all-targets`). Over MCP and HTTP the caller names a check from the
+repository's trusted registry, which supplies the argument vector and timeout:
 
 ```json
 {
-  "command": ["cargo", "test", "--all-targets"],
-  "worktree": "/path/to/agent-worktree",
-  "timeout_seconds": 300
+  "check": "test"
 }
 ```
+
+The check runs at the root of the ChangeSet's recorded worktree. No surface can
+run it from a subdirectory: the fingerprint is identical anywhere inside a
+worktree, so a nested directory could otherwise turn a failing root command into
+a pass that is recorded as verified.
 
 Foremerge records exit status, standard output, standard error, duration, and
 the ChangeSet fingerprint associated with the run. A zero exit status is a

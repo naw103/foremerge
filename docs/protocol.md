@@ -64,8 +64,8 @@ The complete lifecycle and core read parity are available through 18 MCP tools:
 - `status`
 
 `run_verification` accepts only a trusted check name from repository-private
-Foremerge configuration. The CLI and HTTP API retain their direct argv
-validation operation. Consult [MCP setup](mcp-setup.md), [agent client setup](agent-clients.md),
+Foremerge configuration, as does the HTTP API's validate operation. Only the
+CLI retains direct argv validation. Consult [MCP setup](mcp-setup.md), [agent client setup](agent-clients.md),
 and [JSON API](json-api.md) for the exact shipped surfaces.
 
 ## CLI surface

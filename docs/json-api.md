@@ -400,18 +400,32 @@ publisher learns about conflicts that later publishes created against it.
 
 ## Validate a ChangeSet
 
-Commands are JSON argument arrays, not shell strings:
+Validation over HTTP runs a check by name from the repository's trusted
+registry, the same registry MCP's `run_verification` uses. Configure the check
+once from the CLI, where its argument vector and timeout are set:
+
+```bash
+foremerge checks set test -- cargo test --all-targets
+```
+
+Then name it in the request:
 
 ```bash
 fm_curl \
   -H 'content-type: application/json' \
   -X POST "$FOREMERGE_URL/v1/changesets/chg_REPLACE_ME/validate" \
-  -d "$(jq -n --arg worktree "$PWD" '{
-    command:["cargo","test","--all-targets"],
-    worktree:$worktree,
-    timeout_seconds:300
-  }')" | jq .
+  -d '{"check":"test"}' | jq .
 ```
+
+The check runs in the ChangeSet's recorded worktree, at its root; the request
+cannot name another directory, because the fingerprint is the same from anywhere
+inside a worktree while a command's behaviour is not. The registry is resolved
+from the repository the coordination store is bound to, never from the request
+or the daemon's working directory. A body carrying a raw `command` array, a
+`worktree`, or any field other than `check`, is rejected with `INVALID_INPUT`
+before anything runs, and an unconfigured name
+returns `NOT_FOUND`. To run an arbitrary argument vector, use
+`foremerge changeset validate <id> -- <argv...>` on the CLI.
 
 The immediate result includes pass/fail, exit code, stdout, stderr, duration,
 fingerprint, and run time. Stdout and stderr are each limited to their final

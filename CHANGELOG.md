@@ -9,6 +9,31 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking (HTTP API):** `POST /v1/changesets/{id}/validate` now runs a
+  check by name from the repository's trusted registry, the same one MCP's
+  `run_verification` uses, instead of executing an argument vector taken from
+  the request body. The body is `{"check": "<name>"}`, and the check runs in
+  the ChangeSet's recorded worktree. A body carrying `command`,
+  `timeout_seconds`, `worktree` or any other field is rejected with
+  `INVALID_INPUT` before anything runs, and an
+  unconfigured name returns `NOT_FOUND`. Until now any bearer-token holder, or
+  any local process when the daemon ran with `--no-auth`, could make the daemon
+  execute an arbitrary program; CodeQL reported this as
+  `rust/command-line-injection`.
+
+  Migration: register each command once with
+  `foremerge checks set <name> [--timeout-seconds N] -- <argv...>` and send its
+  name. The CLI's `foremerge changeset validate <id> -- <argv...>` is unchanged
+  and still accepts a raw argument vector.
+- Validation always runs at the root of the ChangeSet's worktree. A worktree
+  path naming a subdirectory, on the CLI's `changeset validate --worktree` or
+  anywhere else, is refused with `INVALID_INPUT`. The fingerprint is the same
+  from any directory inside a worktree, so running a registered root test
+  command in a nested package whose tests pass used to produce a passing,
+  verified result for the unchanged fingerprint.
+
 ## [0.4.2] - 2026-09-16
 
 ### Fixed

@@ -2009,6 +2009,215 @@ async fn http_exposes_core_read_parity_with_cli_and_mcp() {
     daemon.stop();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_validation_runs_only_trusted_named_checks() {
+    let repo = create_repo();
+    let database = database_from_doctor(&repo.root);
+    let (agent_id, intent_id) =
+        create_active_test_work(&repo.root, "http-check-agent", "http-named-check");
+    let changeset_id = publish_test_revision(
+        &repo.root,
+        &agent_id,
+        &intent_id,
+        "HTTP named check candidate",
+    );
+    let token =
+        fs::read_to_string(repo.root.join(".git/foremerge/token")).expect("read initialized token");
+    let address = unused_loopback_address();
+    let base_url = format!("http://{address}");
+    let daemon = spawn_daemon(&repo.root, &database, address);
+    let client = reqwest::Client::new();
+    wait_for_health(&client, &base_url).await;
+    let validate_url = format!("{base_url}/v1/changesets/{changeset_id}/validate");
+
+    // A raw argv in the request body must be refused before anything runs.
+    let outside = tempfile::tempdir().expect("create marker directory");
+    let marker = outside.path().join("raw-command-ran");
+    let raw = client
+        .post(&validate_url)
+        .bearer_auth(token.trim())
+        .json(&json!({
+            "command": ["sh", "-c", "touch \"$1\"", "sh", marker],
+            "worktree": repo.root,
+        }))
+        .send()
+        .await
+        .expect("send raw command validation");
+    assert_eq!(raw.status(), reqwest::StatusCode::BAD_REQUEST);
+    let raw: Value = raw.json().await.expect("raw command error JSON");
+    assert_eq!(raw["error"]["code"], "INVALID_INPUT", "{raw}");
+    assert!(
+        raw["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("checks set")),
+        "the refusal must point at the trusted registry: {raw}"
+    );
+    assert!(!marker.exists(), "a raw HTTP command must never execute");
+
+    let unknown_field = client
+        .post(&validate_url)
+        .bearer_auth(token.trim())
+        .json(&json!({ "check": "test", "timeout_seconds": 1 }))
+        .send()
+        .await
+        .expect("send validation with an unknown field");
+    assert_eq!(unknown_field.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let unconfigured = client
+        .post(&validate_url)
+        .bearer_auth(token.trim())
+        .json(&json!({ "check": "test" }))
+        .send()
+        .await
+        .expect("send unconfigured check validation");
+    assert_eq!(unconfigured.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // Nor may the caller choose the directory. The fingerprint is identical
+    // anywhere inside the worktree, so a nested directory could make a
+    // registered root check behave differently and still record a pass.
+    let redirected = client
+        .post(&validate_url)
+        .bearer_auth(token.trim())
+        .json(&json!({ "check": "test", "worktree": repo.root.join("nested") }))
+        .send()
+        .await
+        .expect("send validation naming a worktree");
+    assert_eq!(redirected.status(), reqwest::StatusCode::BAD_REQUEST);
+    let redirected: Value = redirected.json().await.expect("worktree error JSON");
+    assert_eq!(redirected["error"]["code"], "INVALID_INPUT", "{redirected}");
+
+    let attempts: Value = client
+        .get(format!(
+            "{base_url}/v1/changesets/{changeset_id}/validation-attempts"
+        ))
+        .bearer_auth(token.trim())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        attempts["data"].as_array().map(Vec::len),
+        Some(0),
+        "refused requests must not record validation attempts: {attempts}"
+    );
+
+    cli_success(
+        &repo.root,
+        None,
+        ["checks", "set", "test", "--", "git", "diff", "--check"],
+    );
+    let validated: Value = client
+        .post(&validate_url)
+        .bearer_auth(token.trim())
+        .json(&json!({ "check": "test" }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(validated["data"]["passed"], true, "{validated}");
+    assert_eq!(
+        validated["data"]["command"],
+        json!(["git", "diff", "--check"]),
+        "the registry, not the request, supplies the command: {validated}"
+    );
+    daemon.stop();
+}
+
+/// A worktree fingerprint is the same from any directory inside the worktree,
+/// but a command's behaviour is not. Validation used to run in whatever
+/// directory the caller named, so a root check that fails could pass when run
+/// inside a nested package, and the ChangeSet was then accepted as verified for
+/// the same fingerprint. No surface may run validation below the worktree root.
+#[cfg(unix)]
+#[test]
+fn a_nested_directory_cannot_turn_a_failing_root_check_into_a_pass() {
+    let repo = create_repo();
+    // The file exists only in a nested directory, so the check fails at the
+    // root and would pass one level down.
+    fs::create_dir(repo.root.join("nested")).expect("create nested directory");
+    fs::write(repo.root.join("nested/only-here"), "marker\n").expect("write marker");
+    git(&repo.root, ["add", "-A"]);
+    git(&repo.root, ["commit", "--quiet", "-m", "nested marker"]);
+    let _ = database_from_doctor(&repo.root);
+    cli_success(
+        &repo.root,
+        None,
+        [
+            "checks",
+            "set",
+            "only-here",
+            "--",
+            "sh",
+            "-c",
+            "test -f only-here",
+        ],
+    );
+    let (agent_id, intent_id) =
+        create_active_test_work(&repo.root, "nested-check-agent", "nested-check");
+    let changeset_id = publish_test_revision(
+        &repo.root,
+        &agent_id,
+        &intent_id,
+        "Nested directory validation candidate",
+    );
+
+    let nested = repo.root.join("nested");
+    let redirected = cli_failure(
+        &repo.root,
+        None,
+        [
+            "changeset",
+            "validate",
+            &changeset_id,
+            "--worktree",
+            nested.to_str().unwrap(),
+            "--",
+            "sh",
+            "-c",
+            "test -f only-here",
+        ],
+    );
+    assert_eq!(redirected["error"]["code"], "INVALID_INPUT", "{redirected}");
+    assert!(
+        redirected["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("worktree root")),
+        "{redirected}"
+    );
+    let attempts = cli_success(&repo.root, None, ["changeset", "attempts", &changeset_id]);
+    assert_eq!(
+        attempts["data"].as_array().map(Vec::len),
+        Some(0),
+        "a refused directory must not record an attempt: {attempts}"
+    );
+
+    // At the root the check fails, as it should, and acceptance is refused.
+    let failed = cli_success(
+        &repo.root,
+        None,
+        [
+            "changeset",
+            "validate",
+            &changeset_id,
+            "--",
+            "sh",
+            "-c",
+            "test -f only-here",
+        ],
+    );
+    assert_eq!(failed["data"]["passed"], false, "{failed}");
+    let refused = cli_failure(&repo.root, None, ["changeset", "accept", &changeset_id]);
+    assert_eq!(refused["error"]["code"], "CHECK_FAILED", "{refused}");
+}
+
 #[test]
 fn event_log_triggers_reject_mutation_and_hash_chain_detects_insertion() {
     let temp = tempfile::tempdir().expect("create event fixture");
