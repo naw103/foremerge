@@ -20,6 +20,15 @@ changes when they are called out here with a migration note.
   HEAD. A test now fails if a parameter is added without a description. Tool
   names, schemas and behaviour are unchanged.
 
+  The descriptions also state plainly several things that were true but easy
+  to get wrong: acceptance enforces a ChangeSet's `dependencies`, which must be
+  intent ids, and does not check an intent's `depends_on`; a COORDINATING HIGH
+  conflict blocks acceptance just as an OPEN one does; `resolve_conflict` over
+  MCP checks only that the caller is a party, not that the other party agreed;
+  no MCP tool reads coordination messages; and `files` and `symbols` are
+  inferred only from uncommitted changes. The catalogue grows from about 13 kB
+  to about 31 kB, and a test holds it to a budget.
+
 ### Fixed
 
 - `query_work` and `list_agents` could not be called from a client that
