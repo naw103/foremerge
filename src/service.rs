@@ -1550,18 +1550,7 @@ impl Foremerge {
         let repository_service = service.clone();
         let current = blocking(move || {
             let current = git::snapshot(&snapshot_worktree)?;
-            // The fingerprint describes the whole worktree, so it is identical
-            // from any directory inside it, but a command's behaviour is not.
-            // Run only at the worktree root the fingerprint was taken for, or a
-            // failing root check could be passed by running it in a nested
-            // package, and the result would still be recorded as verified.
-            if canonical_path(&snapshot_worktree) != canonical_path(&current.root) {
-                bail!(
-                    "INVALID_INPUT: validation must run at a worktree root, not inside one; {} is inside {}",
-                    snapshot_worktree.display(),
-                    current.root.display()
-                );
-            }
+            ensure_validation_root(&snapshot_worktree, &current.root)?;
             if let Some(recorded_worktree) = recorded_worktree.as_deref() {
                 let recorded_repo = git::discover(recorded_worktree)?;
                 if canonical_path(&recorded_repo.common_dir)
@@ -3602,6 +3591,24 @@ fn canonical_path(path: &std::path::Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// Refuse a validation directory that is not the root of its worktree.
+///
+/// A fingerprint describes the whole worktree, so it is the same from any
+/// directory inside it, while a command's behaviour is not: a root check run
+/// inside a nested package can pass where the root fails, and the pass would be
+/// recorded against the unchanged fingerprint. Compared canonically, so a
+/// symlinked or relative spelling of the same directory is still the root.
+fn ensure_validation_root(requested: &std::path::Path, root: &std::path::Path) -> Result<()> {
+    if canonical_path(requested) != canonical_path(root) {
+        bail!(
+            "INVALID_INPUT: validation must run at a worktree root, not inside one; {} is inside {}",
+            requested.display(),
+            root.display()
+        );
+    }
+    Ok(())
+}
+
 fn ensure_repository_matches(conn: &Connection, common_dir: &std::path::Path) -> Result<()> {
     let expected: Option<String> = conn
         .query_row(
@@ -4717,5 +4724,34 @@ mod tests {
         );
         assert!(scoped.contains("idx_intent_scopes_canonical"), "{scoped}");
         assert!(scoped.contains("idx_claims_scope"), "{scoped}");
+    }
+
+    /// The exploit regression needs a shell, so it runs only on Unix. This
+    /// exercises the rule it depends on everywhere: validation runs at the
+    /// worktree root, and a directory inside the worktree is refused even
+    /// though its fingerprint is identical.
+    #[test]
+    fn only_the_worktree_root_may_run_validation() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("worktree");
+        let nested = root.join("packages").join("inner");
+        std::fs::create_dir_all(&nested).expect("create nested directory");
+
+        ensure_validation_root(&root, &root).expect("the root itself is allowed");
+        // A relative spelling of the same directory is still the root.
+        ensure_validation_root(&root.join("."), &root).expect("a dot segment still names the root");
+
+        for inside in [nested.as_path(), root.join("packages").as_path()] {
+            let error = ensure_validation_root(inside, &root)
+                .expect_err("a directory inside the worktree must be refused");
+            let message = format!("{error:#}");
+            assert!(message.starts_with("INVALID_INPUT:"), "{message}");
+            assert!(message.contains("worktree root"), "{message}");
+        }
+
+        let elsewhere = temp.path().join("other");
+        std::fs::create_dir(&elsewhere).expect("create unrelated directory");
+        ensure_validation_root(&elsewhere, &root)
+            .expect_err("an unrelated directory must be refused");
     }
 }
