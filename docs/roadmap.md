@@ -63,19 +63,22 @@ validation must leave the target Git ref unchanged.
   claims. The scripted five-scenario correctness runner and query microbenchmark
   are already committed.
 
-## Later: optional shared coordination
+## Later: deeper coordination on one machine
 
-- An authenticated shared daemon for agents on different machines.
-- A transport-neutral subscription interface for semantic events.
-- Replication, backup, access-control, retention, and redaction policies.
-- Git-hosting status checks and review summaries that reference ordinary commits
-  and branches.
-- Team policy for required validation without making Foremerge a merge queue or
-  source-control replacement.
+- A subscription interface for semantic events on the local store, so an agent
+  learns that a later intent collided with its own without re-running a check.
+  `work watch` polls today.
 
-Shared mode will require a separate threat model and concurrency design. The
-local SQLite database is not a distributed database and will not be presented as
-one.
+Foremerge coordinates agents that share one machine and one Git repository, and
+that is the scope of this repository. Earlier versions of this roadmap listed
+cross-machine operation and the policy and retention features that go with it;
+they are removed rather than left as commitments this project has not made.
+
+What that scope rules out is not a small matter of effort. Agent identity over
+MCP and the loopback API is self-asserted, the local SQLite database is not a
+distributed database and will not be presented as one, and coordination between
+machines needs an identity boundary, a threat model and a concurrency design
+that none of the above provides.
 
 ## Research track
 
