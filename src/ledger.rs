@@ -347,15 +347,23 @@ fn backup_directory(database: &Path, schema: Option<i64>) -> Result<PathBuf> {
     Ok(candidate)
 }
 
-fn create_private_dir(path: &Path) -> Result<()> {
+/// Create a backup directory and its `backups` parent, private to the owner.
+///
+/// Only the directories this creates are made private. An earlier version also
+/// chmodded the parent of whatever it was given, which for the default ledger
+/// path is the repository's `.git` directory, and for an unusual `--database`
+/// could be any directory at all.
+fn create_backup_dir(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    if let Some(root) = path.parent() {
+        std::fs::create_dir_all(root).with_context(|| format!("create {}", root.display()))?;
+        #[cfg(unix)]
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
+    }
     std::fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        for dir in [path, path.parent().unwrap_or(path)] {
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-        }
-    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
 
@@ -363,7 +371,11 @@ fn create_private_dir(path: &Path) -> Result<()> {
 /// or restore a backup. Without `apply` it only reports what it would do.
 pub fn reset(database: &Path, from: Option<&Path>, apply: bool) -> Result<Value> {
     let exists = std::fs::symlink_metadata(database).is_ok_and(|metadata| metadata.is_file());
-    if !exists && from.is_none() {
+    // Sidecars without a main file are not nothing: SQLite rebuilds a ledger
+    // from a leftover `-wal`, so a stale sidecar would resurrect the old
+    // ledger under a restored one, or corrupt it. They are set aside too.
+    let present = !ledger_files(database).is_empty();
+    if !present && from.is_none() {
         bail!(
             "NOT_INITIALIZED: there is no ledger at {} to reset; run `foremerge init` to create one",
             database.display()
@@ -401,7 +413,7 @@ pub fn reset(database: &Path, from: Option<&Path>, apply: bool) -> Result<Value>
     let restore = from
         .map(|source| validate_restore_source(source, database))
         .transpose()?;
-    let backup_dir = if exists {
+    let backup_dir = if present {
         Some(backup_directory(
             database,
             current
@@ -437,7 +449,11 @@ pub fn reset(database: &Path, from: Option<&Path>, apply: bool) -> Result<Value>
             let parent = database
                 .parent()
                 .context("the ledger path has no parent directory")?;
-            create_private_dir(parent)?;
+            // Only create what must exist. `Store::open` sets the ledger
+            // directory's own permissions; nothing here touches the
+            // permissions of a directory it did not create.
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
             let staged = parent.join(format!(
                 ".restore-{}.sqlite3",
                 uuid::Uuid::new_v4().simple()
@@ -453,7 +469,7 @@ pub fn reset(database: &Path, from: Option<&Path>, apply: bool) -> Result<Value>
 
     let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
     if let Some(backup_dir) = backup_dir.as_ref() {
-        create_private_dir(backup_dir)?;
+        create_backup_dir(backup_dir)?;
         for file in ledger_files(database) {
             let target = backup_dir.join(file.file_name().context("ledger file name")?);
             if let Err(error) = std::fs::rename(&file, &target) {

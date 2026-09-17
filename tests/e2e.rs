@@ -7273,3 +7273,131 @@ fn doctor_warns_about_a_second_installation_at_another_version() {
         "warnings reach a human reader too"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn doctor_never_runs_the_command_a_client_is_configured_to_launch() {
+    // The configured command comes from repository content (`.mcp.json` is
+    // tracked), and the documented wrapper-script pattern ignores its
+    // arguments and starts a server. Running it to read a version would open,
+    // and so migrate, a ledger: the very failure doctor exists to report.
+    use std::os::unix::fs::PermissionsExt;
+    let repo = create_repo();
+    let database = database_from_doctor(&repo.root);
+    let evidence = repo.temp.path().join("was-run");
+    let wrapper = repo.temp.path().join("foremerge");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\ntouch {}\necho 'foremerge 9.9.9'\n",
+            evidence.display()
+        ),
+    )
+    .expect("write wrapper");
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).expect("chmod wrapper");
+    fs::write(
+        repo.root.join(".mcp.json"),
+        json!({
+            "mcpServers": {
+                "foremerge": { "command": wrapper.display().to_string(), "args": ["mcp"] }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write client config");
+
+    let doctor = cli_success(&repo.root, None, ["doctor", "--client", "claude"]);
+    assert!(!evidence.exists(), "doctor must not run it: {doctor}");
+    let claude = &doctor["data"]["clients"][0];
+    assert_eq!(
+        claude["mcp_command"],
+        wrapper.display().to_string(),
+        "{doctor}"
+    );
+    let warning = claude["warning"].as_str().expect("warning");
+    assert!(
+        warning.contains("did not run and cannot identify") && !warning.contains("9.9.9"),
+        "an unidentified command must not be given a version: {warning}"
+    );
+    assert!(database.is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn ledger_reset_leaves_the_permissions_of_directories_it_did_not_create() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = create_repo();
+    let database = database_from_doctor(&repo.root);
+    let git_dir = database
+        .parent()
+        .and_then(Path::parent)
+        .expect("git directory")
+        .to_path_buf();
+    let before = fs::metadata(&git_dir)
+        .expect("stat .git")
+        .permissions()
+        .mode();
+
+    cli_success(&repo.root, None, ["ledger", "reset", "--yes"]);
+    assert_eq!(
+        fs::metadata(&git_dir)
+            .expect("stat .git")
+            .permissions()
+            .mode(),
+        before,
+        "the repository's .git directory is not this command's to lock down"
+    );
+    let backups = database.parent().expect("ledger dir").join("backups");
+    assert_eq!(
+        fs::metadata(&backups)
+            .expect("stat backups")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700,
+        "what it does create is private"
+    );
+}
+
+#[test]
+fn ledger_reset_sets_aside_sidecars_left_without_a_ledger_file() {
+    // Deleting `state.sqlite3` by hand was the only recovery before this
+    // command. SQLite rebuilds the old ledger from the `-wal` left behind, so
+    // a restore on top of one would resurrect it or corrupt the result.
+    let repo = create_repo();
+    let database = database_from_doctor(&repo.root);
+    cli_success(&repo.root, None, ["agent", "register", "--name", "kept"]);
+    let backup_source = repo.temp.path().join("backup.sqlite3");
+    fs::copy(&database, &backup_source).expect("copy the ledger");
+    let wal = PathBuf::from(format!("{}-wal", database.display()));
+    fs::write(&wal, b"stale wal that is not a WAL").expect("leave a sidecar");
+    fs::remove_file(&database).expect("delete the ledger by hand");
+
+    let restored = cli_success(
+        &repo.root,
+        None,
+        [
+            OsStr::new("ledger"),
+            OsStr::new("reset"),
+            OsStr::new("--yes"),
+            OsStr::new("--from"),
+            backup_source.as_os_str(),
+        ],
+    );
+    let backup_dir = PathBuf::from(restored["data"]["backup_dir"].as_str().expect("backup_dir"));
+    assert_eq!(
+        fs::read(backup_dir.join("state.sqlite3-wal")).ok(),
+        Some(b"stale wal that is not a WAL".to_vec()),
+        "the stale sidecar is set aside intact, not deleted and not left in place: {restored}"
+    );
+    assert_ne!(
+        fs::read(&wal).ok().as_deref(),
+        Some(b"stale wal that is not a WAL".as_slice()),
+        "and the restored ledger does not inherit it: {restored}"
+    );
+    let status = cli_success(&repo.root, None, ["status"]);
+    assert_eq!(status["data"]["agents"][0]["name"], "kept", "{status}");
+    let doctor = cli_success(&repo.root, None, ["doctor"]);
+    assert_eq!(doctor["data"]["database_ok"], true, "{doctor}");
+    assert_eq!(doctor["data"]["event_chain_ok"], true, "{doctor}");
+}

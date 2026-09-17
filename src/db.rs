@@ -1346,6 +1346,10 @@ impl Store {
             return audit_event_connection(&conn, page_size);
         }
         let conn = Self::open_read_only_connection(self.path())?;
+        // This connection bypasses the store's own, so it carries the same
+        // check: auditing a ledger another build has migrated would report on
+        // a ledger this build cannot use.
+        self.ensure_still_current(&conn)?;
         audit_event_connection(&conn, page_size)
     }
 
@@ -1353,7 +1357,13 @@ impl Store {
     /// making a monitoring request queue behind coordinator work.
     pub fn readiness(&self) -> Result<bool> {
         match self.conn.try_lock() {
-            Ok(conn) => Ok(conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))? == 1),
+            // try_lock deliberately skips `lock`, so the ledger check it
+            // carries has to be made here: a readiness probe answering yes for
+            // a ledger every call now refuses would be the wrong answer.
+            Ok(conn) => {
+                self.ensure_still_current(&conn)?;
+                Ok(conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))? == 1)
+            }
             Err(TryLockError::WouldBlock) => Ok(false),
             Err(TryLockError::Poisoned(_)) => bail!("SQLite connection lock poisoned"),
         }

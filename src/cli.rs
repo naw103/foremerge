@@ -128,6 +128,7 @@ enum LedgerCommand {
     /// reports what it would do.
     Reset {
         /// Restore this ledger file (a backup) instead of starting empty.
+        /// A relative path resolves against --cwd.
         #[arg(long, value_name = "BACKUP")]
         from: Option<PathBuf>,
         /// Apply the reset. Without it nothing is changed.
@@ -797,15 +798,16 @@ async fn execute(cli: Cli) -> Result<Completion> {
             let token_path = git::runtime_dir(&cwd).join("token");
             let executable = std::env::current_exe().context("resolve Foremerge executable")?;
             let executable = executable.canonicalize().unwrap_or(executable);
+            let installations = integrations::installations(&executable);
             let client_diagnostics = client.map(|value| {
                 integrations::diagnose(
                     repo.as_ref()
                         .map_or(cwd.as_path(), |value| value.root.as_path()),
                     &value.clients(),
                     &executable,
+                    &installations,
                 )
             });
-            let installations = integrations::installations(&executable);
             let mut warnings = integrations::installation_warnings(&installations);
             warnings.extend(
                 client_diagnostics
