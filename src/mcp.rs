@@ -128,7 +128,7 @@ fn remedy(code: &str) -> String {
             |path| path.display().to_string(),
         );
         format!(
-            "This server is {binary} (version {}). Upgrade the binary this client launches to a Foremerge release that supports the ledger's schema, {RELAUNCH}. If no release supports that schema yet, a development build has migrated this ledger.",
+            "This server is {binary} (version {}). Upgrade the binary this client launches to a Foremerge release that supports the ledger's schema, and run `foremerge setup` with it, {RELAUNCH}. If no release supports that schema yet, a development build has migrated this ledger: `foremerge ledger reset` sets it aside and starts a fresh one or restores a backup.",
             env!("CARGO_PKG_VERSION")
         )
     } else {

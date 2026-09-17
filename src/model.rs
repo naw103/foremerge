@@ -865,6 +865,13 @@ pub struct DoctorReport {
     /// run here. Absent when the store is not bound to a Git repository.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checks: Option<crate::checks::CheckDiagnostic>,
+    /// Every `foremerge` binary on `PATH` or in the installers' directories.
+    #[serde(default)]
+    pub installations: Vec<crate::integrations::Installation>,
+    /// Conditions that do not stop this installation working now but will
+    /// break it later, such as a second installation at another version.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// A typed failure inside a doctor report.

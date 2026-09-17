@@ -11,16 +11,66 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::Duration;
 use uuid::Uuid;
 
-const DATABASE_SCHEMA_VERSION: i64 = 9;
+pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 9;
 // Event hashing is versioned independently from the mutable SQLite projection
 // schema. A database migration must not silently change the hash material for
 // otherwise identical events.
 const EVENT_SCHEMA_VERSION: i64 = 1;
+/// The `meta` key naming the Foremerge build that last moved the schema stamp.
+/// An older build that meets a newer ledger reads it to say which version the
+/// operator needs, instead of only that it is too old.
+pub(crate) const SCHEMA_WRITER_KEY: &str = "schema_written_by";
+
+/// This build's version as recorded in a ledger. A debug build is marked, so a
+/// ledger migrated by a development binary is not mistaken for one migrated by
+/// the release that shares its version number.
+pub fn build_label() -> String {
+    if cfg!(debug_assertions) {
+        format!("{} (development build)", env!("CARGO_PKG_VERSION"))
+    } else {
+        env!("CARGO_PKG_VERSION").to_string()
+    }
+}
+
+/// Identity of the file a store opened, so a store can tell when the path now
+/// names a different file: a ledger moved aside or restored while this process
+/// still holds the old one open would otherwise keep receiving its writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl FileIdentity {
+    #[cfg(unix)]
+    fn of(path: &Path) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).ok().map(|metadata| Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    // Windows refuses to move or replace a file another process holds open,
+    // so the condition this guards against cannot arise there.
+    #[cfg(not(unix))]
+    fn of(_path: &Path) -> Option<Self> {
+        None
+    }
+}
 
 #[derive(Clone)]
 pub struct Store {
     pub(crate) conn: Arc<Mutex<Connection>>,
     path: Arc<PathBuf>,
+    /// Set for a store opened read-write from a file. Such a store rechecks,
+    /// on every use, that its file is still the ledger at `path` and that no
+    /// newer build has migrated it since it was opened. Opening checks only
+    /// once, and a long-lived MCP server otherwise went on writing rows in its
+    /// own schema's shape into a ledger another build had already migrated.
+    recheck: bool,
+    /// The file this store opened, where the platform can identify it.
+    identity: Option<FileIdentity>,
 }
 
 impl Store {
@@ -80,9 +130,12 @@ impl Store {
                 }
             }
         }
+        let identity = FileIdentity::of(&path);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             path: Arc::new(path),
+            recheck: true,
+            identity,
         })
     }
 
@@ -117,6 +170,8 @@ impl Store {
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             path: Arc::new(path),
+            recheck: false,
+            identity: None,
         })
     }
 
@@ -127,6 +182,8 @@ impl Store {
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             path: Arc::new(PathBuf::from(":memory:")),
+            recheck: false,
+            identity: None,
         })
     }
 
@@ -210,11 +267,60 @@ impl Store {
         if stored_version > DATABASE_SCHEMA_VERSION {
             // Migrating downwards would rewrite the stamp and let this build
             // write a store it does not understand.
-            bail!(
-                "UNSUPPORTED_SCHEMA: database schema {stored_version} is newer than this build supports ({DATABASE_SCHEMA_VERSION}); upgrade Foremerge to open it"
-            );
+            return Err(Self::unsupported_schema(conn, stored_version));
         }
         Ok(stored_version)
+    }
+
+    /// The refusal for a ledger newer than this build. It names the build that
+    /// migrated the ledger when the ledger recorded one, because "upgrade" is
+    /// not actionable on its own: the operator needs to know which version to
+    /// install, and when that version is a development build, that no release
+    /// will help.
+    fn unsupported_schema(conn: &Connection, stored_version: i64) -> anyhow::Error {
+        let writer: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [SCHEMA_WRITER_KEY],
+                |row| row.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        let this_build = build_label();
+        let next_step = match writer.as_deref() {
+            Some(writer) if writer.contains("development build") => format!(
+                "it was migrated by Foremerge {writer}, which no release may be able to open yet. This build is Foremerge {this_build}. Run `foremerge ledger reset` to set the ledger aside and start a fresh one, or to restore a backup"
+            ),
+            Some(writer) => format!(
+                "it was migrated by Foremerge {writer}. This build is Foremerge {this_build}. Install Foremerge {writer} or newer, run `foremerge setup` with it so every client launches it, and restart the client sessions"
+            ),
+            None => format!(
+                "a newer Foremerge build migrated it. This build is Foremerge {this_build}. Install the newest Foremerge release, run `foremerge setup` with it so every client launches it, and restart the client sessions; if no release opens the ledger, run `foremerge ledger reset`"
+            ),
+        };
+        anyhow::anyhow!(
+            "UNSUPPORTED_SCHEMA: database schema {stored_version} is newer than this build supports ({DATABASE_SCHEMA_VERSION}); {next_step}"
+        )
+    }
+
+    /// Refuse to use a store whose ledger changed underneath this process: the
+    /// file at its path was replaced or moved away, or another build migrated
+    /// it. Checked on every use of a read-write store, not only at open, so a
+    /// long-running server stops rather than writing into a ledger it no
+    /// longer understands.
+    fn ensure_still_current(&self, conn: &Connection) -> Result<()> {
+        if !self.recheck {
+            return Ok(());
+        }
+        if self.identity.is_some() && FileIdentity::of(&self.path) != self.identity {
+            bail!(
+                "LEDGER_REPLACED: the ledger at {} was moved or replaced after this process opened it; restart this process so it opens the current ledger",
+                self.path.display()
+            );
+        }
+        Self::supported_schema_version(conn)?;
+        Ok(())
     }
 
     /// Refuse a store stamped with a newer schema than this build supports,
@@ -1037,6 +1143,16 @@ impl Store {
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             [DATABASE_SCHEMA_VERSION.to_string()],
         )?;
+        // Record who moved the stamp, and only then: a build opening a ledger
+        // already at its own schema changes nothing a later build needs to
+        // name.
+        if stored_version != DATABASE_SCHEMA_VERSION {
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES(?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [SCHEMA_WRITER_KEY, build_label().as_str()],
+            )?;
+        }
         Ok(())
     }
 
@@ -1045,13 +1161,21 @@ impl Store {
     }
 
     pub(crate) fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
-        self.conn
+        let conn = self
+            .conn
             .lock()
-            .map_err(|_| anyhow::anyhow!("SQLite connection lock poisoned"))
+            .map_err(|_| anyhow::anyhow!("SQLite connection lock poisoned"))?;
+        self.ensure_still_current(&conn)?;
+        Ok(conn)
     }
 
+    /// Begin a write. The schema stamp is read again inside the transaction:
+    /// the check in [`Store::lock`] runs before the write lock is held, and a
+    /// migration committed in between would otherwise receive this write.
     pub(crate) fn immediate_tx(conn: &mut Connection) -> Result<Transaction<'_>> {
-        Ok(conn.transaction_with_behavior(TransactionBehavior::Immediate)?)
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::supported_schema_version(&tx)?;
+        Ok(tx)
     }
 
     pub(crate) fn append_event(
@@ -2799,6 +2923,143 @@ mod schema_repair_tests {
             )
             .unwrap();
         assert_eq!(recorded, future, "the check must not rewrite the stamp");
+    }
+
+    fn meta_value(database: &Path, key: &str) -> Option<String> {
+        Connection::open(database)
+            .unwrap()
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()
+            .unwrap()
+    }
+
+    #[test]
+    fn the_build_that_moves_the_schema_stamp_is_recorded() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let database = temp.path().join("foremerge").join("state.sqlite3");
+        drop(Store::open(&database).unwrap());
+        assert_eq!(
+            meta_value(&database, SCHEMA_WRITER_KEY),
+            Some(build_label()),
+            "creating a ledger stamps it, so creating records the writer"
+        );
+
+        // A build reopening a ledger already at its schema moved nothing, so it
+        // must not claim the migration.
+        Connection::open(&database)
+            .unwrap()
+            .execute(
+                "UPDATE meta SET value = 'an earlier build' WHERE key = ?1",
+                [SCHEMA_WRITER_KEY],
+            )
+            .unwrap();
+        drop(Store::open(&database).unwrap());
+        assert_eq!(
+            meta_value(&database, SCHEMA_WRITER_KEY).as_deref(),
+            Some("an earlier build")
+        );
+    }
+
+    #[test]
+    fn a_newer_schema_refusal_names_the_build_that_migrated_it() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let database = temp.path().join("foremerge").join("state.sqlite3");
+        drop(Store::open(&database).unwrap());
+        let future = DATABASE_SCHEMA_VERSION + 1;
+        let conn = Connection::open(&database).unwrap();
+        conn.execute(
+            "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+            [future.to_string()],
+        )
+        .unwrap();
+
+        conn.execute(
+            "UPDATE meta SET value = '9.9.9' WHERE key = ?1",
+            [SCHEMA_WRITER_KEY],
+        )
+        .unwrap();
+        let message = format!("{:#}", Store::open(&database).err().expect("refused"));
+        assert!(
+            message.starts_with(&format!(
+                "UNSUPPORTED_SCHEMA: database schema {future} is newer than this build supports ({DATABASE_SCHEMA_VERSION}); it was migrated by Foremerge 9.9.9."
+            )),
+            "{message}"
+        );
+        assert!(
+            message.contains("Install Foremerge 9.9.9 or newer"),
+            "{message}"
+        );
+
+        // A development build's migration cannot be fixed by installing its
+        // version number, which may name a release that does not exist yet.
+        conn.execute(
+            "UPDATE meta SET value = '9.9.9 (development build)' WHERE key = ?1",
+            [SCHEMA_WRITER_KEY],
+        )
+        .unwrap();
+        let message = format!("{:#}", Store::open(&database).err().expect("refused"));
+        assert!(message.contains("foremerge ledger reset"), "{message}");
+        assert!(!message.contains("Install Foremerge 9.9.9"), "{message}");
+    }
+
+    #[test]
+    fn an_open_store_stops_once_another_build_migrates_its_ledger() {
+        // A long-running MCP server opened the ledger before a newer build
+        // migrated it, and went on writing rows in its own schema's shape.
+        let temp = tempfile::tempdir().expect("temp dir");
+        let database = temp.path().join("foremerge").join("state.sqlite3");
+        let store = Store::open(&database).unwrap();
+        drop(store.lock().expect("usable before the migration"));
+
+        let future = DATABASE_SCHEMA_VERSION + 1;
+        Connection::open(&database)
+            .unwrap()
+            .execute(
+                "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+                [future.to_string()],
+            )
+            .unwrap();
+
+        let error = store.lock().expect_err("reads must stop");
+        assert!(
+            format!("{error:#}").starts_with("UNSUPPORTED_SCHEMA:"),
+            "{error:#}"
+        );
+        // The write path rechecks inside its own transaction, so a migration
+        // committed after the lock check still cannot receive the write.
+        let mut conn = store.conn.lock().unwrap();
+        let error = Store::immediate_tx(&mut conn).expect_err("writes must stop");
+        assert!(
+            format!("{error:#}").starts_with("UNSUPPORTED_SCHEMA:"),
+            "{error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_open_store_stops_once_its_ledger_is_moved_aside() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let database = temp.path().join("foremerge").join("state.sqlite3");
+        let store = Store::open(&database).unwrap();
+        drop(store.lock().expect("usable before the move"));
+
+        let aside = temp.path().join("aside.sqlite3");
+        std::fs::rename(&database, &aside).unwrap();
+        let error = store.lock().expect_err("a moved ledger must stop");
+        assert!(
+            format!("{error:#}").starts_with("LEDGER_REPLACED:"),
+            "{error:#}"
+        );
+
+        // Nor may a new file at the same path pass for the one it opened.
+        drop(Store::open(&database).unwrap());
+        let error = store.lock().expect_err("a replaced ledger must stop");
+        assert!(
+            format!("{error:#}").starts_with("LEDGER_REPLACED:"),
+            "{error:#}"
+        );
     }
 
     #[test]

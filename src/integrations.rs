@@ -361,6 +361,146 @@ pub struct ClientDiagnostic {
     pub mcp_configured: bool,
     pub ready: bool,
     pub next_step: Option<String>,
+    /// The binary the client's MCP entry launches, when it names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_command: Option<String>,
+    /// Set when that binary is not this one and reports another version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
+/// One `foremerge` binary found where a shell or an MCP client could launch it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Installation {
+    pub path: String,
+    /// The version the binary reports, or `None` when it could not be run.
+    pub version: Option<String>,
+    /// Whether this is the binary currently running.
+    pub this_binary: bool,
+}
+
+fn executable_name() -> &'static str {
+    if cfg!(windows) {
+        "foremerge.exe"
+    } else {
+        "foremerge"
+    }
+}
+
+/// The version a `foremerge` binary reports, run with a bounded timeout.
+fn binary_version(path: &Path) -> Option<String> {
+    let mut probe = Command::new(path);
+    probe.arg("--version");
+    let output = run_bounded(probe).ok().filter(|output| output.success)?;
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .nth(1)
+        .map(str::to_string)
+}
+
+/// The version of the binary at `path`, answered without running it when it
+/// is this process's own executable.
+fn version_of(path: &Path, current_exe: &Path) -> (Option<String>, bool) {
+    if paths_match(path, current_exe) {
+        (Some(env!("CARGO_PKG_VERSION").to_string()), true)
+    } else {
+        (binary_version(path), false)
+    }
+}
+
+/// Every distinct `foremerge` binary on `PATH` or in the two directories the
+/// documented installers use (`~/.local/bin` for install.sh, `~/.cargo/bin`
+/// for cargo install), plus the running one.
+///
+/// Two installers put two binaries in two places, and `foremerge setup` pins
+/// each client to whichever one ran it. Upgrading one way then leaves the
+/// shell and the clients on different versions, and the newer one migrates the
+/// ledger out from under the older.
+pub fn installations(current_exe: &Path) -> Vec<Installation> {
+    let mut directories: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|value| std::env::split_paths(&value).collect())
+        .unwrap_or_default();
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        directories.push(home.join(".local").join("bin"));
+        directories.push(home.join(".cargo").join("bin"));
+    }
+    if let Some(cargo_home) = std::env::var_os("CARGO_HOME").map(PathBuf::from) {
+        directories.push(cargo_home.join("bin"));
+    }
+    let mut seen: Vec<PathBuf> = Vec::new();
+    let mut found = Vec::new();
+    let candidates = std::iter::once(
+        current_exe
+            .canonicalize()
+            .unwrap_or_else(|_| current_exe.to_path_buf()),
+    )
+    .chain(
+        directories
+            .into_iter()
+            .map(|directory| directory.join(executable_name())),
+    );
+    for candidate in candidates {
+        if !candidate.is_file() {
+            continue;
+        }
+        let canonical = candidate
+            .canonicalize()
+            .unwrap_or_else(|_| candidate.clone());
+        if seen.contains(&canonical) {
+            continue;
+        }
+        seen.push(canonical);
+        let (version, this_binary) = version_of(&candidate, current_exe);
+        found.push(Installation {
+            path: candidate.to_string_lossy().into_owned(),
+            version,
+            this_binary,
+        });
+    }
+    found
+}
+
+/// A warning for each installation whose version differs from this binary's.
+/// Same-version copies are left alone: they disagree about nothing yet.
+pub fn installation_warnings(installations: &[Installation]) -> Vec<String> {
+    let current = env!("CARGO_PKG_VERSION");
+    let this_path = installations
+        .iter()
+        .find(|value| value.this_binary)
+        .map_or("this binary", |value| value.path.as_str());
+    installations
+        .iter()
+        .filter(|value| !value.this_binary && value.version.as_deref() != Some(current))
+        .map(|value| {
+            format!(
+                "Foremerge {} is also installed at {}, while {this_path} is {current}. A shell and an MCP client can each launch a different one, and a newer build migrates the ledger so an older one cannot open it. Keep one installation, or upgrade both the same way, then run `foremerge setup` so every client launches the one you kept.",
+                value.version.as_deref().unwrap_or("of an unknown version"),
+                value.path
+            )
+        })
+        .collect()
+}
+
+/// When a client is configured to launch a different binary than this one,
+/// and that binary reports a different version, say so: `doctor` otherwise
+/// describes this binary while the client runs another.
+fn launched_binary_warning(client: Client, command: &str, current_exe: &Path) -> Option<String> {
+    let path = Path::new(command);
+    if !path.is_absolute() || !path.is_file() || paths_match(path, current_exe) {
+        return None;
+    }
+    let (version, _) = version_of(path, current_exe);
+    if version.as_deref() == Some(env!("CARGO_PKG_VERSION")) {
+        return None;
+    }
+    Some(format!(
+        "{} launches {command} (Foremerge {}), not this binary ({}, Foremerge {}). Run `foremerge setup {}` with the binary you mean to keep, then restart the client.",
+        client.name(),
+        version.as_deref().unwrap_or("of an unknown version"),
+        current_exe.display(),
+        env!("CARGO_PKG_VERSION"),
+        client.name()
+    ))
 }
 
 pub fn install(
@@ -378,11 +518,11 @@ pub fn install(
         .collect()
 }
 
-pub fn diagnose(root: &Path, clients: &[Client]) -> Vec<ClientDiagnostic> {
+pub fn diagnose(root: &Path, clients: &[Client], current_exe: &Path) -> Vec<ClientDiagnostic> {
     clients
         .iter()
         .copied()
-        .map(|client| diagnose_client(root, client))
+        .map(|client| diagnose_client(root, client, current_exe))
         .collect()
 }
 
@@ -503,7 +643,7 @@ fn configure_client_mcp(
     }
 }
 
-fn diagnose_client(root: &Path, client: Client) -> ClientDiagnostic {
+fn diagnose_client(root: &Path, client: Client, current_exe: &Path) -> ClientDiagnostic {
     let skill_path = client.skill_path(root);
     let skill_installed = skill_path.is_file();
     // Unreadable or non-UTF-8 content is never Foremerge's own file, so it is
@@ -516,24 +656,35 @@ fn diagnose_client(root: &Path, client: Client) -> ClientDiagnostic {
     // Codex keeps its registration in user-global configuration, so a present
     // entry pointing elsewhere needs --force and a message naming both
     // repositories. Project JSON entries only need the generic --force step.
+    let mut mcp_command: Option<String> = None;
     let (mcp_configured, mcp_probe_error, mcp_entry_stale) = match mcp_path.as_deref() {
-        Some(path) => (
-            mcp_json_configured(path, root),
-            None,
-            mcp_json_entry_stale(path, root),
-        ),
+        Some(path) => {
+            mcp_command = mcp_json_entry(path)
+                .and_then(|entry| entry.get("command")?.as_str().map(str::to_string));
+            (
+                mcp_json_configured(path, root),
+                None,
+                mcp_json_entry_stale(path, root),
+            )
+        }
         None => match codex_mcp_entry() {
-            Ok(Some(entry)) => match entry.registration() {
-                CodexRegistration::Current => (true, None, false),
-                // Setup upgrades this form on its own, so a plain `setup
-                // codex` is the correct next step.
-                CodexRegistration::Upgradable => (false, None, false),
-                CodexRegistration::Foreign => (false, None, true),
-            },
+            Ok(Some(entry)) => {
+                mcp_command.clone_from(&entry.command);
+                match entry.registration() {
+                    CodexRegistration::Current => (true, None, false),
+                    // Setup upgrades this form on its own, so a plain `setup
+                    // codex` is the correct next step.
+                    CodexRegistration::Upgradable => (false, None, false),
+                    CodexRegistration::Foreign => (false, None, true),
+                }
+            }
             Ok(None) => (false, None, false),
             Err(error) => (false, Some(format!("{error:#}")), false),
         },
     };
+    let warning = mcp_command
+        .as_deref()
+        .and_then(|command| launched_binary_warning(client, command, current_exe));
     // Setup refuses to replace managed content that differs from this release,
     // so offering a plain `setup` here would name a command that cannot
     // succeed. Report what actually blocks it and ask for --force instead.
@@ -576,6 +727,8 @@ fn diagnose_client(root: &Path, client: Client) -> ClientDiagnostic {
         mcp_configured,
         ready,
         next_step,
+        mcp_command,
+        warning,
     }
 }
 
