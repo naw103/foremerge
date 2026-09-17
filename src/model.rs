@@ -717,6 +717,16 @@ pub struct ValidationRequest {
     pub timeout_seconds: u64,
 }
 
+/// Validation by name from the repository's trusted check registry. The
+/// command that runs comes from the registry, never from the request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckValidationRequest {
+    pub check: String,
+    #[serde(default)]
+    pub worktree: Option<String>,
+}
+
 fn default_timeout_seconds() -> u64 {
     300
 }

@@ -79,9 +79,9 @@ assert that the command observed the fingerprinted tree. A command that mutates
 tracked files, tests the mutated tree, and restores it before exiting leaves the
 fingerprint unchanged and is recorded as authoritative. Foremerge samples the
 endpoints; it does not watch the tree during the run, and it does not sandbox
-the command. Named checks over MCP narrow this because an agent chooses only
-which registered check runs, never its argument vector; a caller using the CLI
-or the HTTP API supplies the command directly and is trusted accordingly.
+the command. Named checks over MCP and the HTTP API narrow this because a
+caller chooses only which registered check runs, never its argument vector; a
+caller using the CLI supplies the command directly and is trusted accordingly.
 
 Every completed command is retained as local audit data even when its result is
 stale and non-authoritative. Validation stdout/stderr can contain secrets.

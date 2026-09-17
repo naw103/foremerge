@@ -133,10 +133,10 @@ The complete MVP MCP tool surface is:
 | `status` | Read one consistent current coordinator snapshot |
 
 Tool names are stable protocol identifiers; CLI command spelling is allowed to
-differ. Direct arbitrary validation argv remains a CLI/JSON API operation;
-MCP verification is deliberately limited to configured check names, and the
-check registry is resolved from the repository the coordination store is bound
-to, never from the MCP server process's working directory.
+differ. Direct arbitrary validation argv remains a CLI operation; MCP and the
+HTTP API are deliberately limited to configured check names, and the check
+registry is resolved from the repository the coordination store is bound to,
+never from the server process's working directory.
 
 There is intentionally no MCP tool for changing validation exclusions. That
 digest-bound trust policy is operator-owned and CLI-only; see

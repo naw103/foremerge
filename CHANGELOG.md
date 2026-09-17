@@ -9,6 +9,24 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking (HTTP API):** `POST /v1/changesets/{id}/validate` now runs a
+  check by name from the repository's trusted registry, the same one MCP's
+  `run_verification` uses, instead of executing an argument vector taken from
+  the request body. The body is `{"check": "<name>", "worktree": "<path>"}`,
+  with `worktree` optional. A body carrying `command`, `timeout_seconds` or any
+  other field is rejected with `INVALID_INPUT` before anything runs, and an
+  unconfigured name returns `NOT_FOUND`. Until now any bearer-token holder, or
+  any local process when the daemon ran with `--no-auth`, could make the daemon
+  execute an arbitrary program; CodeQL reported this as
+  `rust/command-line-injection`.
+
+  Migration: register each command once with
+  `foremerge checks set <name> [--timeout-seconds N] -- <argv...>` and send its
+  name. The CLI's `foremerge changeset validate <id> -- <argv...>` is unchanged
+  and still accepts a raw argument vector.
+
 ## [0.4.3] - 2026-09-17
 
 This release changes no database schema. It prepares ledgers and installations

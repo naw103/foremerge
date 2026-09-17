@@ -164,6 +164,18 @@ impl Foremerge {
         Ok(value.map(PathBuf::from))
     }
 
+    /// Resolve a named check from the registry of the repository this store is
+    /// bound to. Callers never influence which registry is trusted: neither
+    /// the process's working directory nor request fields select it.
+    pub fn trusted_check(&self, name: &str) -> Result<checks::NamedCheck> {
+        let common_dir = self.repository_common_dir()?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "INVALID_INPUT: verification checks are repository-scoped and this coordination store is not bound to a Git repository yet; register an agent with a worktree inside the repository first"
+            )
+        })?;
+        checks::get_at(&checks::registry_path(&common_dir), name)
+    }
+
     /// The agent ids whose intents are parties to a conflict, used by less
     /// trusted surfaces to restrict resolution to the involved agents.
     pub fn conflict_party_agents(&self, conflict_id: &str) -> Result<Vec<String>> {
@@ -1482,6 +1494,28 @@ impl Foremerge {
         changeset.open_conflicts = Some(open_conflicts_for_intent(&tx, &intent.id)?);
         tx.commit()?;
         Ok(changeset)
+    }
+
+    /// Validate with a check from the trusted registry. This is the entry point
+    /// for the MCP and HTTP surfaces, whose callers choose which registered
+    /// check runs but never its argument vector.
+    pub async fn validate_changeset_with_check(
+        &self,
+        changeset_id: &str,
+        request: CheckValidationRequest,
+    ) -> Result<Validation> {
+        let service = self.clone();
+        let name = request.check;
+        let check = blocking(move || service.trusted_check(&name)).await?;
+        self.validate_changeset(
+            changeset_id,
+            ValidationRequest {
+                command: check.command,
+                worktree: request.worktree,
+                timeout_seconds: check.timeout_seconds,
+            },
+        )
+        .await
     }
 
     pub async fn validate_changeset(
