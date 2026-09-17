@@ -864,7 +864,7 @@ async fn execute(cli: Cli) -> Result<Completion> {
         Commands::Daemon { bind, no_auth } => {
             if !bind.ip().is_loopback() {
                 bail!(
-                    "REFUSED_BIND: the MVP daemon binds loopback only; use optional shared mode when available"
+                    "REFUSED_BIND: the daemon binds loopback only; coordination between machines is outside this project's scope"
                 )
             }
             let service = open_service(&database, &cwd)?;

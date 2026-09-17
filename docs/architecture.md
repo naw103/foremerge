@@ -204,9 +204,11 @@ The current architecture does **not** provide:
 - embeddings or an LLM dependency for conflict detection;
 - cryptographic signatures or access-control roles.
 
-These are extension points, not prerequisites for proving the thesis. The MVP
-proves earlier semantic conflict detection and richer provenance while keeping
-Git fully usable on its own.
+Most of these are extension points rather than prerequisites for proving the
+thesis. The first is not: a hosted or cross-machine coordination service is
+outside this repository's scope, which is agents sharing one machine and one Git
+repository. The MVP proves earlier semantic conflict detection and richer
+provenance while keeping Git fully usable on its own.
 
 ## Decisions and trade-offs
 
@@ -223,7 +225,8 @@ Git fully usable on its own.
 ## Growth path
 
 Evidence should drive additions. Likely next seams are a pluggable intent
-analyzer, symbol extractors, long-poll or push notifications, policy-configured
-verification suites, and a shared HTTP deployment using the same protocol. A
-new storage engine is warranted only when measured coordination load or
-deployment requirements exceed SQLite's operating envelope.
+analyzer, symbol extractors, long-poll or push notifications over the local
+store, and richer policies over the repository's trusted check registry, which
+today chooses only between a strict and an advisory acceptance policy. A new
+storage engine is warranted only when measured coordination load exceeds
+SQLite's operating envelope.
