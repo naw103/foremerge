@@ -8,7 +8,7 @@
 //! ledger open.
 
 use crate::Store;
-use crate::db::{DATABASE_SCHEMA_VERSION, SCHEMA_WRITER_KEY};
+use crate::db::{DATABASE_SCHEMA_VERSION, SCHEMA_WRITER_KEY, readable_writer};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -257,7 +257,11 @@ pub fn describe(database: &Path) -> Result<Value> {
         .flatten()
     };
     let schema_version = meta("schema_version");
-    let written_by = meta(SCHEMA_WRITER_KEY);
+    // Untrusted: whatever build wrote this ledger put it there, and a ledger
+    // can arrive from anywhere through `--from`.
+    let written_by = meta(SCHEMA_WRITER_KEY).map(|value| {
+        readable_writer(&value).unwrap_or_else(|| "an unreadable version".to_string())
+    });
     let mut counts = serde_json::Map::new();
     for table in SUMMARY_TABLES {
         let count: Option<i64> = conn
@@ -271,6 +275,7 @@ pub fn describe(database: &Path) -> Result<Value> {
         "path": database,
         "schema_version": schema_version.as_deref().and_then(|value| value.trim().parse::<i64>().ok()),
         "schema_written_by": written_by,
+        "repository_common_dir": meta("repository_common_dir"),
         "counts": counts,
     }))
 }
@@ -302,7 +307,11 @@ fn stage_restore(source: &Path, staged: &Path) -> Result<()> {
     Ok(())
 }
 
-fn validate_restore_source(source: &Path, database: &Path) -> Result<Value> {
+fn validate_restore_source(
+    source: &Path,
+    database: &Path,
+    repository: Option<&Path>,
+) -> Result<Value> {
     let metadata = std::fs::symlink_metadata(source)
         .with_context(|| format!("INVALID_INPUT: cannot read backup {}", source.display()))?;
     if !metadata.is_file() {
@@ -328,7 +337,31 @@ fn validate_restore_source(source: &Path, database: &Path) -> Result<Value> {
         ),
         Some(_) => {}
     }
+    // A ledger records the repository it belongs to, and every command checks
+    // that binding. Restoring another repository's ledger therefore succeeds
+    // and then refuses every command, while `doctor`, which the recovery guide
+    // tells the operator to run, reports it healthy. Refuse it here, where the
+    // cause is still obvious.
+    if let (Some(source_repo), Some(target_repo)) =
+        (summary["repository_common_dir"].as_str(), repository)
+    {
+        let target = canonical(target_repo);
+        let recorded = canonical(Path::new(source_repo));
+        if target != recorded {
+            bail!(
+                "INVALID_INPUT: the backup {} belongs to a different Git repository ({}); restore it there, or start a fresh ledger with `foremerge ledger reset` and no --from",
+                source.display(),
+                source_repo
+            );
+        }
+    }
     Ok(summary)
+}
+
+/// Compare paths by their resolved form where possible, so a symlinked or
+/// relative spelling of one directory is not read as two.
+fn canonical(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn backup_directory(database: &Path, schema: Option<i64>) -> Result<PathBuf> {
@@ -357,19 +390,46 @@ fn create_backup_dir(path: &Path) -> Result<()> {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     if let Some(root) = path.parent() {
+        // Only tighten what this call brings into existence. An operator's own
+        // `backups` directory, or a symlink standing in for one, is theirs: an
+        // earlier version chmodded whatever it found, including through a
+        // symlink to a directory elsewhere.
+        let existed = root.symlink_metadata().is_ok();
         std::fs::create_dir_all(root).with_context(|| format!("create {}", root.display()))?;
         #[cfg(unix)]
-        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
+        if !existed {
+            std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
+        }
     }
+    let existed = path.symlink_metadata().is_ok();
     std::fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
     #[cfg(unix)]
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    if !existed {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
     Ok(())
 }
 
 /// `foremerge ledger reset`: set the ledger aside intact and start a fresh one
 /// or restore a backup. Without `apply` it only reports what it would do.
-pub fn reset(database: &Path, from: Option<&Path>, apply: bool) -> Result<Value> {
+pub fn reset(
+    database: &Path,
+    from: Option<&Path>,
+    apply: bool,
+    repository: Option<&Path>,
+) -> Result<Value> {
+    // A symlink at the ledger path would be moved as a symlink: the real file
+    // would stay behind, the report would describe nothing, and the backup
+    // could not be restored. Refuse instead of half-working; the real path
+    // works with `--database`.
+    if let Ok(metadata) = std::fs::symlink_metadata(database) {
+        if metadata.file_type().is_symlink() {
+            bail!(
+                "INVALID_INPUT: {} is a symbolic link; run `foremerge ledger reset --database` against the ledger it points at",
+                database.display()
+            );
+        }
+    }
     let exists = std::fs::symlink_metadata(database).is_ok_and(|metadata| metadata.is_file());
     // Sidecars without a main file are not nothing: SQLite rebuilds a ledger
     // from a leftover `-wal`, so a stale sidecar would resurrect the old
@@ -411,7 +471,7 @@ pub fn reset(database: &Path, from: Option<&Path>, apply: bool) -> Result<Value>
         None
     };
     let restore = from
-        .map(|source| validate_restore_source(source, database))
+        .map(|source| validate_restore_source(source, database, repository))
         .transpose()?;
     let backup_dir = if present {
         Some(backup_directory(
@@ -469,7 +529,14 @@ pub fn reset(database: &Path, from: Option<&Path>, apply: bool) -> Result<Value>
 
     let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
     if let Some(backup_dir) = backup_dir.as_ref() {
-        create_backup_dir(backup_dir)?;
+        // A staged copy is the whole coordination history sitting beside the
+        // ledger. Failing to make the backup directory must not leave it there.
+        if let Err(error) = create_backup_dir(backup_dir) {
+            if let Some(staged) = staged.as_ref() {
+                let _ = std::fs::remove_file(staged);
+            }
+            return Err(error);
+        }
         for file in ledger_files(database) {
             let target = backup_dir.join(file.file_name().context("ledger file name")?);
             if let Err(error) = std::fs::rename(&file, &target) {

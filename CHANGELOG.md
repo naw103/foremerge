@@ -91,6 +91,22 @@ for the first release that does, so that upgrading to it is recoverable.
   the rest worked. An array result now travels in the text block alone, as JSON,
   and `structuredContent` is sent only when the result is an object.
 
+- `foremerge ledger reset --from` refuses a backup that belongs to a different
+  Git repository. Restoring one succeeded, and every command then failed with
+  `INVALID_INPUT: worktree belongs to a different Git repository`, while
+  `doctor`, which the recovery guide tells the operator to run, reported the
+  store healthy. It also refuses a ledger path that is a symbolic link, which
+  it would otherwise move as a link, leaving the real ledger behind, reporting
+  nothing about what it held, and producing a backup that cannot be restored.
+- The version a ledger records for the build that migrated it is shown only
+  when it reads like a version: at most 64 characters of letters, digits and
+  ` .+_-()`. It is written by whatever build touched the ledger, and
+  `ledger reset --from` now installs ledgers that came from elsewhere, so it is
+  untrusted text that reaches operators and, through MCP errors the skill tells
+  agents to relay, models. Anything else is reported as an unreadable version.
+  The refusal no longer tells an operator to install a release that may never
+  have existed: a version recorded by an unreleased build is described as one.
+
 ## [0.4.2] - 2026-09-16
 
 ### Fixed
