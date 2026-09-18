@@ -7218,6 +7218,96 @@ fn ledger_reset_recovers_a_ledger_no_release_can_open_and_refuses_a_newer_backup
     cli_success(&repo.root, None, ["status"]);
 }
 
+/// A ledger records the repository it belongs to, and every command checks it.
+/// Restoring another repository's ledger used to succeed, after which `doctor`
+/// reported the store healthy while every command refused it, and nothing said
+/// the restore was the cause.
+#[test]
+fn ledger_reset_refuses_a_backup_from_another_repository() {
+    let theirs = create_repo();
+    let theirs_database = database_from_doctor(&theirs.root);
+    register_test_agent(&theirs.root, "their-agent");
+    let ours = create_repo();
+    let ours_database = database_from_doctor(&ours.root);
+    register_test_agent(&ours.root, "our-agent");
+    let before = fs::read(&ours_database).expect("read our ledger");
+
+    let refused = cli_failure(
+        &ours.root,
+        None,
+        [
+            OsStr::new("ledger"),
+            OsStr::new("reset"),
+            OsStr::new("--yes"),
+            OsStr::new("--from"),
+            theirs_database.as_os_str(),
+        ],
+    );
+    assert_eq!(refused["error"]["code"], "INVALID_INPUT", "{refused}");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("different Git repository")),
+        "{refused}"
+    );
+    assert_eq!(
+        fs::read(&ours_database).expect("read our ledger"),
+        before,
+        "a refused restore must not touch the ledger"
+    );
+    cli_success(&ours.root, None, ["status"]);
+
+    // Our own backup still restores.
+    let reset = cli_success(&ours.root, None, ["ledger", "reset", "--yes"]);
+    let backup = PathBuf::from(reset["data"]["backup_dir"].as_str().expect("backup_dir"))
+        .join("state.sqlite3");
+    let restored = cli_success(
+        &ours.root,
+        None,
+        [
+            OsStr::new("ledger"),
+            OsStr::new("reset"),
+            OsStr::new("--yes"),
+            OsStr::new("--from"),
+            backup.as_os_str(),
+        ],
+    );
+    assert_eq!(restored["data"]["applied"], true, "{restored}");
+    let agents = cli_success(&ours.root, None, ["agent", "list"]);
+    assert_eq!(agents["data"].as_array().map(Vec::len), Some(1), "{agents}");
+}
+
+/// A symbolic link at the ledger path would be moved as a link: the real file
+/// would stay behind, the report would describe nothing, and the backup could
+/// not be restored afterwards.
+#[cfg(unix)]
+#[test]
+fn ledger_reset_refuses_a_symlinked_ledger_path() {
+    let repo = create_repo();
+    let database = database_from_doctor(&repo.root);
+    let elsewhere = repo.root.join("real-ledger.sqlite3");
+    fs::rename(&database, &elsewhere).expect("move the ledger aside");
+    std::os::unix::fs::symlink(&elsewhere, &database).expect("link the ledger path");
+
+    let refused = cli_failure(&repo.root, None, ["ledger", "reset", "--yes"]);
+    assert_eq!(refused["error"]["code"], "INVALID_INPUT", "{refused}");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("symbolic link")),
+        "{refused}"
+    );
+    assert!(elsewhere.exists(), "the real ledger must be left alone");
+    assert!(
+        database
+            .symlink_metadata()
+            .expect("link")
+            .file_type()
+            .is_symlink(),
+        "the link must be left alone"
+    );
+}
+
 #[test]
 fn ledger_reset_without_a_ledger_says_there_is_nothing_to_reset() {
     let repo = create_repo();

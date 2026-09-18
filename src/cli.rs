@@ -1070,7 +1070,14 @@ async fn execute(cli: Cli) -> Result<Completion> {
                     cwd.join(path)
                 }
             });
-            emit(cli.json, ledger::reset(&database, from.as_deref(), yes)?)?;
+            // The ledger records the repository it belongs to; pass this one
+            // so a backup from another repository is refused rather than
+            // restored into a store every command will then reject.
+            let repository = git::discover(&cwd).ok().map(|repo| repo.common_dir);
+            emit(
+                cli.json,
+                ledger::reset(&database, from.as_deref(), yes, repository.as_deref())?,
+            )?;
         }
         Commands::Request(request) => run_raw_request(&cwd, request, cli.json).await?,
         Commands::Worktree(WorktreeCommand::Create { branch, path, base }) => {
