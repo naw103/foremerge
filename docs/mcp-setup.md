@@ -554,7 +554,9 @@ To upgrade:
 
 1. Upgrade with the method you installed with. If you have used both, remove
    one copy. `foremerge doctor` lists every installation it finds in
-   `installations` and warns when their versions differ.
+   `installations` and warns about each one besides the running binary. It
+   does not run them to check their versions, so run `<path> --version`
+   yourself for any installation you mean to keep.
 2. Close the agent client sessions in each coordinated repository.
 3. Run `foremerge setup all` (or the clients you use) from each repository with
    the upgraded binary, so every client configuration launches it.

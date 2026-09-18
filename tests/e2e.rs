@@ -7308,6 +7308,92 @@ fn ledger_reset_refuses_a_symlinked_ledger_path() {
     );
 }
 
+/// `--database` naming a directory used to move the whole directory, contents
+/// and all, into `backups/` and put a fresh database where it had been.
+#[test]
+fn ledger_reset_refuses_a_directory_and_moves_nothing() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let victim = temp.path().join("victim");
+    fs::create_dir_all(victim.join("valuable")).expect("create directory");
+    fs::write(victim.join("valuable/data.txt"), "precious\n").expect("write data");
+
+    let refused = cli_failure(temp.path(), Some(&victim), ["ledger", "reset", "--yes"]);
+    assert_eq!(refused["error"]["code"], "INVALID_INPUT", "{refused}");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("a directory")),
+        "{refused}"
+    );
+    assert!(victim.is_dir(), "the directory must stay where it was");
+    assert_eq!(
+        fs::read_to_string(victim.join("valuable/data.txt")).expect("read data"),
+        "precious\n"
+    );
+    assert!(
+        !temp.path().join("backups").exists(),
+        "nothing may be set aside"
+    );
+}
+
+/// A file can be intact SQLite, claim the current schema, and still not be a
+/// Foremerge ledger. It used to be restored, with the live ledger set aside,
+/// and the next command failed with "no such column".
+#[test]
+fn ledger_reset_refuses_a_backup_that_is_not_a_foremerge_ledger() {
+    let repo = create_repo();
+    let database = database_from_doctor(&repo.root);
+    register_test_agent(&repo.root, "keep-me");
+    let before = fs::read(&database).expect("read ledger");
+    let common_dir = repo.root.join(".git").canonicalize().expect("common dir");
+
+    let bogus = repo.temp.path().join("bogus.sqlite3");
+    let conn = Connection::open(&bogus).expect("create bogus database");
+    conn.execute_batch(&format!(
+        "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+         INSERT INTO meta VALUES('schema_version', '9');
+         INSERT INTO meta VALUES('repository_common_dir', '{}');
+         CREATE TABLE agents(foo TEXT);",
+        common_dir.display()
+    ))
+    .expect("populate bogus database");
+    drop(conn);
+
+    let refused = cli_failure(
+        &repo.root,
+        None,
+        [
+            OsStr::new("ledger"),
+            OsStr::new("reset"),
+            OsStr::new("--yes"),
+            OsStr::new("--from"),
+            bogus.as_os_str(),
+        ],
+    );
+    assert_eq!(refused["error"]["code"], "INVALID_INPUT", "{refused}");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("not a usable Foremerge ledger")),
+        "{refused}"
+    );
+    assert_eq!(
+        fs::read(&database).expect("read ledger"),
+        before,
+        "the live ledger must be untouched"
+    );
+    assert!(
+        !database
+            .parent()
+            .expect("runtime dir")
+            .join("backups")
+            .exists(),
+        "no backup directory may be created for a refused restore"
+    );
+    let agents = cli_success(&repo.root, None, ["agent", "list"]);
+    assert_eq!(agents["data"].as_array().map(Vec::len), Some(1), "{agents}");
+}
+
 #[test]
 fn ledger_reset_without_a_ledger_says_there_is_nothing_to_reset() {
     let repo = create_repo();
@@ -7315,16 +7401,29 @@ fn ledger_reset_without_a_ledger_says_there_is_nothing_to_reset() {
     assert_eq!(refused["error"]["code"], "NOT_INITIALIZED", "{refused}");
 }
 
+/// `doctor` reports other installations but never runs one to learn its
+/// version. A `foremerge` on `PATH` can be anything, including a wrapper that
+/// ignores `--version` and starts a server, which would open and could migrate
+/// a ledger. This test used to require the opposite: that the binary on `PATH`
+/// was executed and its version reported.
 #[cfg(unix)]
 #[test]
-fn doctor_warns_about_a_second_installation_at_another_version() {
+fn doctor_reports_another_installation_without_running_it() {
     use std::os::unix::fs::PermissionsExt;
     let repo = create_repo();
     cli_success(&repo.root, None, ["init"]);
     let other = repo.temp.path().join("other-bin");
     fs::create_dir(&other).expect("create bin dir");
     let stale = other.join("foremerge");
-    fs::write(&stale, "#!/bin/sh\necho 'foremerge 0.0.1'\n").expect("write stub");
+    let sentinel = repo.temp.path().join("stub-was-executed");
+    fs::write(
+        &stale,
+        format!(
+            "#!/bin/sh\ntouch '{}'\necho 'foremerge 0.0.1'\n",
+            sentinel.display()
+        ),
+    )
+    .expect("write stub");
     fs::set_permissions(&stale, fs::Permissions::from_mode(0o755)).expect("chmod stub");
     let home = repo.temp.path().join("home");
     fs::create_dir(&home).expect("create home");
@@ -7336,31 +7435,32 @@ fn doctor_warns_about_a_second_installation_at_another_version() {
         .env_remove("CARGO_HOME")
         .output()
         .expect("run doctor");
+    assert!(
+        !sentinel.exists(),
+        "doctor must never execute a binary it found on PATH"
+    );
     let doctor = parse_cli_json(&output);
     let data = &doctor["data"];
     let installations = data["installations"].as_array().expect("installations");
     assert!(
-        installations.iter().any(
-            |value| value["path"] == stale.display().to_string() && value["version"] == "0.0.1"
-        ),
-        "{doctor}"
+        installations.iter().any(|value| value["path"] == stale.display().to_string()
+            && value["version"].is_null()),
+        "the other installation is reported by path, version unverified: {doctor}"
     );
     assert!(
         installations
             .iter()
-            .any(|value| value["this_binary"] == true),
+            .any(|value| value["this_binary"] == true && value["version"].is_string()),
         "{doctor}"
     );
     let warnings = data["warnings"].as_array().expect("warnings");
     assert!(
-        warnings.iter().any(|warning| warning
-            .as_str()
-            .is_some_and(|text| text.contains("Foremerge 0.0.1 is also installed at"))),
+        warnings
+            .iter()
+            .any(|warning| warning.as_str().is_some_and(|text| {
+                text.contains("Another foremerge is installed at") && text.contains("not checked")
+            })),
         "{doctor}"
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("warning: Foremerge 0.0.1"),
-        "warnings reach a human reader too"
     );
 }
 
