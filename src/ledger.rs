@@ -355,55 +355,88 @@ fn stage_restore(source: &Path, staged: &Path) -> Result<()> {
 }
 
 /// Refuse a restore source that is valid SQLite but not a usable Foremerge
-/// ledger, before anything moves.
+/// ledger, and rebuild its triggers and indexes from this build, before
+/// anything moves.
 ///
-/// `stage_restore` proves only that the file is intact SQLite. A database with
-/// a `meta` table claiming the current schema and an `agents` table of the
-/// wrong shape passed, the live ledger was set aside, and the next command
-/// failed with "no such column". So the staged copy is migrated, on a
-/// throwaway copy of its own, exactly as `Store::open` will migrate it once
-/// installed, and then compared with a fresh ledger of this build: every table
-/// must exist with every column, and every trigger, since the triggers are what
-/// keep the event journal and the decision records append-only.
+/// `stage_restore` proves only that the file is intact SQLite, and checking
+/// names was not enough either: a backup whose `events_no_update` trigger kept
+/// its name but did nothing was restored, after which an event in the
+/// "append-only" journal could be rewritten. Three layers, on the staged copy,
+/// which is this command's own private file and never the operator's backup:
+///
+/// 1. Tamper evidence. A trigger this build does not define, or one it does
+///    define whose statement differs, is refused. Those triggers are what keep
+///    the event journal, the validation records and the conflict detections
+///    append-only, so a backup that changes one is not a backup to trust.
+/// 2. Rebuild. Every trigger and index is dropped and `Store::open` recreates
+///    them from this build's own statements, so nothing the backup carried
+///    survives in their place, whatever the first check missed.
+/// 3. Shape. Every table this build has must exist with every column at the
+///    same type, nullability and key position, and the same foreign keys. A
+///    column the backup has in addition is allowed only when it cannot break an
+///    insert: nullable, or with a default.
 fn validate_staged_schema(staged: &Path) -> Result<()> {
     let parent = staged
         .parent()
         .context("the staged restore has no parent directory")?;
-    let token = uuid::Uuid::new_v4().simple().to_string();
-    let candidate = parent.join(format!(".validate-{token}.sqlite3"));
-    let reference = parent.join(format!(".reference-{token}.sqlite3"));
+    let reference = parent.join(format!(
+        ".reference-{}.sqlite3",
+        uuid::Uuid::new_v4().simple()
+    ));
     let result = (|| -> Result<()> {
-        std::fs::copy(staged, &candidate)
-            .with_context(|| format!("copy {} for validation", staged.display()))?;
+        drop(Store::open(&reference)?);
+        let want = read_only(&reference)?;
+
+        // 1. Tamper evidence, before anything is changed.
+        {
+            let have = read_only(staged)?;
+            let expected = definitions(&want, "trigger")?;
+            for (name, sql) in definitions(&have, "trigger")? {
+                match expected.iter().find(|(known, _)| *known == name) {
+                    None => bail!(
+                        "INVALID_INPUT: the backup is not a usable Foremerge ledger: it has a trigger this build does not define, {name}"
+                    ),
+                    Some((_, known_sql)) if normalized(known_sql) != normalized(&sql) => bail!(
+                        "INVALID_INPUT: the backup's {name} trigger differs from this build's definition, so its records may not be append-only; it will not be restored"
+                    ),
+                    Some(_) => {}
+                }
+            }
+        }
+
+        // 2. Rebuild every trigger and index from this build's statements.
+        {
+            let conn = Connection::open(staged)
+                .with_context(|| format!("open staged restore {}", staged.display()))?;
+            let objects = conn
+                .prepare(
+                    "SELECT type, name FROM sqlite_master
+                     WHERE type IN ('trigger', 'index') AND name NOT LIKE 'sqlite_%'",
+                )?
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (kind, name) in objects {
+                let kind = if kind == "trigger" {
+                    "TRIGGER"
+                } else {
+                    "INDEX"
+                };
+                conn.execute_batch(&format!(
+                    "DROP {kind} IF EXISTS \"{}\"",
+                    name.replace('"', "\"\"")
+                ))?;
+            }
+        }
         drop(
-            Store::open(&candidate).context(
+            Store::open(staged).context(
                 "INVALID_INPUT: the backup could not be brought up to this build's schema",
             )?,
         );
-        drop(Store::open(&reference)?);
-        let open = |path: &Path| {
-            Connection::open_with_flags(
-                path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-        };
-        let (have, want) = (open(&candidate)?, open(&reference)?);
-        let names = |conn: &Connection, kind: &str| -> Result<Vec<String>> {
-            let mut statement = conn.prepare(
-                "SELECT name FROM sqlite_master WHERE type = ?1 AND name NOT LIKE 'sqlite_%' ORDER BY name",
-            )?;
-            let rows = statement
-                .query_map([kind], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(rows)
-        };
-        let columns = |conn: &Connection, table: &str| -> Result<Vec<String>> {
-            let mut statement = conn.prepare("SELECT name FROM pragma_table_info(?1)")?;
-            let rows = statement
-                .query_map([table], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(rows)
-        };
+
+        // 3. Shape, after migration and rebuild.
+        let have = read_only(staged)?;
         let have_tables = names(&have, "table")?;
         for table in names(&want, "table")? {
             if !have_tables.contains(&table) {
@@ -412,33 +445,152 @@ fn validate_staged_schema(staged: &Path) -> Result<()> {
                 );
             }
             let present = columns(&have, &table)?;
-            for column in columns(&want, &table)? {
-                if !present.contains(&column) {
+            let wanted = columns(&want, &table)?;
+            for column in &wanted {
+                match present
+                    .iter()
+                    .find(|candidate| candidate.name == column.name)
+                {
+                    None => bail!(
+                        "INVALID_INPUT: the backup is not a usable Foremerge ledger: table {table} has no {} column",
+                        column.name
+                    ),
+                    Some(found) if !found.same_shape(column) => bail!(
+                        "INVALID_INPUT: the backup is not a usable Foremerge ledger: column {table}.{} does not match this build's definition",
+                        column.name
+                    ),
+                    Some(_) => {}
+                }
+            }
+            for extra in present
+                .iter()
+                .filter(|candidate| !wanted.iter().any(|column| column.name == candidate.name))
+            {
+                if extra.not_null && !extra.has_default {
                     bail!(
-                        "INVALID_INPUT: the backup is not a usable Foremerge ledger: table {table} has no {column} column"
+                        "INVALID_INPUT: the backup is not a usable Foremerge ledger: table {table} has an extra required column {}",
+                        extra.name
                     );
                 }
             }
-        }
-        let have_triggers = names(&have, "trigger")?;
-        for trigger in names(&want, "trigger")? {
-            if !have_triggers.contains(&trigger) {
+            if foreign_keys(&have, &table)? != foreign_keys(&want, &table)? {
                 bail!(
-                    "INVALID_INPUT: the backup is not a usable Foremerge ledger: it lacks the {trigger} trigger that keeps its records append-only"
+                    "INVALID_INPUT: the backup is not a usable Foremerge ledger: the foreign keys on {table} differ from this build's"
                 );
             }
         }
+        for kind in ["trigger", "index"] {
+            if definitions(&have, kind)?
+                .iter()
+                .map(|(name, sql)| (name.clone(), normalized(sql)))
+                .collect::<Vec<_>>()
+                != definitions(&want, kind)?
+                    .iter()
+                    .map(|(name, sql)| (name.clone(), normalized(sql)))
+                    .collect::<Vec<_>>()
+            {
+                bail!(
+                    "INVALID_INPUT: the backup's {kind}s could not be rebuilt to match this build"
+                );
+            }
+        }
+        drop(have);
+        // The staged file is renamed into place alone, so it must hold
+        // everything: no write may be left in a sidecar.
+        let conn = Connection::open(staged)?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE;")?;
         Ok(())
     })();
-    for path in [&candidate, &reference] {
-        for file in std::iter::once(path.to_path_buf())
-            .chain(SIDECAR_SUFFIXES.iter().map(|suffix| sidecar(path, suffix)))
-        {
-            let _ = std::fs::remove_file(file);
-        }
+    for file in std::iter::once(reference.clone()).chain(
+        SIDECAR_SUFFIXES
+            .iter()
+            .map(|suffix| sidecar(&reference, suffix)),
+    ) {
+        let _ = std::fs::remove_file(file);
     }
     // Returned as is: the typed prefix is what callers and agents act on.
     result
+}
+
+fn read_only(path: &Path) -> Result<Connection> {
+    Ok(Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?)
+}
+
+fn names(conn: &Connection, kind: &str) -> Result<Vec<String>> {
+    Ok(definitions(conn, kind)?
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect())
+}
+
+/// Name and statement of every object of one kind, sorted by name.
+fn definitions(conn: &Connection, kind: &str) -> Result<Vec<(String, String)>> {
+    let mut statement = conn.prepare(
+        "SELECT name, COALESCE(sql, '') FROM sqlite_master
+         WHERE type = ?1 AND name NOT LIKE 'sqlite_%' ORDER BY name",
+    )?;
+    let rows = statement
+        .query_map([kind], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// A statement with its whitespace collapsed, so indentation is not a change.
+fn normalized(sql: &str) -> String {
+    sql.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+struct ColumnShape {
+    name: String,
+    declared_type: String,
+    not_null: bool,
+    primary_key_position: i64,
+    has_default: bool,
+}
+
+impl ColumnShape {
+    /// Type, nullability and key position must agree. The default is not
+    /// compared: a column added by `ALTER TABLE` carries one that the same
+    /// column in a fresh `CREATE TABLE` may not, and the code always supplies
+    /// the value.
+    fn same_shape(&self, other: &Self) -> bool {
+        self.declared_type
+            .eq_ignore_ascii_case(&other.declared_type)
+            && self.not_null == other.not_null
+            && self.primary_key_position == other.primary_key_position
+    }
+}
+
+fn columns(conn: &Connection, table: &str) -> Result<Vec<ColumnShape>> {
+    let mut statement = conn.prepare(
+        "SELECT name, type, \"notnull\", dflt_value IS NOT NULL, pk FROM pragma_table_info(?1)",
+    )?;
+    let rows = statement
+        .query_map([table], |row| {
+            Ok(ColumnShape {
+                name: row.get(0)?,
+                declared_type: row.get(1)?,
+                not_null: row.get::<_, i64>(2)? != 0,
+                has_default: row.get::<_, i64>(3)? != 0,
+                primary_key_position: row.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+fn foreign_keys(conn: &Connection, table: &str) -> Result<Vec<(String, String, String)>> {
+    let mut statement = conn.prepare(
+        "SELECT \"from\", \"table\", COALESCE(\"to\", '') FROM pragma_foreign_key_list(?1)",
+    )?;
+    let mut rows = statement
+        .query_map([table], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.sort();
+    Ok(rows)
 }
 
 fn validate_restore_source(
