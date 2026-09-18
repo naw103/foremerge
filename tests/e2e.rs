@@ -7394,6 +7394,83 @@ fn ledger_reset_refuses_a_backup_that_is_not_a_foremerge_ledger() {
     assert_eq!(agents["data"].as_array().map(Vec::len), Some(1), "{agents}");
 }
 
+/// Restore one tampered copy of a real ledger and return the refusal, or the
+/// restored result when it was accepted.
+fn restore_tampered_backup(tamper: &str) -> (RepoFixture, PathBuf, Vec<u8>, Value, bool) {
+    let repo = create_repo();
+    let database = database_from_doctor(&repo.root);
+    register_test_agent(&repo.root, "keep-me");
+    let before = fs::read(&database).expect("read ledger");
+    let backup = repo.temp.path().join("tampered.sqlite3");
+    fs::copy(&database, &backup).expect("copy ledger");
+    Connection::open(&backup)
+        .expect("open backup")
+        .execute_batch(tamper)
+        .expect("tamper with backup");
+    let output = cli_output(
+        &repo.root,
+        None,
+        [
+            OsStr::new("ledger"),
+            OsStr::new("reset"),
+            OsStr::new("--yes"),
+            OsStr::new("--from"),
+            backup.as_os_str(),
+        ],
+    );
+    let accepted = output.status.success();
+    let value = parse_cli_json(&output);
+    (repo, database, before, value, accepted)
+}
+
+/// Checking trigger names was not enough: a backup whose append-only trigger
+/// kept its name but did nothing was restored, and an event could then be
+/// rewritten. A changed definition, or a trigger this build does not define,
+/// is refused before the live ledger moves.
+#[test]
+fn ledger_reset_refuses_a_backup_whose_append_only_trigger_was_altered() {
+    for tamper in [
+        "DROP TRIGGER events_no_update;
+         CREATE TRIGGER events_no_update BEFORE UPDATE ON events BEGIN SELECT 1; END;",
+        "CREATE TRIGGER sneaky AFTER INSERT ON agents BEGIN DELETE FROM events; END;",
+    ] {
+        let (_repo, database, before, refused, accepted) = restore_tampered_backup(tamper);
+        assert!(!accepted, "a tampered backup must be refused: {refused}");
+        assert_eq!(refused["error"]["code"], "INVALID_INPUT", "{refused}");
+        assert_eq!(
+            fs::read(&database).expect("read ledger"),
+            before,
+            "the live ledger must not move for a refused restore"
+        );
+        assert!(
+            !database
+                .parent()
+                .expect("runtime dir")
+                .join("backups")
+                .exists(),
+            "{refused}"
+        );
+    }
+}
+
+/// A trigger missing from a backup is not a reason to refuse it: the restore
+/// rebuilds every trigger from this build, and the journal is append-only
+/// again afterwards.
+#[test]
+fn ledger_reset_rebuilds_a_trigger_the_backup_lacks() {
+    let (_repo, database, _before, restored, accepted) =
+        restore_tampered_backup("DROP TRIGGER events_no_delete;");
+    assert!(accepted, "{restored}");
+    let conn = Connection::open(&database).expect("open restored ledger");
+    let error = conn
+        .execute("DELETE FROM events", [])
+        .expect_err("the event journal must be append-only after a restore");
+    assert!(
+        error.to_string().contains("append-only"),
+        "the rebuilt trigger must be the real one: {error}"
+    );
+}
+
 #[test]
 fn ledger_reset_without_a_ledger_says_there_is_nothing_to_reset() {
     let repo = create_repo();

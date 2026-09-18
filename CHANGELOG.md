@@ -99,10 +99,15 @@ for the first release that does, so that upgrading to it is recoverable.
   `--database`, it moved the whole directory, contents included, into
   `backups/` and put a fresh database in its place.
 - `foremerge ledger reset --from` checks the backup against a fresh ledger of
-  this build, every table, column and append-only trigger, before anything
-  moves. A file that was intact SQLite and claimed the current schema, with
-  the wrong tables, was restored, the live ledger was set aside, and the next
-  command failed with "no such column".
+  this build before anything moves. A file that was intact SQLite and claimed
+  the current schema, with the wrong tables, was restored, the live ledger was
+  set aside, and the next command failed with "no such column". Every table
+  must now match in its columns' types, nullability and keys and in its
+  foreign keys. A trigger this build does not define, or one whose definition
+  differs, is refused: a backup whose `events_no_update` kept its name but did
+  nothing was restored, and an event in the append-only journal could then be
+  rewritten. Every trigger and index is then rebuilt from this build's own
+  definitions, so none the backup carried survives in their place.
 - `foremerge ledger reset` refuses, and puts the ledger back, when a process
   opens it while it is being set aside. It used to warn and carry on, leaving
   that process writing to the backup while the new ledger moved on.
