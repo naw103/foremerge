@@ -7453,6 +7453,151 @@ fn ledger_reset_refuses_a_backup_whose_append_only_trigger_was_altered() {
     }
 }
 
+/// Rewrite one table of a backup the way an attacker, or a buggy tool, could:
+/// same name, same rows, a different definition.
+fn rewrite_table(backup: &Path, table: &str, find: &str, replace: &str) -> String {
+    let conn = Connection::open(backup).expect("open backup");
+    conn.execute_batch("PRAGMA foreign_keys = OFF; PRAGMA legacy_alter_table = ON;")
+        .expect("configure rewrite");
+    let sql: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get(0),
+        )
+        .expect("table definition");
+    let rewritten = sql.replacen(find, replace, 1);
+    assert_ne!(rewritten, sql, "the rewrite must change the definition");
+    let columns: Vec<String> = conn
+        .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let columns = columns.join(", ");
+    conn.execute_batch(&format!(
+        "BEGIN;
+         ALTER TABLE {table} RENAME TO old_{table};
+         {rewritten};
+         INSERT INTO {table} ({columns}) SELECT {columns} FROM old_{table};
+         DROP TABLE old_{table};
+         COMMIT;"
+    ))
+    .expect("rewrite table");
+    rewritten
+}
+
+/// Comparing a backup's schema with this build's was bypassed each time it
+/// left something out. An extra `UNIQUE(model)` was restored and then made a
+/// second agent with the same model unregistrable; a foreign key changed to
+/// `ON DELETE CASCADE` was restored and kept. Each is refused, and the live
+/// ledger does not move.
+#[test]
+fn ledger_reset_refuses_a_backup_whose_table_constraints_were_altered() {
+    for (table, find, replace) in [
+        (
+            "agents",
+            "last_seen_at TEXT NOT NULL",
+            "last_seen_at TEXT NOT NULL, UNIQUE(model)",
+        ),
+        (
+            "claims",
+            "agent_id TEXT NOT NULL REFERENCES agents(id)",
+            "agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE",
+        ),
+        (
+            "agents",
+            "last_seen_at TEXT NOT NULL",
+            "last_seen_at TEXT NOT NULL CHECK(length(name) < 100)",
+        ),
+        (
+            "agents",
+            "last_seen_at TEXT NOT NULL",
+            "last_seen_at TEXT NOT NULL, note TEXT",
+        ),
+    ] {
+        let repo = create_repo();
+        let database = database_from_doctor(&repo.root);
+        register_test_agent(&repo.root, "keep-me");
+        let before = fs::read(&database).expect("read ledger");
+        let backup = repo.temp.path().join("altered.sqlite3");
+        fs::copy(&database, &backup).expect("copy ledger");
+        let rewritten = rewrite_table(&backup, table, find, replace);
+
+        let refused = cli_failure(
+            &repo.root,
+            None,
+            [
+                OsStr::new("ledger"),
+                OsStr::new("reset"),
+                OsStr::new("--yes"),
+                OsStr::new("--from"),
+                backup.as_os_str(),
+            ],
+        );
+        assert_eq!(
+            refused["error"]["code"], "INVALID_INPUT",
+            "{rewritten}: {refused}"
+        );
+        assert_eq!(
+            fs::read(&database).expect("read ledger"),
+            before,
+            "the live ledger must not move: {rewritten}"
+        );
+        assert!(
+            !database
+                .parent()
+                .expect("runtime dir")
+                .join("backups")
+                .exists(),
+            "{rewritten}"
+        );
+    }
+}
+
+/// What is restored is a fresh ledger of this build holding the backup's rows,
+/// never the backup's own schema, so the event chain survives intact and the
+/// journal is append-only whatever the backup declared.
+#[test]
+fn ledger_reset_restores_rows_into_this_builds_schema() {
+    let repo = create_repo();
+    let database = database_from_doctor(&repo.root);
+    let agent = register_test_agent(&repo.root, "keep-me");
+    publish_test_intent(
+        &repo.root,
+        &agent,
+        "task",
+        "Real work",
+        "component:Thing=extend",
+    );
+    let reset = cli_success(&repo.root, None, ["ledger", "reset", "--yes"]);
+    let backup = PathBuf::from(reset["data"]["backup_dir"].as_str().expect("backup_dir"))
+        .join("state.sqlite3");
+    let restored = cli_success(
+        &repo.root,
+        None,
+        [
+            OsStr::new("ledger"),
+            OsStr::new("reset"),
+            OsStr::new("--yes"),
+            OsStr::new("--from"),
+            backup.as_os_str(),
+        ],
+    );
+    assert_eq!(restored["data"]["applied"], true, "{restored}");
+    let doctor = cli_success(&repo.root, None, ["doctor"]);
+    assert_eq!(doctor["data"]["event_chain_ok"], true, "{doctor}");
+    let work = cli_success(&repo.root, None, ["work", "query"]);
+    assert_eq!(work["data"].as_array().map(Vec::len), Some(1), "{work}");
+    let conn = Connection::open(&database).expect("open restored ledger");
+    assert!(
+        conn.execute("UPDATE events SET event_type = 'forged'", [])
+            .is_err(),
+        "the restored journal must be append-only"
+    );
+}
+
 /// A trigger missing from a backup is not a reason to refuse it: the restore
 /// rebuilds every trigger from this build, and the journal is append-only
 /// again afterwards.
