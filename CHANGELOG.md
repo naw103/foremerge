@@ -98,16 +98,19 @@ for the first release that does, so that upgrading to it is recoverable.
   the ledger or one of its sidecars should be. Pointed at a directory with
   `--database`, it moved the whole directory, contents included, into
   `backups/` and put a fresh database in its place.
-- `foremerge ledger reset --from` checks the backup against a fresh ledger of
-  this build before anything moves. A file that was intact SQLite and claimed
-  the current schema, with the wrong tables, was restored, the live ledger was
-  set aside, and the next command failed with "no such column". Every table
-  must now match in its columns' types, nullability and keys and in its
-  foreign keys. A trigger this build does not define, or one whose definition
-  differs, is refused: a backup whose `events_no_update` kept its name but did
-  nothing was restored, and an event in the append-only journal could then be
-  rewritten. Every trigger and index is then rebuilt from this build's own
-  definitions, so none the backup carried survives in their place.
+- `foremerge ledger reset --from` no longer installs a backup's own schema. It
+  creates a fresh ledger of this build and copies the backup's rows into it, so
+  the restored ledger's tables, keys, indexes and append-only triggers are this
+  build's by construction, and every row must satisfy them. Before that it
+  compares the two and refuses a backup that differs, naming what differs:
+  triggers by definition, and every table's columns, indexes, unique
+  constraints, foreign keys with their actions, and table-level constraints.
+  Each earlier check was bypassed by something it did not look at: a file that
+  was intact SQLite with the wrong tables, which was restored and made the next
+  command fail; a backup whose `events_no_update` kept its name but did
+  nothing, after which an event in the append-only journal could be rewritten;
+  and an extra `UNIQUE(model)` that made a second agent unregistrable. Backups
+  written by released 0.4.1 and 0.3.1 restore with their event chain intact.
 - `foremerge ledger reset` refuses, and puts the ledger back, when a process
   opens it while it is being set aside. It used to warn and carry on, leaving
   that process writing to the backup while the new ledger moved on.
