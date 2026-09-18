@@ -387,30 +387,20 @@ fn executable_name() -> &'static str {
     }
 }
 
-/// The version a `foremerge` binary reports, run with a bounded timeout.
+/// The version of the binary at `path`, known only when it is this process's
+/// own executable.
 ///
-/// Only ever called for a path this process located itself, in a `PATH` or
-/// installer directory. A command taken from a client's configuration is never
-/// run: that file is repository content, and a wrapper script that ignores its
-/// arguments and starts a server would open, and so migrate, a ledger, which
-/// is exactly what diagnostics must never do.
-fn binary_version(path: &Path) -> Option<String> {
-    let mut probe = Command::new(path);
-    probe.arg("--version");
-    let output = run_bounded(probe).ok().filter(|output| output.success)?;
-    String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .nth(1)
-        .map(str::to_string)
-}
-
-/// The version of the binary at `path`, answered without running it when it
-/// is this process's own executable.
+/// Diagnostics never run another binary to ask. A `foremerge` on `PATH` can be
+/// anything, including a wrapper that ignores `--version` and starts a server,
+/// which opens and so can migrate a ledger: exactly what diagnostics must never
+/// do. Restricting to absolute `PATH` entries did not make that safe, because
+/// repository-local tool directories are commonly absolute. Other installations
+/// are reported by path with no version.
 fn version_of(path: &Path, current_exe: &Path) -> (Option<String>, bool) {
     if paths_match(path, current_exe) {
         (Some(env!("CARGO_PKG_VERSION").to_string()), true)
     } else {
-        (binary_version(path), false)
+        (None, false)
     }
 }
 
@@ -473,8 +463,10 @@ pub fn installations(current_exe: &Path) -> Vec<Installation> {
     found
 }
 
-/// A warning for each installation whose version differs from this binary's.
-/// Same-version copies are left alone: they disagree about nothing yet.
+/// A warning for each other installation. Their versions are not checked,
+/// because checking means running them, so every other copy is reported: a
+/// shell and an MCP client can each launch a different one, and a newer build
+/// migrates the ledger so an older one cannot open it.
 pub fn installation_warnings(installations: &[Installation]) -> Vec<String> {
     let current = env!("CARGO_PKG_VERSION");
     let this_path = installations
@@ -483,11 +475,10 @@ pub fn installation_warnings(installations: &[Installation]) -> Vec<String> {
         .map_or("this binary", |value| value.path.as_str());
     installations
         .iter()
-        .filter(|value| !value.this_binary && value.version.as_deref() != Some(current))
+        .filter(|value| !value.this_binary)
         .map(|value| {
             format!(
-                "Foremerge {} is also installed at {}, while {this_path} is {current}. A shell and an MCP client can each launch a different one, and a newer build migrates the ledger so an older one cannot open it. Keep one installation, or upgrade both the same way, then run `foremerge setup` so every client launches the one you kept.",
-                value.version.as_deref().unwrap_or("of an unknown version"),
+                "Another foremerge is installed at {}, while {this_path} is {current}. Its version was not checked, because that would mean running it. A shell and an MCP client can each launch a different installation, and a newer build migrates the ledger so an older one cannot open it. Keep one installation, or upgrade both the same way, then run `foremerge setup` so every client launches the one you kept.",
                 value.path
             )
         })

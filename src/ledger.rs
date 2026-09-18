@@ -8,7 +8,7 @@
 //! ledger open.
 
 use crate::Store;
-use crate::db::{DATABASE_SCHEMA_VERSION, SCHEMA_WRITER_KEY, readable_writer};
+use crate::db::{DATABASE_SCHEMA_VERSION, SCHEMA_WRITER_KEY, WRITER_QUERY, readable_writer};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -54,6 +54,45 @@ pub enum HolderCheck {
 }
 
 /// The ledger's files that exist on disk: the database and its sidecars.
+/// The ledger and its sidecars, refusing anything that is not a regular file.
+///
+/// `reset` moves whatever this returns. A path check that only asked whether
+/// something existed would move a directory named as the ledger, contents and
+/// all, and replace it with a fresh database; a symlink would be moved as a
+/// link and leave the real ledger behind. Both are refused, as are devices and
+/// FIFOs, before anything moves.
+pub fn ledger_components(database: &Path) -> Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    for path in std::iter::once(database.to_path_buf()).chain(
+        SIDECAR_SUFFIXES
+            .iter()
+            .map(|suffix| sidecar(database, suffix)),
+    ) {
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() => found.push(path),
+            Ok(metadata) => {
+                let kind = if metadata.file_type().is_symlink() {
+                    "a symbolic link"
+                } else if metadata.is_dir() {
+                    "a directory"
+                } else {
+                    "not a regular file"
+                };
+                bail!(
+                    "INVALID_INPUT: {} is {kind}, so it cannot be a Foremerge ledger or one of its sidecar files; nothing was moved",
+                    path.display()
+                );
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(anyhow::Error::from(error))
+                    .with_context(|| format!("inspect {}", path.display()));
+            }
+        }
+    }
+    Ok(found)
+}
+
 pub fn ledger_files(database: &Path) -> Vec<PathBuf> {
     std::iter::once(database.to_path_buf())
         .chain(
@@ -259,9 +298,17 @@ pub fn describe(database: &Path) -> Result<Value> {
     let schema_version = meta("schema_version");
     // Untrusted: whatever build wrote this ledger put it there, and a ledger
     // can arrive from anywhere through `--from`.
-    let written_by = meta(SCHEMA_WRITER_KEY).map(|value| {
-        readable_writer(&value).unwrap_or_else(|| "an unreadable version".to_string())
-    });
+    // Read bounded, so an oversized value is never loaded whole.
+    let written_by = conn
+        .query_row(WRITER_QUERY, [SCHEMA_WRITER_KEY], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()
+        .ok()
+        .flatten()
+        .map(|value| {
+            readable_writer(&value).unwrap_or_else(|| "an unreadable version".to_string())
+        });
     let mut counts = serde_json::Map::new();
     for table in SUMMARY_TABLES {
         let count: Option<i64> = conn
@@ -305,6 +352,93 @@ fn stage_restore(source: &Path, staged: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Refuse a restore source that is valid SQLite but not a usable Foremerge
+/// ledger, before anything moves.
+///
+/// `stage_restore` proves only that the file is intact SQLite. A database with
+/// a `meta` table claiming the current schema and an `agents` table of the
+/// wrong shape passed, the live ledger was set aside, and the next command
+/// failed with "no such column". So the staged copy is migrated, on a
+/// throwaway copy of its own, exactly as `Store::open` will migrate it once
+/// installed, and then compared with a fresh ledger of this build: every table
+/// must exist with every column, and every trigger, since the triggers are what
+/// keep the event journal and the decision records append-only.
+fn validate_staged_schema(staged: &Path) -> Result<()> {
+    let parent = staged
+        .parent()
+        .context("the staged restore has no parent directory")?;
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    let candidate = parent.join(format!(".validate-{token}.sqlite3"));
+    let reference = parent.join(format!(".reference-{token}.sqlite3"));
+    let result = (|| -> Result<()> {
+        std::fs::copy(staged, &candidate)
+            .with_context(|| format!("copy {} for validation", staged.display()))?;
+        drop(
+            Store::open(&candidate).context(
+                "INVALID_INPUT: the backup could not be brought up to this build's schema",
+            )?,
+        );
+        drop(Store::open(&reference)?);
+        let open = |path: &Path| {
+            Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+        };
+        let (have, want) = (open(&candidate)?, open(&reference)?);
+        let names = |conn: &Connection, kind: &str| -> Result<Vec<String>> {
+            let mut statement = conn.prepare(
+                "SELECT name FROM sqlite_master WHERE type = ?1 AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            )?;
+            let rows = statement
+                .query_map([kind], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        };
+        let columns = |conn: &Connection, table: &str| -> Result<Vec<String>> {
+            let mut statement = conn.prepare("SELECT name FROM pragma_table_info(?1)")?;
+            let rows = statement
+                .query_map([table], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        };
+        let have_tables = names(&have, "table")?;
+        for table in names(&want, "table")? {
+            if !have_tables.contains(&table) {
+                bail!(
+                    "INVALID_INPUT: the backup is not a usable Foremerge ledger: it has no {table} table"
+                );
+            }
+            let present = columns(&have, &table)?;
+            for column in columns(&want, &table)? {
+                if !present.contains(&column) {
+                    bail!(
+                        "INVALID_INPUT: the backup is not a usable Foremerge ledger: table {table} has no {column} column"
+                    );
+                }
+            }
+        }
+        let have_triggers = names(&have, "trigger")?;
+        for trigger in names(&want, "trigger")? {
+            if !have_triggers.contains(&trigger) {
+                bail!(
+                    "INVALID_INPUT: the backup is not a usable Foremerge ledger: it lacks the {trigger} trigger that keeps its records append-only"
+                );
+            }
+        }
+        Ok(())
+    })();
+    for path in [&candidate, &reference] {
+        for file in std::iter::once(path.to_path_buf())
+            .chain(SIDECAR_SUFFIXES.iter().map(|suffix| sidecar(path, suffix)))
+        {
+            let _ = std::fs::remove_file(file);
+        }
+    }
+    // Returned as is: the typed prefix is what callers and agents act on.
+    result
 }
 
 fn validate_restore_source(
@@ -434,7 +568,7 @@ pub fn reset(
     // Sidecars without a main file are not nothing: SQLite rebuilds a ledger
     // from a leftover `-wal`, so a stale sidecar would resurrect the old
     // ledger under a restored one, or corrupt it. They are set aside too.
-    let present = !ledger_files(database).is_empty();
+    let present = !ledger_components(database)?.is_empty();
     if !present && from.is_none() {
         bail!(
             "NOT_INITIALIZED: there is no ledger at {} to reset; run `foremerge init` to create one",
@@ -518,7 +652,9 @@ pub fn reset(
                 ".restore-{}.sqlite3",
                 uuid::Uuid::new_v4().simple()
             ));
-            if let Err(error) = stage_restore(source, &staged) {
+            if let Err(error) =
+                stage_restore(source, &staged).and_then(|()| validate_staged_schema(&staged))
+            {
                 let _ = std::fs::remove_file(&staged);
                 return Err(error);
             }
@@ -537,7 +673,16 @@ pub fn reset(
             }
             return Err(error);
         }
-        for file in ledger_files(database) {
+        let components = match ledger_components(database) {
+            Ok(components) => components,
+            Err(error) => {
+                if let Some(staged) = staged.as_ref() {
+                    let _ = std::fs::remove_file(staged);
+                }
+                return Err(error);
+            }
+        };
+        for file in components {
             let target = backup_dir.join(file.file_name().context("ledger file name")?);
             if let Err(error) = std::fs::rename(&file, &target) {
                 // Put back what already moved, so a failure leaves the ledger
@@ -554,16 +699,25 @@ pub fn reset(
             moved.push((file, target));
         }
         // A client that started between the check and the move now holds the
-        // backup, and writes it makes there are not in the new ledger.
+        // backup, and anything it writes would land there rather than in the
+        // new ledger: two diverging histories. That is a refusal, not a
+        // warning, and the files go back where every client expects them.
         if let HolderCheck::Checked(found) =
             holders(&backup_dir.join(database.file_name().context("ledger file name")?))
         {
             if !found.is_empty() {
-                warnings.push(format!(
-                    "{} process(es) opened the ledger while it was being set aside and still hold the backup: {}. Restart them; anything they write goes to the backup, not the new ledger.",
+                for (original, backup) in moved.iter().rev() {
+                    let _ = std::fs::rename(backup, original);
+                }
+                let _ = std::fs::remove_dir(backup_dir);
+                if let Some(staged) = staged.as_ref() {
+                    let _ = std::fs::remove_file(staged);
+                }
+                bail!(
+                    "LEDGER_IN_USE: {} process(es) opened the ledger while it was being set aside: {}. It was put back unchanged; stop them and run `foremerge ledger reset --yes` again.",
                     found.len(),
                     describe_holders(&found)
-                ));
+                );
             }
         }
     }

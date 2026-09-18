@@ -25,7 +25,10 @@ for the first release that does, so that upgrading to it is recoverable.
   ([#19](https://github.com/naw103/foremerge/issues/19))
 - `foremerge doctor` lists every `foremerge` binary on `PATH` and in the two
   installer directories (`~/.local/bin`, `~/.cargo/bin`) as `installations`,
-  and warns when their versions differ. With `--client`, each client reports
+  and warns about every one besides the running binary. It does not run them
+  to ask their versions, so theirs are reported as unknown: a `foremerge` on
+  `PATH` can be a wrapper that ignores `--version` and starts a server, which
+  would open the ledger a diagnostic must leave alone. With `--client`, each client reports
   the binary its MCP entry launches as `mcp_command`, with a warning when that
   binary is not the running one. That command is compared, never run: it comes
   from repository content, and a wrapper script that starts a server would open
@@ -91,6 +94,18 @@ for the first release that does, so that upgrading to it is recoverable.
   the rest worked. An array result now travels in the text block alone, as JSON,
   and `structuredContent` is sent only when the result is an object.
 
+- `foremerge ledger reset` refuses anything that is not a regular file where
+  the ledger or one of its sidecars should be. Pointed at a directory with
+  `--database`, it moved the whole directory, contents included, into
+  `backups/` and put a fresh database in its place.
+- `foremerge ledger reset --from` checks the backup against a fresh ledger of
+  this build, every table, column and append-only trigger, before anything
+  moves. A file that was intact SQLite and claimed the current schema, with
+  the wrong tables, was restored, the live ledger was set aside, and the next
+  command failed with "no such column".
+- `foremerge ledger reset` refuses, and puts the ledger back, when a process
+  opens it while it is being set aside. It used to warn and carry on, leaving
+  that process writing to the backup while the new ledger moved on.
 - `foremerge ledger reset --from` refuses a backup that belongs to a different
   Git repository. Restoring one succeeded, and every command then failed with
   `INVALID_INPUT: worktree belongs to a different Git repository`, while
@@ -99,8 +114,9 @@ for the first release that does, so that upgrading to it is recoverable.
   it would otherwise move as a link, leaving the real ledger behind, reporting
   nothing about what it held, and producing a backup that cannot be restored.
 - The version a ledger records for the build that migrated it is shown only
-  when it reads like a version: at most 64 characters of letters, digits and
-  ` .+_-()`. It is written by whatever build touched the ledger, and
+  when it is a semantic version, `MAJOR.MINOR.PATCH` with an optional
+  pre-release or build label and the exact ` (development build)` marker, and
+  it is read at most 65 bytes at a time. It is written by whatever build touched the ledger, and
   `ledger reset --from` now installs ledgers that came from elsewhere, so it is
   untrusted text that reaches operators and, through MCP errors the skill tells
   agents to relay, models. Anything else is reported as an unreadable version.
