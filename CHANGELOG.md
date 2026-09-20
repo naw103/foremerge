@@ -9,6 +9,12 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-20
+
+This is a minor version because it breaks one HTTP endpoint's request body.
+The ledger schema is unchanged, so 0.4.x builds and this one read the same
+coordination store, and the CLI and MCP surfaces are unchanged.
+
 ### Changed
 
 - **Breaking (HTTP API):** `POST /v1/changesets/{id}/validate` now runs a
@@ -840,7 +846,8 @@ schema 4 store rather than migrate it backwards.
 - Apache-2.0 licensing, contribution and security policies, CI, release checks,
   limitations, roadmap, and a reproducible benchmark specification.
 
-[Unreleased]: https://github.com/naw103/foremerge/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/naw103/foremerge/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/naw103/foremerge/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/naw103/foremerge/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/naw103/foremerge/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/naw103/foremerge/compare/v0.4.0...v0.4.1
