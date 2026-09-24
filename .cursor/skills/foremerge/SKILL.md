@@ -60,6 +60,20 @@ Setup refuses to replace differing skill or MCP entries unless the human explici
 5. Claim the scopes. Claims are leased advice, never locks.
 6. Start the claimed work before implementation.
 
+This applies to every write to a tracked file, not only code. Plans, specs,
+runbooks, and other documents get the same steps, with `file:` scopes when
+nothing more semantic fits. Documents are often rewritten wholesale, and Git
+cannot merge two rewrites of the same document.
+
+When you are only planning and not yet writing anything, call `query_work` for
+the scopes the plan would touch and account for what is already in flight. Do
+not publish an intent for a plan that may never be carried out; publish when
+you commit to the work or start writing the plan document itself.
+
+Foremerge only sees agents that coordinate. If a file you have not touched
+changes under you and `query_work` shows no owner for it, tell the user before
+you continue, and do not overwrite that change.
+
 Prefer semantic scopes such as `symbol:PaymentService`, `api:/payments`, `schema:billing.payments`, or `contract:payments.provider`; file scopes are weaker evidence.
 
 A durable `cfl_*` conflict can be linked to `coordinate_with_agent` and resolved with `resolve_conflict`. An `eph_*` preflight is intentionally not stored: publish/claim first to obtain a durable finding, or send an unlinked message.
