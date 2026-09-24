@@ -9,6 +9,16 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+### Changed
+
+- The agent skill now says that coordination covers every write to a tracked
+  file, not only code. Plans, specs and runbooks are rewritten wholesale more
+  often than code is, and Git cannot merge two rewrites of one document. It
+  also tells an agent to `query_work` the scopes a plan would touch while
+  planning, without publishing an intent for work that may never happen, and to
+  stop and tell the user when an uncoordinated file changes underneath it
+  rather than overwriting the change.
+
 ## [0.5.0] - 2026-09-20
 
 This is a minor version because it breaks one HTTP endpoint's request body.
