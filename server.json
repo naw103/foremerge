@@ -1,0 +1,28 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.naw103/foremerge",
+  "title": "Foremerge",
+  "description": "Coordinate parallel coding agents, above Git",
+  "version": "0.5.0",
+  "repository": {
+    "url": "https://github.com/naw103/foremerge",
+    "source": "github"
+  },
+  "websiteUrl": "https://foremerge.com",
+  "packages": [
+    {
+      "registryType": "cargo",
+      "identifier": "foremerge",
+      "version": "0.5.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        }
+      ]
+    }
+  ]
+}
