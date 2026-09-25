@@ -79,6 +79,38 @@ fn the_plugin_manifest_version_matches_the_crate_version() {
     );
 }
 
+/// The MCP registry entry names the crate version twice, once for the listing
+/// and once for the crates.io package it points at. Nothing else in the build
+/// reads `server.json`, so a release that forgets it ships a listing that
+/// advertises the previous version, or a package version nobody published.
+#[test]
+fn the_registry_entry_versions_match_the_crate_version() {
+    let entry = read(&repo_root().join("server.json"));
+    let entry: Value = serde_json::from_str(&entry).expect("server.json is valid JSON");
+
+    assert_eq!(
+        entry["version"].as_str().expect("version in server.json"),
+        env!("CARGO_PKG_VERSION"),
+        "server.json `version` must be bumped with the crate"
+    );
+    let packages = entry["packages"]
+        .as_array()
+        .expect("server.json lists packages");
+    assert!(
+        !packages.is_empty(),
+        "server.json lists at least one package"
+    );
+    for package in packages {
+        assert_eq!(
+            package["version"]
+                .as_str()
+                .expect("version on each package"),
+            env!("CARGO_PKG_VERSION"),
+            "every server.json package version must be bumped with the crate: {package}"
+        );
+    }
+}
+
 /// A plugin directory is not installable on its own. Claude Code resolves
 /// `/plugin install <plugin>@<marketplace>` through a marketplace catalogue at
 /// the repository root, so an entry that stops naming the plugin directory
