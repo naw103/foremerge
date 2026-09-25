@@ -474,6 +474,10 @@ written to the server's stderr log. The instructions ask the agent to tell you
 and to leave the ledger and the client configuration alone. Until it is fixed,
 the session is not coordinated with other agents.
 
+- `MIGRATION_REQUIRED` means the ledger is at an older schema than this build
+  uses, and this build will not migrate it on its own. Follow
+  [Upgrading Foremerge](#upgrading-foremerge): upgrade every client, close the
+  sessions, run `foremerge ledger migrate --yes`, and restart them.
 - `UNSUPPORTED_SCHEMA` means a newer Foremerge build has already migrated the
   ledger. From 0.4.3 the message names that build's version when the ledger
   recorded it. Upgrade the binary the client launches to that version or newer,
@@ -494,7 +498,8 @@ call rechecks, so the server stops rather than writing into a ledger it no
 longer understands.
 
 - `UNSUPPORTED_SCHEMA` means another Foremerge build migrated the ledger while
-  this server was running, typically a newer `foremerge` run from a shell.
+  this server was running, typically `foremerge ledger migrate` run by a newer
+  build.
   Follow [Upgrading Foremerge](#upgrading-foremerge) so every client launches
   that build, then restart the session.
 - `LEDGER_REPLACED` means the ledger file was moved or replaced, for example by
@@ -537,18 +542,19 @@ database. The MVP has no daemon autostart or automatic endpoint discovery.
 
 ## Upgrading Foremerge
 
-A newer build migrates the coordination ledger the first time it opens it, and
-the migration only goes forward: an older build then refuses the ledger with
-`UNSUPPORTED_SCHEMA`. Every process that opens a repository's ledger, whether
-your shell or each client's MCP server, has to run the same version.
+A release that changes the database schema has to migrate the coordination
+ledger, and a migration only goes forward: older builds refuse the migrated
+ledger with `UNSUPPORTED_SCHEMA`. So Foremerge never migrates a ledger as a
+side effect. Every command, and every MCP server a client starts, refuses a
+ledger at an older schema with `MIGRATION_REQUIRED` and leaves it untouched,
+until you run `foremerge ledger migrate`.
 
 `foremerge setup` writes the absolute path of the binary that ran it into each
 client's MCP configuration, because clients started from a desktop launcher do
 not inherit your shell's `PATH`. The installers put that binary in different
 places: `install.sh` in `~/.local/bin` and `cargo install` in `~/.cargo/bin`.
-Upgrading with a different method than you installed with leaves two binaries:
-your shell runs the new one and your clients still launch the old one, and the
-first command you run migrates the ledger out from under them.
+Upgrading with a different method than you installed with leaves two binaries,
+your shell on the new one and your clients on the old one.
 
 To upgrade:
 
@@ -561,14 +567,17 @@ To upgrade:
 3. Run `foremerge setup all` (or the clients you use) from each repository with
    the upgraded binary, so every client configuration launches it.
 4. Run `foremerge doctor --client all`. Each client's `mcp_command` should be
-   the binary you upgraded, with no `warnings`.
+   the binary you upgraded, with no `warnings`. If `database_error` is
+   `MIGRATION_REQUIRED`, run `foremerge ledger migrate` to see what it will do,
+   then `foremerge ledger migrate --yes`. It refuses while any other process
+   has the ledger open, and copies the ledger into
+   `backups/<timestamp>-schema<N>-before-migration/` before migrating.
 5. Restart the client sessions.
 
-When a release's changelog carries a migration note, the ledger cannot be
-opened by the previous release after step 5. Keep a copy of
-`$(git rev-parse --path-format=absolute --git-common-dir)/foremerge/state.sqlite3`
-from before the upgrade if you may want to roll back, and restore it with
-`foremerge ledger reset --from` using the previous release.
+To roll back after migrating, install the previous release (0.4.3 or later) and
+restore the backup `ledger migrate` printed with
+`foremerge ledger reset --yes --from BACKUP`. Work recorded after the migration
+is not in the backup.
 
 ## Recovering a ledger
 
@@ -591,6 +600,9 @@ foremerge ledger reset --yes --from BACKUP    # set it aside, restore BACKUP
   available the command warns instead, so close the sessions yourself.
 - `--from` copies the backup rather than moving it, checks its integrity, and
   refuses a backup whose schema is newer than the running build.
+- A development build refuses both `ledger reset` and `ledger migrate` unless
+  given `--allow-development-build`: its schema can be ahead of every release,
+  and a ledger it writes may then open with nothing you can install.
 - The repository's trusted checks (`checks.json`) and API token are separate
   files and are not touched.
 

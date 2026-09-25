@@ -9,6 +9,28 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking.** Foremerge no longer migrates a ledger as a side effect of
+  opening it. Every command, and every MCP server a client starts, refuses a
+  ledger at an older schema with `MIGRATION_REQUIRED` and leaves it untouched.
+  `foremerge ledger migrate` performs the migration: it refuses while any other
+  process has the ledger open, copies the ledger with its WAL contents into
+  `backups/<timestamp>-schema<N>-before-migration/`, checks the copy's
+  integrity, then migrates, and prints how to roll back. Without `--yes` it
+  only reports what it would do. A migration is one way, and any command
+  reached it, including ones that only read: a `status` run by a newer binary
+  from the wrong directory locked every older client out of a real repository.
+
+  Migration: after upgrading every client, close the sessions in each
+  coordinated repository and run `foremerge ledger migrate --yes` there.
+  `foremerge doctor` reports `MIGRATION_REQUIRED` with that step.
+- A development build (one compiled with debug assertions, which `cargo
+  install` and the release archives are not) refuses `ledger migrate` and
+  `ledger reset` without `--allow-development-build`. Its schema can be ahead
+  of every release, and a ledger it writes would then open with nothing the
+  operator can install.
+
 ## [0.5.0] - 2026-09-20
 
 This is a minor version because it breaks one HTTP endpoint's request body.
@@ -247,6 +269,16 @@ for the first release that does, so that upgrading to it is recoverable.
   crates.io README, so the name has to be visible text rather than a comment.
 
 ### Fixed
+
+- A process that already had the ledger open kept using it after another build
+  migrated it. Every call now reads the schema stamp again, inside the write
+  transaction for writes, and the readiness probe and the event-chain audit
+  check it too. They fail with `UNSUPPORTED_SCHEMA`, and a call fails with
+  `LEDGER_REPLACED` when the file at the ledger's path is no longer the one it
+  opened.
+- `UNSUPPORTED_SCHEMA` now names the Foremerge build that migrated the ledger,
+  recorded in the ledger when a build creates or migrates it, and the next
+  step.
 
 - `foremerge mcp` no longer exits when it cannot open the coordination ledger.
   A client that loses its server reports only a closed connection (Claude Code

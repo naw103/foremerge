@@ -7333,7 +7333,11 @@ fn ledger_reset_refuses_while_a_server_holds_the_ledger_and_keeps_everything_it_
     let pid = child.id();
 
     // A dry run names what stands in the way instead of refusing.
-    let plan = cli_success(&repo.root, None, ["ledger", "reset"]);
+    let plan = cli_success(
+        &repo.root,
+        None,
+        ["ledger", "reset", "--allow-development-build"],
+    );
     assert_eq!(plan["data"]["applied"], false, "{plan}");
     assert_eq!(plan["data"]["current"]["counts"]["agents"], 1, "{plan}");
     assert!(
@@ -7345,7 +7349,11 @@ fn ledger_reset_refuses_while_a_server_holds_the_ledger_and_keeps_everything_it_
         "the server holding the ledger must be named: {plan}"
     );
 
-    let refused = cli_failure(&repo.root, None, ["ledger", "reset", "--yes"]);
+    let refused = cli_failure(
+        &repo.root,
+        None,
+        ["ledger", "reset", "--yes", "--allow-development-build"],
+    );
     assert_eq!(refused["error"]["code"], "LEDGER_IN_USE", "{refused}");
     assert!(
         refused["error"]["message"]
@@ -7358,7 +7366,11 @@ fn ledger_reset_refuses_while_a_server_holds_the_ledger_and_keeps_everything_it_
     drop(stdin);
     child.wait().expect("MCP server exits");
 
-    let reset = cli_success(&repo.root, None, ["ledger", "reset", "--yes"]);
+    let reset = cli_success(
+        &repo.root,
+        None,
+        ["ledger", "reset", "--yes", "--allow-development-build"],
+    );
     let data = &reset["data"];
     assert_eq!(data["applied"], true, "{reset}");
     assert_eq!(data["set_aside"]["counts"]["agents"], 1, "{reset}");
@@ -7381,6 +7393,7 @@ fn ledger_reset_refuses_while_a_server_holds_the_ledger_and_keeps_everything_it_
         [
             OsStr::new("ledger"),
             OsStr::new("reset"),
+            OsStr::new("--allow-development-build"),
             OsStr::new("--yes"),
             OsStr::new("--from"),
             backup.as_os_str(),
@@ -7403,7 +7416,11 @@ fn ledger_reset_recovers_a_ledger_no_release_can_open_and_refuses_a_newer_backup
     let (_, newer) = stamp_newer_schema(&database);
     cli_failure(&repo.root, None, ["status"]);
 
-    let reset = cli_success(&repo.root, None, ["ledger", "reset", "--yes"]);
+    let reset = cli_success(
+        &repo.root,
+        None,
+        ["ledger", "reset", "--yes", "--allow-development-build"],
+    );
     assert_eq!(
         reset["data"]["set_aside"]["schema_version"], newer,
         "{reset}"
@@ -7418,6 +7435,7 @@ fn ledger_reset_recovers_a_ledger_no_release_can_open_and_refuses_a_newer_backup
         [
             OsStr::new("ledger"),
             OsStr::new("reset"),
+            OsStr::new("--allow-development-build"),
             OsStr::new("--yes"),
             OsStr::new("--from"),
             backup.as_os_str(),
@@ -7447,6 +7465,7 @@ fn ledger_reset_refuses_a_backup_from_another_repository() {
         [
             OsStr::new("ledger"),
             OsStr::new("reset"),
+            OsStr::new("--allow-development-build"),
             OsStr::new("--yes"),
             OsStr::new("--from"),
             theirs_database.as_os_str(),
@@ -7467,7 +7486,11 @@ fn ledger_reset_refuses_a_backup_from_another_repository() {
     cli_success(&ours.root, None, ["status"]);
 
     // Our own backup still restores.
-    let reset = cli_success(&ours.root, None, ["ledger", "reset", "--yes"]);
+    let reset = cli_success(
+        &ours.root,
+        None,
+        ["ledger", "reset", "--yes", "--allow-development-build"],
+    );
     let backup = PathBuf::from(reset["data"]["backup_dir"].as_str().expect("backup_dir"))
         .join("state.sqlite3");
     let restored = cli_success(
@@ -7476,6 +7499,7 @@ fn ledger_reset_refuses_a_backup_from_another_repository() {
         [
             OsStr::new("ledger"),
             OsStr::new("reset"),
+            OsStr::new("--allow-development-build"),
             OsStr::new("--yes"),
             OsStr::new("--from"),
             backup.as_os_str(),
@@ -7498,7 +7522,11 @@ fn ledger_reset_refuses_a_symlinked_ledger_path() {
     fs::rename(&database, &elsewhere).expect("move the ledger aside");
     std::os::unix::fs::symlink(&elsewhere, &database).expect("link the ledger path");
 
-    let refused = cli_failure(&repo.root, None, ["ledger", "reset", "--yes"]);
+    let refused = cli_failure(
+        &repo.root,
+        None,
+        ["ledger", "reset", "--yes", "--allow-development-build"],
+    );
     assert_eq!(refused["error"]["code"], "INVALID_INPUT", "{refused}");
     assert!(
         refused["error"]["message"]
@@ -7526,7 +7554,11 @@ fn ledger_reset_refuses_a_directory_and_moves_nothing() {
     fs::create_dir_all(victim.join("valuable")).expect("create directory");
     fs::write(victim.join("valuable/data.txt"), "precious\n").expect("write data");
 
-    let refused = cli_failure(temp.path(), Some(&victim), ["ledger", "reset", "--yes"]);
+    let refused = cli_failure(
+        temp.path(),
+        Some(&victim),
+        ["ledger", "reset", "--yes", "--allow-development-build"],
+    );
     assert_eq!(refused["error"]["code"], "INVALID_INPUT", "{refused}");
     assert!(
         refused["error"]["message"]
@@ -7574,6 +7606,7 @@ fn ledger_reset_refuses_a_backup_that_is_not_a_foremerge_ledger() {
         [
             OsStr::new("ledger"),
             OsStr::new("reset"),
+            OsStr::new("--allow-development-build"),
             OsStr::new("--yes"),
             OsStr::new("--from"),
             bogus.as_os_str(),
@@ -7622,6 +7655,7 @@ fn restore_tampered_backup(tamper: &str) -> (RepoFixture, PathBuf, Vec<u8>, Valu
         [
             OsStr::new("ledger"),
             OsStr::new("reset"),
+            OsStr::new("--allow-development-build"),
             OsStr::new("--yes"),
             OsStr::new("--from"),
             backup.as_os_str(),
@@ -7740,6 +7774,7 @@ fn ledger_reset_refuses_a_backup_whose_table_constraints_were_altered() {
             [
                 OsStr::new("ledger"),
                 OsStr::new("reset"),
+                OsStr::new("--allow-development-build"),
                 OsStr::new("--yes"),
                 OsStr::new("--from"),
                 backup.as_os_str(),
@@ -7780,7 +7815,11 @@ fn ledger_reset_restores_rows_into_this_builds_schema() {
         "Real work",
         "component:Thing=extend",
     );
-    let reset = cli_success(&repo.root, None, ["ledger", "reset", "--yes"]);
+    let reset = cli_success(
+        &repo.root,
+        None,
+        ["ledger", "reset", "--yes", "--allow-development-build"],
+    );
     let backup = PathBuf::from(reset["data"]["backup_dir"].as_str().expect("backup_dir"))
         .join("state.sqlite3");
     let restored = cli_success(
@@ -7789,6 +7828,7 @@ fn ledger_reset_restores_rows_into_this_builds_schema() {
         [
             OsStr::new("ledger"),
             OsStr::new("reset"),
+            OsStr::new("--allow-development-build"),
             OsStr::new("--yes"),
             OsStr::new("--from"),
             backup.as_os_str(),
@@ -7828,7 +7868,11 @@ fn ledger_reset_rebuilds_a_trigger_the_backup_lacks() {
 #[test]
 fn ledger_reset_without_a_ledger_says_there_is_nothing_to_reset() {
     let repo = create_repo();
-    let refused = cli_failure(&repo.root, None, ["ledger", "reset", "--yes"]);
+    let refused = cli_failure(
+        &repo.root,
+        None,
+        ["ledger", "reset", "--yes", "--allow-development-build"],
+    );
     assert_eq!(refused["error"]["code"], "NOT_INITIALIZED", "{refused}");
 }
 
@@ -7959,7 +8003,11 @@ fn ledger_reset_leaves_the_permissions_of_directories_it_did_not_create() {
         .permissions()
         .mode();
 
-    cli_success(&repo.root, None, ["ledger", "reset", "--yes"]);
+    cli_success(
+        &repo.root,
+        None,
+        ["ledger", "reset", "--yes", "--allow-development-build"],
+    );
     assert_eq!(
         fs::metadata(&git_dir)
             .expect("stat .git")
@@ -8000,6 +8048,7 @@ fn ledger_reset_sets_aside_sidecars_left_without_a_ledger_file() {
         [
             OsStr::new("ledger"),
             OsStr::new("reset"),
+            OsStr::new("--allow-development-build"),
             OsStr::new("--yes"),
             OsStr::new("--from"),
             backup_source.as_os_str(),
@@ -8021,4 +8070,208 @@ fn ledger_reset_sets_aside_sidecars_left_without_a_ledger_file() {
     let doctor = cli_success(&repo.root, None, ["doctor"]);
     assert_eq!(doctor["data"]["database_ok"], true, "{doctor}");
     assert_eq!(doctor["data"]["event_chain_ok"], true, "{doctor}");
+}
+
+/// Stamp the ledger one schema older than this build, as a ledger written by
+/// the previous release would be.
+fn stamp_older_schema(database: &Path) -> (i64, i64) {
+    let current: i64 = schema_stamp(database)
+        .parse()
+        .expect("schema stamp is an integer");
+    let older = current - 1;
+    Connection::open(database)
+        .expect("open ledger")
+        .execute(
+            "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+            [older.to_string()],
+        )
+        .expect("stamp an older schema");
+    (current, older)
+}
+
+#[test]
+fn ordinary_commands_refuse_a_ledger_they_would_have_to_migrate() {
+    // A read-only-looking `status` from a newer binary migrated a real ledger
+    // one way and locked every older client out. Migrating is now its own step.
+    let repo = create_repo();
+    let database = database_from_doctor(&repo.root);
+    let (current, older) = stamp_older_schema(&database);
+
+    for args in [vec!["status"], vec!["init"], vec!["work", "query"]] {
+        let refused = cli_failure(&repo.root, None, &args);
+        assert_eq!(
+            refused["error"]["code"], "MIGRATION_REQUIRED",
+            "{args:?}: {refused}"
+        );
+        let message = refused["error"]["message"].as_str().expect("message");
+        assert!(
+            message.contains(&format!("database schema {older}"))
+                && message.contains(&format!("uses schema {current}"))
+                && message.contains("foremerge ledger migrate --yes"),
+            "{message}"
+        );
+    }
+    assert_eq!(
+        schema_stamp(&database),
+        older.to_string(),
+        "refusing must not migrate"
+    );
+
+    let doctor = cli_success(&repo.root, None, ["doctor"]);
+    assert_eq!(doctor["data"]["database_ok"], false, "{doctor}");
+    assert_eq!(
+        doctor["data"]["database_error"]["code"], "MIGRATION_REQUIRED",
+        "{doctor}"
+    );
+    assert!(
+        doctor["data"]["next_step"]
+            .as_str()
+            .is_some_and(|step| step.contains("foremerge ledger migrate --yes")),
+        "{doctor}"
+    );
+
+    // The MCP server a client starts reports it rather than migrating.
+    let mut child = Command::new(foremerge_bin())
+        .arg("--cwd")
+        .arg(&repo.root)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn MCP server");
+    let mut stdin = child.stdin.take().expect("MCP stdin");
+    let mut reader = std::io::BufReader::new(child.stdout.take().expect("MCP stdout"));
+    let initialized = stdio_request(
+        &mut stdin,
+        &mut reader,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "foremerge-e2e", "version": "1" }
+            }
+        }),
+    );
+    assert!(
+        initialized["result"]["instructions"]
+            .as_str()
+            .is_some_and(|text| text.contains("MIGRATION_REQUIRED")
+                && text.contains("foremerge ledger migrate --yes")),
+        "{initialized}"
+    );
+    let status = stdio_request(
+        &mut stdin,
+        &mut reader,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": { "name": "status", "arguments": {} }
+        }),
+    );
+    assert_eq!(
+        status["result"]["structuredContent"]["code"], "MIGRATION_REQUIRED",
+        "{status}"
+    );
+    drop(stdin);
+    child.wait().expect("MCP server exits");
+    assert_eq!(schema_stamp(&database), older.to_string());
+}
+
+#[test]
+fn ledger_migrate_backs_the_ledger_up_before_migrating_it() {
+    let repo = create_repo();
+    let database = database_from_doctor(&repo.root);
+    cli_success(&repo.root, None, ["agent", "register", "--name", "kept"]);
+    let (current, older) = stamp_older_schema(&database);
+
+    // A development build's schema can be ahead of every release.
+    let refused = cli_failure(&repo.root, None, ["ledger", "migrate", "--yes"]);
+    assert_eq!(refused["error"]["code"], "DEVELOPMENT_BUILD", "{refused}");
+    assert_eq!(schema_stamp(&database), older.to_string());
+
+    let plan = cli_success(
+        &repo.root,
+        None,
+        ["ledger", "migrate", "--allow-development-build"],
+    );
+    assert_eq!(plan["data"]["applied"], false, "{plan}");
+    assert_eq!(plan["data"]["from_schema"], older, "{plan}");
+    assert_eq!(plan["data"]["to_schema"], current, "{plan}");
+    assert_eq!(schema_stamp(&database), older.to_string());
+
+    let migrated = cli_success(
+        &repo.root,
+        None,
+        ["ledger", "migrate", "--yes", "--allow-development-build"],
+    );
+    let data = &migrated["data"];
+    assert_eq!(data["applied"], true, "{migrated}");
+    assert_eq!(schema_stamp(&database), current.to_string());
+    let backup = PathBuf::from(data["backup"].as_str().expect("backup"));
+    assert!(
+        backup
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(OsStr::to_str)
+            .is_some_and(|name| name.ends_with(&format!("schema{older}-before-migration"))),
+        "{migrated}"
+    );
+    assert_eq!(
+        schema_stamp(&backup),
+        older.to_string(),
+        "the backup is the ledger as it was"
+    );
+    let agents: i64 = Connection::open(&backup)
+        .expect("open backup")
+        .query_row("SELECT COUNT(*) FROM agents", [], |row| row.get(0))
+        .expect("count agents");
+    assert_eq!(agents, 1, "the backup holds the ledger's history");
+    assert!(
+        data["next_step"]
+            .as_str()
+            .is_some_and(|step| step.contains("ledger reset --yes --from")),
+        "{migrated}"
+    );
+
+    let status = cli_success(&repo.root, None, ["status"]);
+    assert_eq!(status["data"]["agents"][0]["name"], "kept", "{status}");
+    let again = cli_success(
+        &repo.root,
+        None,
+        ["ledger", "migrate", "--yes", "--allow-development-build"],
+    );
+    assert_eq!(again["data"]["applied"], false, "{again}");
+}
+
+#[cfg(unix)]
+#[test]
+fn ledger_migrate_refuses_while_another_process_holds_the_ledger() {
+    let repo = create_repo();
+    let database = database_from_doctor(&repo.root);
+    let (mut child, stdin, _reader) = start_initialized_mcp(&repo.root);
+    let (_, older) = stamp_older_schema(&database);
+
+    let refused = cli_failure(
+        &repo.root,
+        None,
+        ["ledger", "migrate", "--yes", "--allow-development-build"],
+    );
+    assert_eq!(refused["error"]["code"], "LEDGER_IN_USE", "{refused}");
+    assert_eq!(schema_stamp(&database), older.to_string());
+    drop(stdin);
+    child.wait().expect("MCP server exits");
+}
+
+#[test]
+fn ledger_reset_in_a_development_build_needs_explicit_permission() {
+    let repo = create_repo();
+    let database = database_from_doctor(&repo.root);
+    let refused = cli_failure(&repo.root, None, ["ledger", "reset", "--yes"]);
+    assert_eq!(refused["error"]["code"], "DEVELOPMENT_BUILD", "{refused}");
+    assert!(database.is_file());
 }

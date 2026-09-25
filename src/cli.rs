@@ -134,6 +134,24 @@ enum LedgerCommand {
         /// Apply the reset. Without it nothing is changed.
         #[arg(long)]
         yes: bool,
+        /// Let a development build write the ledger at its unreleased schema.
+        #[arg(long)]
+        allow_development_build: bool,
+    },
+    /// Migrate the ledger to this build's schema, backing it up first.
+    ///
+    /// Ordinary commands refuse a ledger at an older schema with
+    /// MIGRATION_REQUIRED instead of migrating it, because a migration is one
+    /// way: older Foremerge builds cannot open the ledger afterwards. Upgrade
+    /// every client first. Refuses while any other process has the ledger
+    /// open. Without --yes it only reports what it would do.
+    Migrate {
+        /// Apply the migration. Without it nothing is changed.
+        #[arg(long)]
+        yes: bool,
+        /// Let a development build migrate the ledger to its unreleased schema.
+        #[arg(long)]
+        allow_development_build: bool,
     },
 }
 
@@ -776,7 +794,7 @@ async fn execute(cli: Cli) -> Result<Completion> {
             // ledger written by a newer build. Doctor called that ledger
             // healthy while nothing else could open it.
             let (diagnostic_store, database_error) = match Store::open_existing_read_only(&database)
-                .and_then(|store| store.ensure_supported_schema().map(|()| store))
+                .and_then(|store| store.ensure_current_schema().map(|()| store))
             {
                 Ok(store) => (Some(store), None),
                 Err(error) => (
@@ -846,6 +864,10 @@ async fn execute(cli: Cli) -> Result<Completion> {
                     .as_ref()
                     .and_then(|error| match error.code.as_str() {
                         "NOT_INITIALIZED" => None,
+                        "MIGRATION_REQUIRED" => Some(
+                            "This build needs to migrate the ledger, which older builds cannot open afterwards. Upgrade every client in this repository to this version, close their sessions, then run `foremerge ledger migrate --yes`; it backs the ledger up first"
+                                .to_string(),
+                        ),
                         "UNSUPPORTED_SCHEMA" => Some(format!(
                             "Install a Foremerge release that supports this ledger's schema (database_error names the build that migrated it; this build is version {}), run `foremerge setup` with it, then restart agent clients so their MCP servers relaunch. If no release supports it, `foremerge ledger reset` sets the ledger aside and starts a fresh one or restores a backup",
                             env!("CARGO_PKG_VERSION")
@@ -1054,30 +1076,46 @@ async fn execute(cli: Cli) -> Result<Completion> {
                 }),
             )?;
         }
-        Commands::Ledger(LedgerCommand::Reset { from, yes }) => {
+        Commands::Ledger(command) => {
             // Same guard as `open_service`: outside a repository the default
             // path names a stray store nobody meant.
             if cli.database.is_none() && git::discover(&cwd).is_err() {
                 bail!(
-                    "INVALID_INPUT: no Git repository at {}; run this inside the repository whose ledger you want to reset, or pass --database PATH",
+                    "INVALID_INPUT: no Git repository at {}; run this inside the repository whose ledger you mean, or pass --database PATH",
                     cwd.display()
                 );
             }
-            let from = from.map(|path| {
-                if path.is_absolute() {
-                    path
-                } else {
-                    cwd.join(path)
+            let value = match command {
+                LedgerCommand::Reset {
+                    from,
+                    yes,
+                    allow_development_build,
+                } => {
+                    let from = from.map(|path| {
+                        if path.is_absolute() {
+                            path
+                        } else {
+                            cwd.join(path)
+                        }
+                    });
+                    // The ledger records the repository it belongs to; pass this
+                    // one so a backup from another repository is refused rather
+                    // than restored into a store every command will then reject.
+                    let repository = git::discover(&cwd).ok().map(|repo| repo.common_dir);
+                    ledger::reset(
+                        &database,
+                        from.as_deref(),
+                        yes,
+                        repository.as_deref(),
+                        allow_development_build,
+                    )?
                 }
-            });
-            // The ledger records the repository it belongs to; pass this one
-            // so a backup from another repository is refused rather than
-            // restored into a store every command will then reject.
-            let repository = git::discover(&cwd).ok().map(|repo| repo.common_dir);
-            emit(
-                cli.json,
-                ledger::reset(&database, from.as_deref(), yes, repository.as_deref())?,
-            )?;
+                LedgerCommand::Migrate {
+                    yes,
+                    allow_development_build,
+                } => ledger::migrate(&database, yes, allow_development_build)?,
+            };
+            emit(cli.json, value)?;
         }
         Commands::Request(request) => run_raw_request(&cwd, request, cli.json).await?,
         Commands::Worktree(WorktreeCommand::Create { branch, path, base }) => {
@@ -1108,7 +1146,7 @@ async fn execute(cli: Cli) -> Result<Completion> {
 }
 
 fn open_service(database: &Path, cwd: &Path) -> Result<Foremerge> {
-    let service = Foremerge::new(Store::open(database)?);
+    let service = Foremerge::new(Store::open_current(database)?);
     service.bind_repository_cwd(cwd)?;
     Ok(service)
 }

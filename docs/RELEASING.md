@@ -187,11 +187,16 @@ optional.
   `CHANGELOG.md` section into the release body by hand.
 
 If the changelog entry carries a migration note, also check the upgrade edge
-before you announce it: open a ledger written by the **previous** release with
-the new binary and confirm it migrates, then point the **previous** binary at a
-ledger the new one has migrated and confirm it refuses with the
-`UNSUPPORTED_SCHEMA` message the changelog promises. A build that reports a
-ledger it cannot open as healthy is worse than one that refuses it loudly.
+before you announce it, with release builds on a scratch repository: open a
+ledger written by the **previous** release with the new binary and confirm
+`foremerge status` refuses it with `MIGRATION_REQUIRED` and leaves it
+untouched, then run `foremerge ledger migrate --yes` and confirm it writes a
+backup and migrates. Point the **previous** binary at the migrated ledger and
+confirm it refuses with the `UNSUPPORTED_SCHEMA` message the changelog
+promises, then restore the backup with the previous binary's
+`foremerge ledger reset --yes --from` and confirm the previous release opens
+it. A build that reports a ledger it cannot open as healthy is worse than one
+that refuses it loudly.
 
 ## Hotfixes
 
