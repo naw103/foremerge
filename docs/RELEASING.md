@@ -70,7 +70,7 @@ Keep the Keep a Changelog headings (`Added`, `Changed`, `Fixed`, `Removed`).
 
 ## 4. Bump every file that carries the version
 
-Four files carry the version string, plus the lockfile. `CHANGELOG.md` is step
+Five files carry the version string, plus the lockfile. `CHANGELOG.md` is step
 3 and is not repeated here. Missing any one of them ships assets that disagree
 with each other.
 
@@ -81,15 +81,24 @@ with each other.
 | `README.md` | the status line near the top that names the current version |
 | `docs/openapi.yaml` | `info.version`, the published API contract |
 | `plugins/foremerge/.claude-plugin/plugin.json` | the Claude Code plugin manifest; the marketplace shows this version and nothing else in this list touches it |
+| `server.json` | the MCP registry entry, in two places: `version` and `packages[0].version`. Both name the crate version, because the registry lists the crates.io package |
 
-`tests/skill_parity.rs` fails when the plugin manifest falls behind the crate.
-That test is the backstop, not the checklist.
+`tests/skill_parity.rs` fails when the plugin manifest or either version in
+`server.json` falls behind the crate. That test is the backstop, not the
+checklist.
 
-Then sweep for anything the table does not know about:
+Then sweep for anything the table does not know about. Run it before tagging,
+so the last tag is the previous release:
 
 ```console
-rg '0\.4\.0' --glob '!target/**' --glob '!Cargo.lock' --glob '!CHANGELOG.md'
+rg -F --hidden "$(git describe --tags --abbrev=0 | sed 's/^v//')" \
+  --glob '!.git/**' --glob '!target/**' --glob '!Cargo.lock' --glob '!CHANGELOG.md'
 ```
+
+`--hidden` matters: the plugin manifest lives under `.claude-plugin/`, which a
+plain `rg` skips. A literal version in this command goes stale the release after
+it is written, and then finds only history while every file that must move is
+missed.
 
 Read every hit before changing it. Some are the current version and must move;
 some are statements of history and must not:
@@ -176,7 +185,68 @@ Publish only after the GitHub release exists, so the two never disagree. A
 crates.io version cannot be replaced, only yanked, so the dry run is not
 optional.
 
-## 10. Confirm
+## 10. Update the MCP registry listing
+
+Foremerge is listed in the official MCP registry as
+`io.github.naw103/foremerge`. The listing is metadata only: it points at the
+crates.io package, so publish there first (step 9) or the registry will name a
+version nobody can install.
+
+Run it from a scratch directory, not the repository, so nothing it downloads
+can be committed. The publisher runs just before a GitHub login, so it is pinned
+and its signature checked before it executes:
+
+```console
+repo="$PWD"; cd "$(mktemp -d)"
+v=v1.8.1
+a="mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz"
+base="https://github.com/modelcontextprotocol/registry/releases/download/$v"
+curl --fail --show-error --location -O "$base/$a" -O "$base/$a.sigstore.json"
+python3 -m venv sigstore-env && sigstore-env/bin/pip install --quiet sigstore
+sigstore-env/bin/python -m sigstore verify identity \
+  --bundle "$a.sigstore.json" \
+  --cert-identity "https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/$v" \
+  --cert-oidc-issuer https://token.actions.githubusercontent.com \
+  "$a"
+tar xzf "$a" mcp-publisher
+./mcp-publisher validate "$repo/server.json"
+./mcp-publisher login github
+./mcp-publisher publish "$repo/server.json"
+```
+
+Stop if the verification fails; it exits non-zero on a modified archive or a
+signature from any other workflow. The identity is the registry's own release
+workflow at that exact tag, so a checksum is not needed on top of it: a
+checksum published beside the archive would match a tampered release too. To
+move to a newer publisher, change `v` and nothing else.
+
+`login github` prints a device code to enter at
+<https://github.com/login/device>. Registry versions are immutable: publishing
+a version the registry already holds fails with `already exists`. If that
+happens, query the listing below and confirm the existing record is the one you
+meant to publish rather than retrying.
+
+Two things fail this step rather than the release, so check them here:
+
+- `description` is capped at 100 characters. The entry carries the short
+  tagline for that reason, not the longer listing paragraph.
+- Ownership is verified by finding `mcp-name: io.github.naw103/foremerge` in
+  the README **as crates.io renders it for the version being listed**, not as
+  it sits in this repository. `README.md` carries that token in the links list.
+  If it is ever edited away, this step fails and only a new crate release can
+  fix it.
+
+Verify:
+
+```console
+curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=foremerge"
+```
+
+Aggregators such as PulseMCP and Glama mirror from the registry on their own
+schedule, so a listing that has not propagated within a day is theirs to
+explain, not a failed publish.
+
+## 11. Confirm
 
 - `cargo install foremerge` from a clean environment installs the new version
   and `foremerge --version` reports it.
@@ -210,12 +280,17 @@ happened in the changelog.
 
 ## Known gaps
 
-Two steps are not automated, and both are places a release can go wrong quietly:
+Three steps are not automated, and each is a place a release can go wrong quietly:
 
 - **crates.io publishing is manual** (step 9). A `publish-crate` job in
   `release.yml`, gated on the same `release` environment and holding a
   `CARGO_REGISTRY_TOKEN` secret, would make it impossible to forget while
   keeping the approval requirement.
+- **The MCP registry listing is published by hand** (step 10). The entry sat
+  unpublished from launch week until 0.5.0 because nothing mentioned it.
+  `tests/skill_parity.rs` now fails a release whose `server.json` still names
+  the previous version, but nothing fails a release that bumps the file and
+  then skips the publish.
 - **The GitHub release notes are autogenerated.** The publish job passes
   `--generate-notes`, which emits a commit list and ignores `CHANGELOG.md`.
   Extracting the section instead would put the written entry on the release
