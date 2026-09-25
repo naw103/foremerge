@@ -340,6 +340,84 @@ impl Store {
         )
     }
 
+    /// Open a ledger for ordinary use, refusing one this build would have to
+    /// migrate.
+    ///
+    /// [`Store::open`] migrates on open, and a migration is one way: builds
+    /// older than this one refuse the ledger afterwards. Every command reached
+    /// that migration, including ones that only read, so a `status` run from
+    /// the wrong directory with a newer binary locked every older client out
+    /// of a real repository. Migrating is now its own deliberate step,
+    /// `foremerge ledger migrate`, which backs the ledger up first. A ledger
+    /// that does not exist yet is still created here.
+    pub fn open_current(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        if let Some(stored_version) = Self::peek_schema_version(path)? {
+            if stored_version < DATABASE_SCHEMA_VERSION {
+                return Err(Self::migration_required(path, stored_version));
+            }
+        }
+        Self::open(path)
+    }
+
+    /// The schema an existing ledger is stamped with, read without writing to
+    /// it. `None` when there is no ledger yet: no file, an empty file, or a
+    /// database with no tables. A ledger with tables but no stamp predates the
+    /// stamp and reads as schema 0. Refuses a ledger newer than this build.
+    pub fn peek_schema_version(path: impl AsRef<Path>) -> Result<Option<i64>> {
+        let path = path.as_ref();
+        match std::fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() && metadata.len() > 0 => {}
+            _ => return Ok(None),
+        }
+        let conn = Self::open_read_only_connection(path)?;
+        let (tables, stamped): (i64, bool) = conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(name = 'meta'), 0) > 0
+             FROM sqlite_master WHERE type = 'table'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if tables == 0 {
+            return Ok(None);
+        }
+        if !stamped {
+            return Ok(Some(0));
+        }
+        Self::supported_schema_version(&conn).map(Some)
+    }
+
+    fn migration_required(path: &Path, stored_version: i64) -> anyhow::Error {
+        let writer: Option<String> = Self::open_read_only_connection(path).ok().and_then(|conn| {
+            conn.query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [SCHEMA_WRITER_KEY],
+                |row| row.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+        });
+        let writer = writer
+            .map(|writer| format!(", last migrated by Foremerge {writer}"))
+            .unwrap_or_default();
+        anyhow::anyhow!(
+            "MIGRATION_REQUIRED: this ledger is database schema {stored_version}{writer}, and this build (Foremerge {}) uses schema {DATABASE_SCHEMA_VERSION}. Migrating is one way: older Foremerge builds cannot open the ledger afterwards, so upgrade every client first. Then close the agent client sessions using this repository and run `foremerge ledger migrate --yes`, which backs the ledger up before migrating it",
+            build_label()
+        )
+    }
+
+    /// Refuse a store this build would have to migrate, for diagnostics that
+    /// open read-only and so never reach [`Store::open_current`].
+    pub fn ensure_current_schema(&self) -> Result<()> {
+        self.ensure_supported_schema()?;
+        if let Some(stored_version) = Self::peek_schema_version(self.path())? {
+            if stored_version < DATABASE_SCHEMA_VERSION {
+                return Err(Self::migration_required(self.path(), stored_version));
+            }
+        }
+        Ok(())
+    }
+
     /// Refuse to use a store whose ledger changed underneath this process: the
     /// file at its path was replaced or moved away, or another build migrated
     /// it. Checked on every use of a read-write store, not only at open, so a

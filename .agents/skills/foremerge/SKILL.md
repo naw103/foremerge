@@ -28,8 +28,10 @@ Read the answer before going further.
 - `database_ok: false` with any other `database_error` means the store exists
   but cannot be used, for example `UNSUPPORTED_SCHEMA` after a newer build has
   migrated it. Report the error and `next_step` to the user and stop. Do not
-  delete, move, or edit the store, and do not run `foremerge ledger reset`:
-  setting a ledger aside is the user's decision.
+  delete, move, or edit the store, and do not run `foremerge ledger reset` or
+  `foremerge ledger migrate`: both are one-way decisions for the user. That
+  includes `MIGRATION_REQUIRED`, where migrating would lock out every client
+  still on an older build.
 
 `doctor` opens the store read-only: it never creates, initializes or migrates
 one, and never writes the ledger itself, though SQLite may make and remove its
