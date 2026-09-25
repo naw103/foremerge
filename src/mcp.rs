@@ -119,6 +119,13 @@ fn remedy(code: &str) -> String {
         format!(
             "Run `foremerge init` in this repository if you want its agents coordinated, {RELAUNCH}. Until then Foremerge is inactive here, which is a valid state: nothing else is wrong."
         )
+    } else if code == "MIGRATION_REQUIRED" {
+        // Migrating is one way, so it is the operator's step, never the
+        // server's: an older client still using the ledger would be locked out.
+        format!(
+            "This server is Foremerge {} and the ledger is at an older schema. Upgrade every client in this repository to this version, close their sessions, run `foremerge ledger migrate --yes` in the repository (it backs the ledger up first), {RELAUNCH}.",
+            env!("CARGO_PKG_VERSION")
+        )
     } else if code == "UNSUPPORTED_SCHEMA" {
         // Name the binary: the client may launch a different one than the
         // `foremerge` on the operator's PATH, and the version alone cannot
