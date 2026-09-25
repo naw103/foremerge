@@ -8,7 +8,9 @@
 //! ledger open.
 
 use crate::Store;
-use crate::db::{DATABASE_SCHEMA_VERSION, SCHEMA_WRITER_KEY, WRITER_QUERY, readable_writer};
+use crate::db::{
+    DATABASE_SCHEMA_VERSION, SCHEMA_WRITER_KEY, WRITER_QUERY, build_label, readable_writer,
+};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -789,6 +791,7 @@ pub fn reset(
     from: Option<&Path>,
     apply: bool,
     repository: Option<&Path>,
+    allow_development_build: bool,
 ) -> Result<Value> {
     // A symlink at the ledger path would be moved as a symlink: the real file
     // would stay behind, the report would describe nothing, and the backup
@@ -813,6 +816,10 @@ pub fn reset(
             database.display()
         );
     }
+    ensure_release_build(
+        "write a fresh or restored ledger at this build's schema",
+        allow_development_build,
+    )?;
     // Before any connection is opened here: the check must not see this
     // process, and nothing may be moved while another process writes. A dry
     // run reports the holders rather than refusing, so the operator learns
@@ -984,5 +991,120 @@ pub fn reset(
         "ledger": result,
         "warnings": warnings,
         "next_step": next_step,
+    }))
+}
+
+/// Refuse to let a development build write a ledger at its schema unless the
+/// operator says the ledger may carry an unreleased schema.
+///
+/// A development build's schema can be ahead of every release, and a ledger
+/// it migrates or creates is then unreadable by anything the operator can
+/// install. That is how a real repository's ledger was stranded twice. Release
+/// builds are compiled without debug assertions, which is what `cargo install`
+/// and the release archives produce.
+fn ensure_release_build(action: &str, allowed: bool) -> Result<()> {
+    if cfg!(debug_assertions) && !allowed {
+        bail!(
+            "DEVELOPMENT_BUILD: this is Foremerge {}, which would {action} (schema {DATABASE_SCHEMA_VERSION}); a published release may not be able to open the result. Use a release build, or pass --allow-development-build if only development builds use this ledger",
+            build_label()
+        );
+    }
+    Ok(())
+}
+
+/// Copy a live ledger into `target` as one self-contained, integrity-checked
+/// file, WAL contents included, without writing to the ledger.
+fn snapshot_into(database: &Path, target: &Path) -> Result<()> {
+    stage_restore(database, target)
+}
+
+/// `foremerge ledger migrate`: back the ledger up, then migrate it to this
+/// build's schema. Without `apply` it only reports what it would do.
+pub fn migrate(database: &Path, apply: bool, allow_development_build: bool) -> Result<Value> {
+    let Some(stored_version) = Store::peek_schema_version(database)? else {
+        bail!(
+            "NOT_INITIALIZED: there is no ledger at {} to migrate; run `foremerge init` to create one",
+            database.display()
+        );
+    };
+    if stored_version >= DATABASE_SCHEMA_VERSION {
+        return Ok(json!({
+            "applied": false,
+            "database": database,
+            "schema_version": stored_version,
+            "next_step": "Nothing to do: the ledger is already at this build's schema",
+        }));
+    }
+    ensure_release_build("migrate the ledger", allow_development_build)?;
+
+    let mut warnings: Vec<String> = Vec::new();
+    let in_use_by = if apply {
+        if let Some(warning) = ensure_not_in_use(database, "run `foremerge ledger migrate --yes`")?
+        {
+            warnings.push(warning);
+        }
+        Vec::new()
+    } else {
+        match holders(database) {
+            HolderCheck::Checked(found) => found,
+            HolderCheck::Unavailable(reason) => {
+                warnings.push(format!(
+                    "Could not check whether other processes have the ledger open ({reason}). Close every agent client session using this repository before continuing."
+                ));
+                Vec::new()
+            }
+        }
+    };
+    let current = describe(database)?;
+    let backup_dir = backup_directory(database, Some(stored_version))?;
+    let backup_dir = backup_dir.with_file_name(format!(
+        "{}-before-migration",
+        backup_dir
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("backup")
+    ));
+    let backup = backup_dir.join(database.file_name().context("ledger file name")?);
+    if !apply {
+        return Ok(json!({
+            "applied": false,
+            "database": database,
+            "from_schema": stored_version,
+            "to_schema": DATABASE_SCHEMA_VERSION,
+            "current": current,
+            "backup": backup,
+            "in_use_by": in_use_by,
+            "warnings": warnings,
+            "next_step": if in_use_by.is_empty() {
+                "Nothing was changed. The migration is one way: Foremerge builds older than this one cannot open the ledger afterwards. Upgrade every client in this repository first, then rerun with --yes".to_string()
+            } else {
+                format!(
+                    "Nothing was changed. Close the processes in in_use_by ({}), then rerun with --yes",
+                    describe_holders(&in_use_by)
+                )
+            },
+        }));
+    }
+
+    create_backup_dir(&backup_dir)?;
+    if let Err(error) = snapshot_into(database, &backup) {
+        let _ = std::fs::remove_file(&backup);
+        return Err(error.context("back up the ledger before migrating; nothing was migrated"));
+    }
+    let store = Store::open(database)?;
+    drop(store);
+    let migrated = describe(database)?;
+    Ok(json!({
+        "applied": true,
+        "database": database,
+        "from_schema": stored_version,
+        "to_schema": DATABASE_SCHEMA_VERSION,
+        "backup": backup,
+        "ledger": migrated,
+        "warnings": warnings,
+        "next_step": format!(
+            "Restart the agent client sessions in this repository. To roll back, install the Foremerge release that used schema {stored_version} and run `foremerge ledger reset --yes --from {}` with it",
+            backup.display()
+        ),
     }))
 }
