@@ -192,33 +192,43 @@ Foremerge is listed in the official MCP registry as
 crates.io package, so publish there first (step 9) or the registry will name a
 version nobody can install.
 
-Run it from a scratch directory, not the repository, so nothing it downloads
-can be committed. The publisher runs just before a GitHub login, so it is pinned
-and its signature checked before it executes:
+Run it as one block. The parentheses make a subshell with `set -euo pipefail`,
+so any failing command, the signature check above all, ends the block before
+anything later runs; pasted as separate lines instead, a shell carries on to
+extract and execute a publisher that just failed verification. The subshell also
+keeps the scratch directory out of the repository and leaves your own shell
+where it was:
 
 ```console
-repo="$PWD"; cd "$(mktemp -d)"
-v=v1.8.1
-a="mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz"
-base="https://github.com/modelcontextprotocol/registry/releases/download/$v"
-curl --fail --show-error --location -O "$base/$a" -O "$base/$a.sigstore.json"
-python3 -m venv sigstore-env && sigstore-env/bin/pip install --quiet sigstore
-sigstore-env/bin/python -m sigstore verify identity \
-  --bundle "$a.sigstore.json" \
-  --cert-identity "https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/$v" \
-  --cert-oidc-issuer https://token.actions.githubusercontent.com \
-  "$a"
-tar xzf "$a" mcp-publisher
-./mcp-publisher validate "$repo/server.json"
-./mcp-publisher login github
-./mcp-publisher publish "$repo/server.json"
+(
+  set -euo pipefail
+  repo="$(git rev-parse --show-toplevel)"
+  cd "$(mktemp -d)"
+  v=v1.8.1
+  a="mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz"
+  base="https://github.com/modelcontextprotocol/registry/releases/download/$v"
+  curl --fail --show-error --location -O "$base/$a" -O "$base/$a.sigstore.json"
+  python3 -m venv sigstore-env
+  sigstore-env/bin/pip install --quiet 'sigstore==4.5.0'
+  sigstore-env/bin/python -m sigstore verify identity \
+    --bundle "$a.sigstore.json" \
+    --cert-identity "https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/$v" \
+    --cert-oidc-issuer https://token.actions.githubusercontent.com \
+    "$a"
+  tar xzf "$a" mcp-publisher
+  ./mcp-publisher validate "$repo/server.json"
+  ./mcp-publisher login github
+  ./mcp-publisher publish "$repo/server.json"
+)
 ```
 
-Stop if the verification fails; it exits non-zero on a modified archive or a
-signature from any other workflow. The identity is the registry's own release
-workflow at that exact tag, so a checksum is not needed on top of it: a
-checksum published beside the archive would match a tampered release too. To
-move to a newer publisher, change `v` and nothing else.
+The publisher runs just before a GitHub login, so it is pinned and its
+signature checked before it executes. The identity is the registry's own release
+workflow at that exact tag, so a checksum is not needed on top of it: a checksum
+published beside the archive would match a tampered release too. To move to a
+newer publisher, change `v` and nothing else. The verifier is pinned too, though
+only at the top level: `sigstore`'s own dependencies still resolve at install
+time.
 
 `login github` prints a device code to enter at
 <https://github.com/login/device>. Registry versions are immutable: publishing
