@@ -60,15 +60,21 @@ Setup refuses to replace differing skill or MCP entries unless the human explici
 5. Claim the scopes. Claims are leased advice, never locks.
 6. Start the claimed work before implementation.
 
-This applies to every write to a tracked file, not only code. Plans, specs,
-runbooks, and other documents get the same steps, with `file:` scopes when
-nothing more semantic fits. Documents are often rewritten wholesale, and Git
-cannot merge two rewrites of the same document.
+This applies before creating or changing any file meant to land in the
+repository, not only code: new files included, build and test output excluded.
+Plans, specs, runbooks, and other documents get the same steps, with `file:`
+scopes when nothing more semantic fits. Documents are often rewritten wholesale,
+and two overlapping rewrites rarely merge cleanly; when they do, the result can
+silently contradict itself.
 
-When you are only planning and not yet writing anything, call `query_work` for
-the scopes the plan would touch and account for what is already in flight. Do
-not publish an intent for a plan that may never be carried out; publish when
-you commit to the work or start writing the plan document itself.
+When you are only planning and not yet writing anything, run `check_conflicts`
+with the plan's summary and the scopes it would declare, operations included. It
+stores nothing, and it runs the same comparison as publishing: overlapping
+scopes, not only identical ones, and what each plan does to them. `query_work`
+matches a scope exactly, so on its own it can miss related work; use it to read
+what is in flight on a scope you already know. Do not publish an intent for a
+plan that may never be carried out; publish when you commit to the work or start
+writing the plan document itself.
 
 Foremerge only sees agents that coordinate. If a file you have not touched
 changes under you and `query_work` shows no owner for it, tell the user before

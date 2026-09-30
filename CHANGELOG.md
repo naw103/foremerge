@@ -11,13 +11,18 @@ changes when they are called out here with a migration note.
 
 ### Changed
 
-- The agent skill now says that coordination covers every write to a tracked
-  file, not only code. Plans, specs and runbooks are rewritten wholesale more
-  often than code is, and Git cannot merge two rewrites of one document. It
-  also tells an agent to `query_work` the scopes a plan would touch while
-  planning, without publishing an intent for work that may never happen, and to
-  stop and tell the user when an uncoordinated file changes underneath it
-  rather than overwriting the change.
+- The agent skill, the MCP server's instructions and the MCP tool descriptions
+  now say that coordination covers every file meant to land in the repository,
+  new files and documents included, not only code. Plans, specs and runbooks
+  are rewritten wholesale more often than code is, and two overlapping rewrites
+  rarely merge cleanly. `publish_intent` is described as the first write for a
+  task the agent is committed to rather than the first call for every task:
+  while only planning, the skill and the tool descriptions point to
+  `check_conflicts`, which stores nothing and runs the same comparison as
+  publishing. The skill notes that `query_work` matches a scope exactly and can
+  miss related work on its own. It also tells an agent to stop and
+  tell the user when an uncoordinated file changes underneath it rather than
+  overwriting the change. Tool names, schemas and behaviour are unchanged.
 
 ## [0.5.0] - 2026-09-20
 

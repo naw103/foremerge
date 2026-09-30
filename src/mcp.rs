@@ -39,7 +39,7 @@ Press Ctrl-C to exit.
 ";
 
 /// What a server with a working store tells the agent during initialize.
-const INSTRUCTIONS: &str = "Publish intent and the scopes you will change, declaring what you do to each, before editing. publish_intent returns related_work: assess each entry and call record_assessment before writing code. then claim and start work. Claims are advisory. Resolve durable HIGH conflicts, publish a clean ChangeSet, run a trusted named verification check, and accept before ordinary Git integration. Record the landing commit afterward.";
+const INSTRUCTIONS: &str = "Publish intent and the scopes you will change, declaring what you do to each, before creating or editing any file meant for the repository. publish_intent returns related_work: assess each entry and call record_assessment before changing files. then claim and start work. Claims are advisory. Resolve durable HIGH conflicts, publish a clean ChangeSet, run a trusted named verification check, and accept before ordinary Git integration. Record the landing commit afterward.";
 
 /// Why the MCP server is running without its coordination store.
 ///
@@ -738,7 +738,7 @@ pub fn tool_catalog() -> Vec<Value> {
             tool(
                 "check_conflicts",
                 "Check intent conflicts",
-                "Ask whether planned work collides with other agents' active work, before any code changes exist. Read-only: nothing is stored. Pass intent_id alone to list the persisted OPEN or COORDINATING conflicts on a published intent (use this before publish_changeset and before run_verification, since conflicts are raised when the later intent publishes). Pass intent text with scopes, or intent_id with replacement scopes, for a what-if check against every intent from INTENT through VALIDATED, excluding ACCEPTED, COMMITTED and DISCARDED; those findings carry ephemeral eph_ ids and are not recorded. Returns conflicts (each with severity, explanation, evidence and a suggested coordination step), checked_intents, blocking (true when any finding is HIGH), and the active policy. To record a decision about overlap, use record_assessment or resolve_conflict instead.",
+                "Ask whether planned work collides with other agents' active work, before any change exists. Read-only: nothing is stored, so use it while only planning. It runs the same comparison as publish_intent: overlapping scopes, not only identical ones, and the declared operations on each. Pass intent_id alone to list the persisted OPEN or COORDINATING conflicts on a published intent (use this before publish_changeset and before run_verification, since conflicts are raised when the later intent publishes). Pass intent text with scopes, or intent_id with replacement scopes, for a what-if check against every intent from INTENT through VALIDATED, excluding ACCEPTED, COMMITTED and DISCARDED; those findings carry ephemeral eph_ ids and are not recorded. Returns conflicts (each with severity, explanation, evidence and a suggested coordination step), checked_intents, blocking (true when any finding is HIGH), and the active policy. To record a decision about overlap, use record_assessment or resolve_conflict instead.",
                 json!({
                     "agent_id": { "type": "string", "description": "Optional caller agent id. Informational only; it does not change which work is compared." },
                     "intent_id": { "type": "string", "minLength": 1, "description": "A published intent (int_...) to check. Provide this or intent." },
@@ -887,7 +887,7 @@ pub fn tool_catalog() -> Vec<Value> {
         tool(
             "publish_intent",
             "Publish intent",
-            "Announce work you are about to do, and the scopes it will change, before editing any code. This is the first call for every task, after register_agent. The intent is stored with status INTENT and compared against every other active intent. Returns the intent (with its int_ id), any conflicts detected immediately, and related_work: active intents, your own others included, that may relate to yours. Entries with asserted: true are collisions with both declared operations stated; the rest are candidates, with why_surfaced saying why. Assess each related_work entry and call record_assessment before writing code, then claim_work and start_work. Use check_conflicts instead for a what-if check that stores nothing.",
+            "Announce work you are about to do, and the scopes it will change, before creating or editing any file meant for the repository, documents included. It is the first write for a task you are committed to, after register_agent; while only planning, use check_conflicts, which stores nothing. The intent is stored with status INTENT and compared against every other active intent. Returns the intent (with its int_ id), any conflicts detected immediately, and related_work: active intents, your own others included, that may relate to yours. Entries with asserted: true are collisions with both declared operations stated; the rest are candidates, with why_surfaced saying why. Assess each related_work entry and call record_assessment before changing files, then claim_work and start_work. Use check_conflicts instead for a what-if check that stores nothing.",
             json!({
                 "agent_id": { "type": "string", "description": "Your agent id (agt_...) from register_agent." },
                 "task": { "type": "string", "minLength": 1, "description": "Short name of the task this belongs to, for example payments-provider. Intents with the same task text share one task record." },
@@ -924,7 +924,7 @@ pub fn tool_catalog() -> Vec<Value> {
         tool(
             "record_assessment",
             "Record an assessment of related work",
-            "Record what you concluded about one entry from related_work. Foremerge states which scopes overlap and how the declared operations relate; deciding what that means is yours. Call this once per related intent, after publish_intent and before you write code. Each call appends a new assessment rather than replacing an earlier one, and changes no statuses: it does not open, resolve or dismiss conflicts. Act on the verdict with coordinate_with_agent, resolve_conflict or discard_work as needed. Only the intent's owner may assess it. Returns the stored assessment with its asm_ id.",
+            "Record what you concluded about one entry from related_work. Foremerge states which scopes overlap and how the declared operations relate; deciding what that means is yours. Call this once per related intent, after publish_intent and before you change files. Each call appends a new assessment rather than replacing an earlier one, and changes no statuses: it does not open, resolve or dismiss conflicts. Act on the verdict with coordinate_with_agent, resolve_conflict or discard_work as needed. Only the intent's owner may assess it. Returns the stored assessment with its asm_ id.",
             json!({
                 "agent_id": { "type": "string", "minLength": 1, "description": "Your agent id (agt_...). Must own intent_id." },
                 "intent_id": { "type": "string", "minLength": 1, "description": "Your intent (int_...) whose publish returned the related_work." },
@@ -1013,7 +1013,7 @@ pub fn tool_catalog() -> Vec<Value> {
         tool(
             "start_work",
             "Start claimed work",
-            "Mark your claimed intent as being implemented. Call it after claim_work, immediately before you begin editing code. It moves the intent from CLAIMED to IN_PROGRESS and fails in any other state, or if you do not own the intent. It does not create or renew claims; use claim_work for that. Returns the updated intent with open_conflicts, the count and ids of its OPEN or COORDINATING conflicts; check their severity with check_conflicts before going further.",
+            "Mark your claimed intent as being implemented. Call it after claim_work, immediately before you begin changing files. It moves the intent from CLAIMED to IN_PROGRESS and fails in any other state, or if you do not own the intent. It does not create or renew claims; use claim_work for that. Returns the updated intent with open_conflicts, the count and ids of its OPEN or COORDINATING conflicts; check their severity with check_conflicts before going further.",
             json!({
                 "agent_id": { "type": "string", "minLength": 1, "description": "Your agent id (agt_...). Must own the intent." },
                 "intent_id": { "type": "string", "minLength": 1, "description": "Your CLAIMED intent (int_...)." }
