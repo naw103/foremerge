@@ -176,20 +176,14 @@ impl Foremerge {
         checks::get_at(&checks::registry_path(&common_dir), name)
     }
 
-    /// The agent ids whose intents are parties to a conflict, used by less
-    /// trusted surfaces to restrict resolution to the involved agents.
+    /// The agent ids whose intents are parties to a conflict, as of this read.
+    ///
+    /// This is a view, not a gate: an intent can be adopted as soon as the read
+    /// returns, so a surface that restricts resolution to the parties must use
+    /// [`Foremerge::resolve_conflict_as_party`], which checks inside the write.
     pub fn conflict_party_agents(&self, conflict_id: &str) -> Result<Vec<String>> {
         let conn = self.store.lock()?;
-        let conflict = conflict_by_id(&conn, conflict_id)?;
-        let mut parties = Vec::new();
-        if let Some(source_intent_id) = conflict.source_intent_id.as_deref() {
-            parties.push(intent_by_id(&conn, source_intent_id)?.agent_id);
-        }
-        let target = intent_by_id(&conn, &conflict.target_intent_id)?.agent_id;
-        if !parties.contains(&target) {
-            parties.push(target);
-        }
-        Ok(parties)
+        conflict_party_agents(&conn, &conflict_by_id(&conn, conflict_id)?)
     }
 
     pub fn bind_repository_cwd(&self, cwd: &std::path::Path) -> Result<()> {
@@ -1133,7 +1127,18 @@ impl Foremerge {
         })
     }
 
-    pub fn publish_changeset(&self, mut request: PublishChangeSetRequest) -> Result<ChangeSet> {
+    pub fn publish_changeset(&self, request: PublishChangeSetRequest) -> Result<ChangeSet> {
+        let prepared = self.prepare_changeset(request)?;
+        self.commit_changeset(prepared)
+    }
+
+    /// Everything publication does before it takes the write lock: the
+    /// ownership and state pre-checks, the Git snapshot and the provenance
+    /// built from it. None of it is authoritative. The snapshot can take a
+    /// long time, and anything read here may have changed by the time
+    /// [`Foremerge::commit_changeset`] runs, which is why that phase checks
+    /// ownership and state again.
+    fn prepare_changeset(&self, mut request: PublishChangeSetRequest) -> Result<PreparedChangeSet> {
         if request.summary.trim().is_empty() {
             bail!("INVALID_INPUT: changeset summary is required");
         }
@@ -1282,7 +1287,7 @@ impl Foremerge {
             "declared": request.provenance,
             "captured_at": now,
         });
-        let mut changeset = ChangeSet {
+        let changeset = ChangeSet {
             id: id("chg"),
             agent_id: agent.id.clone(),
             task_id: intent.task_id.clone(),
@@ -1308,12 +1313,43 @@ impl Foremerge {
             updated_at: now.clone(),
             open_conflicts: None,
         };
+        Ok(PreparedChangeSet {
+            agent,
+            intent,
+            changeset,
+            worktree,
+            common_dir: snapshot.common_dir,
+            now,
+        })
+    }
 
+    /// The write phase of publication. Ownership is checked again here, inside
+    /// the transaction, because the intent can be adopted while the snapshot
+    /// runs. The pre-check alone would let an agent whose work was just handed
+    /// over record a ChangeSet under its own id against an intent it no longer
+    /// owns.
+    fn commit_changeset(&self, prepared: PreparedChangeSet) -> Result<ChangeSet> {
+        let PreparedChangeSet {
+            agent,
+            intent,
+            mut changeset,
+            worktree,
+            common_dir,
+            now,
+        } = prepared;
         let mut conn = self.store.lock()?;
         let tx = Store::immediate_tx(&mut conn)?;
-        bind_repository(&tx, &snapshot.common_dir)?;
+        bind_repository(&tx, &common_dir)?;
         touch_agent(&tx, &agent.id)?;
         let fresh_intent = intent_by_id(&tx, &intent.id)?;
+        if fresh_intent.agent_id != agent.id {
+            bail!(
+                "STATE_RACE: intent {} was adopted by {} while this ChangeSet was being prepared, so {} no longer owns it and nothing was published. Retrying will not help: coordinate with the new owner, or publish a new intent for this work.",
+                intent.id,
+                fresh_intent.agent_id,
+                agent.id
+            );
+        }
         require_state(
             &fresh_intent.status,
             &["CLAIMED", "IN_PROGRESS", "PROVISIONAL", "VALIDATED"],
@@ -2513,11 +2549,39 @@ impl Foremerge {
         conflict_id: &str,
         request: ResolveConflictRequest,
     ) -> Result<Conflict> {
+        self.resolve_conflict_checked(conflict_id, request, false)
+    }
+
+    /// Resolve a conflict only if the resolving agent owns one of its intents.
+    ///
+    /// Less trusted surfaces (MCP) use this. The party check runs inside the
+    /// write transaction because ownership can change between a separate read
+    /// and the write: an agent whose intent was adopted in that gap would
+    /// otherwise still clear a conflict it is no longer a party to.
+    pub fn resolve_conflict_as_party(
+        &self,
+        conflict_id: &str,
+        request: ResolveConflictRequest,
+    ) -> Result<Conflict> {
+        self.resolve_conflict_checked(conflict_id, request, true)
+    }
+
+    fn resolve_conflict_checked(
+        &self,
+        conflict_id: &str,
+        request: ResolveConflictRequest,
+        parties_only: bool,
+    ) -> Result<Conflict> {
         let mut conn = self.store.lock()?;
         let tx = Store::immediate_tx(&mut conn)?;
+        let mut conflict = conflict_by_id(&tx, conflict_id)?;
+        if parties_only && !conflict_party_agents(&tx, &conflict)?.contains(&request.agent_id) {
+            bail!(
+                "FORBIDDEN: over MCP a conflict may be resolved only by an agent whose intent is a party to it, after real agreement; coordinate with the parties via coordinate_with_agent or ask a human operator to resolve it from the CLI"
+            );
+        }
         agent_by_id(&tx, &request.agent_id)?;
         touch_agent(&tx, &request.agent_id)?;
-        let mut conflict = conflict_by_id(&tx, conflict_id)?;
         if !matches!(conflict.status.as_str(), "OPEN" | "COORDINATING") {
             bail!(
                 "INVALID_TRANSITION: conflict is already {}",
@@ -2970,6 +3034,17 @@ where
     tokio::task::spawn_blocking(operation)
         .await
         .context("blocking Foremerge operation panicked or was cancelled")?
+}
+
+/// A ChangeSet built from a snapshot but not yet written. The agent and intent
+/// are as they were read before the snapshot, and are rechecked on commit.
+struct PreparedChangeSet {
+    agent: Agent,
+    intent: Intent,
+    changeset: ChangeSet,
+    worktree: PathBuf,
+    common_dir: PathBuf,
+    now: String,
 }
 
 /// Synchronous drop guard for validation cancellation. Axum gives in-flight
@@ -3804,6 +3879,18 @@ fn changeset_by_id(conn: &Connection, id: &str) -> Result<ChangeSet> {
     .ok_or_else(|| anyhow::anyhow!("NOT_FOUND: changeset {id}"))
 }
 
+fn conflict_party_agents(conn: &Connection, conflict: &Conflict) -> Result<Vec<String>> {
+    let mut parties = Vec::new();
+    if let Some(source_intent_id) = conflict.source_intent_id.as_deref() {
+        parties.push(intent_by_id(conn, source_intent_id)?.agent_id);
+    }
+    let target = intent_by_id(conn, &conflict.target_intent_id)?.agent_id;
+    if !parties.contains(&target) {
+        parties.push(target);
+    }
+    Ok(parties)
+}
+
 fn conflict_by_id(conn: &Connection, id: &str) -> Result<Conflict> {
     conn.query_row(
         "SELECT id, kind, severity, score, source_intent_id, target_intent_id, scope_json,
@@ -3987,6 +4074,226 @@ mod tests {
             projected, rescuer.id,
             "the graph must name the new owner, not the agent that died"
         );
+    }
+
+    fn register(service: &Foremerge, name: &str) -> Agent {
+        service
+            .register_agent(RegisterAgentRequest {
+                name: name.into(),
+                model: None,
+                capabilities: vec![],
+                worktree: None,
+            })
+            .unwrap()
+            .agent
+    }
+
+    /// Make every claim expired and every agent silent, which is the state
+    /// `adopt_intent` requires before it will hand work over.
+    fn strand_everything(service: &Foremerge) {
+        let long_ago =
+            (Utc::now() - chrono::Duration::seconds(AGENT_STALE_AFTER_SECONDS * 2)).to_rfc3339();
+        let conn = service.store.lock().unwrap();
+        conn.execute("UPDATE agents SET last_seen_at = ?1", params![long_ago])
+            .unwrap();
+        conn.execute("UPDATE claims SET lease_expires_at = ?1", params![long_ago])
+            .unwrap();
+    }
+
+    fn committed_repository(root: &std::path::Path) {
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(["-c", "user.name=test", "-c", "user.email=test@example.com"])
+                .args(args)
+                .current_dir(root)
+                .output()
+                .expect("run git");
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+        };
+        git(&["init", "--quiet"]);
+        std::fs::write(root.join("greeter.rs"), "fn greet() {}\n").unwrap();
+        git(&["add", "greeter.rs"]);
+        git(&["commit", "--quiet", "-m", "greet"]);
+    }
+
+    fn changeset_request(
+        agent: &Agent,
+        intent: &Intent,
+        worktree: &std::path::Path,
+    ) -> PublishChangeSetRequest {
+        PublishChangeSetRequest {
+            agent_id: agent.id.clone(),
+            intent_id: intent.id.clone(),
+            summary: "Add a greeting helper".into(),
+            files: vec![],
+            symbols: vec![],
+            contracts: vec![],
+            dependencies: vec![],
+            tests: vec![],
+            decisions: vec![],
+            provenance: json!({}),
+            git_ref: None,
+            base_ref: None,
+            worktree: Some(worktree.to_string_lossy().into_owned()),
+        }
+    }
+
+    /// The ownership pre-check in `publish_changeset` runs before the Git
+    /// snapshot, outside the write. An intent adopted while the snapshot runs
+    /// must stop the stale owner's publish at the write, not let it record a
+    /// ChangeSet under its own id against work that is no longer its own.
+    #[test]
+    fn a_publish_whose_intent_is_adopted_mid_snapshot_is_refused() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        committed_repository(temp.path());
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let owner = register(&service, "owner");
+        let rescuer = register(&service, "rescuer");
+        let intent = service
+            .publish_intent(PublishIntentRequest {
+                agent_id: owner.id.clone(),
+                task: "greet".into(),
+                summary: "Add a greeting helper".into(),
+                rationale: None,
+                scopes: vec![ScopeClaim::new(
+                    Scope::new("symbol", "greet"),
+                    Operation::Modify,
+                )],
+                depends_on: vec![],
+                metadata: json!({}),
+            })
+            .unwrap()
+            .intent;
+        service
+            .claim_work(ClaimWorkRequest {
+                agent_id: owner.id.clone(),
+                intent_id: intent.id.clone(),
+                scopes: vec![Scope::new("symbol", "greet")],
+                reason: None,
+                lease_seconds: 60,
+            })
+            .unwrap();
+
+        // The owner passes the pre-check and takes its snapshot, then stalls.
+        let prepared = service
+            .prepare_changeset(changeset_request(&owner, &intent, temp.path()))
+            .expect("the owner passes the pre-check");
+        // While it is stalled its claim lapses, it falls silent, and the
+        // intent is handed over.
+        strand_everything(&service);
+        service
+            .adopt_intent(&rescuer.id, &intent.id, "owner stalled mid-publish")
+            .expect("a stranded intent must be adoptable");
+
+        let error = service
+            .commit_changeset(prepared)
+            .expect_err("a stale owner must not publish against an adopted intent");
+        let message = format!("{error:#}");
+        assert!(message.starts_with("STATE_RACE:"), "{message}");
+        assert!(message.contains(&rescuer.id), "{message}");
+        assert!(message.contains("adopted"), "{message}");
+
+        let changesets: i64 = {
+            let conn = service.store.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM changesets WHERE intent_id = ?1",
+                [&intent.id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(changesets, 0, "the refused publish must write nothing");
+        let after = service.get_intent(&intent.id).unwrap();
+        assert_eq!(after.agent_id, rescuer.id);
+        assert_eq!(
+            after.status, "CLAIMED",
+            "the refused publish must not advance the adopter's intent"
+        );
+
+        // The adopter owns the work now, and its own publish goes through.
+        service
+            .claim_work(ClaimWorkRequest {
+                agent_id: rescuer.id.clone(),
+                intent_id: intent.id.clone(),
+                scopes: vec![Scope::new("symbol", "greet")],
+                reason: None,
+                lease_seconds: 60,
+            })
+            .unwrap();
+        let published = service
+            .publish_changeset(changeset_request(&rescuer, &intent, temp.path()))
+            .expect("the new owner may publish");
+        assert_eq!(published.agent_id, rescuer.id);
+    }
+
+    /// The MCP party gate for `resolve_conflict` must read ownership when it
+    /// writes. An agent whose intent was adopted is no longer a party, and the
+    /// adopter is.
+    #[test]
+    fn only_a_current_party_may_resolve_a_conflict_as_party() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let first = register(&service, "first");
+        let second = register(&service, "second");
+        let rescuer = register(&service, "rescuer");
+        let publish = |agent: &Agent| {
+            service
+                .publish_intent(PublishIntentRequest {
+                    agent_id: agent.id.clone(),
+                    task: "payments".into(),
+                    summary: format!("{} edits payments", agent.name),
+                    rationale: None,
+                    scopes: vec![ScopeClaim::new(
+                        Scope::new("symbol", "PaymentService"),
+                        Operation::Modify,
+                    )],
+                    depends_on: vec![],
+                    metadata: json!({}),
+                })
+                .unwrap()
+                .intent
+        };
+        let claim = |agent: &Agent, intent: &Intent| {
+            service
+                .claim_work(ClaimWorkRequest {
+                    agent_id: agent.id.clone(),
+                    intent_id: intent.id.clone(),
+                    scopes: vec![Scope::new("symbol", "PaymentService")],
+                    reason: None,
+                    lease_seconds: 60,
+                })
+                .unwrap()
+        };
+        let first_intent = publish(&first);
+        let second_intent = publish(&second);
+        claim(&first, &first_intent);
+        let conflict = claim(&second, &second_intent).warnings.remove(0);
+
+        strand_everything(&service);
+        service
+            .adopt_intent(&rescuer.id, &second_intent.id, "second stalled")
+            .unwrap();
+
+        let resolution = |agent: &Agent| ResolveConflictRequest {
+            agent_id: agent.id.clone(),
+            resolution: "sequence the edits".into(),
+            rationale: "agreed with the other party".into(),
+        };
+        let error = service
+            .resolve_conflict_as_party(&conflict.id, resolution(&second))
+            .expect_err("an agent whose intent was adopted is no longer a party");
+        assert!(format!("{error:#}").starts_with("FORBIDDEN:"), "{error:#}");
+        let still_open = service
+            .list_conflicts(None)
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.id == conflict.id)
+            .unwrap();
+        assert_ne!(still_open.status, "RESOLVED");
+
+        let resolved = service
+            .resolve_conflict_as_party(&conflict.id, resolution(&rescuer))
+            .expect("the adopter is a party now");
+        assert_eq!(resolved.status, "RESOLVED");
     }
     use super::*;
 

@@ -702,13 +702,7 @@ async fn call_tool(service: &Foremerge, params: Value) -> Result<Value, (i64, St
             mcp_blocking(move || {
                 parse::<ResolveConflictToolRequest>(arguments)
                     .and_then(|request| {
-                        let parties = service.conflict_party_agents(&request.conflict_id)?;
-                        if !parties.iter().any(|party| party == &request.agent_id) {
-                            anyhow::bail!(
-                                "FORBIDDEN: over MCP a conflict may be resolved only by an agent whose intent is a party to it, after real agreement; coordinate with the parties via coordinate_with_agent or ask a human operator to resolve it from the CLI"
-                            );
-                        }
-                        service.resolve_conflict(
+                        service.resolve_conflict_as_party(
                             &request.conflict_id,
                             ResolveConflictRequest {
                                 agent_id: request.agent_id,
