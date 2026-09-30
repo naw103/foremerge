@@ -66,6 +66,18 @@ changes when they are called out here with a migration note.
   the binary was compiled: a release-profile build of unreleased schema work is
   refused too, and a debug build at the released schema is not.
 
+### Fixed
+
+- Publishing a ChangeSet checks again, inside its write, that the caller still
+  owns the intent. The ownership check ran before the worktree snapshot and was
+  not repeated, so an intent adopted while a slow snapshot ran still received
+  a ChangeSet recorded under the previous owner's id. That publish is now
+  refused with `STATE_RACE`, naming the new owner, and writes nothing.
+- Over MCP, `resolve_conflict` checks that the caller's intent is a party to
+  the conflict inside the write that resolves it. The check used to be a
+  separate read, so an agent whose intent was adopted between the two could
+  still resolve a conflict it no longer had a part in.
+
 ## [0.5.1] - 2026-10-03
 
 A patch release, compatible with 0.5.0. The ledger schema is unchanged, so the
