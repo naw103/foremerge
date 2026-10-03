@@ -13,14 +13,18 @@ The current local release establishes the core thesis on one developer machine:
 - append-only, hash-chained semantic events;
 - the Agent → Task → Intent → Claim → Symbol → Dependency → ChangeSet → Test →
   Result → Decision → Provenance graph;
-- advisory semantic claims rather than hard locks, renewed by re-claiming a
-  scope, and transferable with `work adopt` when an agent stops mid-task;
+- advisory semantic claims rather than hard locks, whose leases renew when the
+  scope is claimed again; an intent stranded by an agent that stopped can be
+  taken over with `work adopt` once that agent has gone silent and its claims
+  have lapsed;
 - declared scope operations (`add`, `extend`, `modify`, `replace`, `remove`,
   `rename`, `migrate`), so a finding compares two stated operations on one
   stated scope instead of reading a summary for verbs;
-- findings that separate what Foremerge asserts from what it surfaces: HIGH is
-  reached only by a declared operation on a canonical scope, and an inferred
-  operation or a fuzzy scope match is capped below it as a candidate;
+- findings that separate what Foremerge asserts from what it surfaces: a
+  finding reaches HIGH only when both intents declare their operations on the
+  same full scope and those operations interact at HIGH; an inferred operation,
+  or a match on a shortened name such as a class without its namespace, is
+  capped below HIGH as a candidate;
 - deterministic intent-conflict and duplicate-work warnings, `related_work` on
   publish, and `record_assessment` for the agent's own verdict, rationale, and
   action;
