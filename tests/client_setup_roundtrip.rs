@@ -378,14 +378,29 @@ fn assert_registers(fixture: &Fixture, client: &str, binary: &Path) {
     );
 }
 
-fn assert_ready(fixture: &Fixture, client: &str, binary: &Path) {
-    let diagnostic = fixture.doctor(binary, client);
-    let context = format!("{client} set up by {}: {diagnostic}", binary.display());
+/// Doctor, run under `doctor_binary`, reports `client` fully set up.
+fn assert_configured(fixture: &Fixture, client: &str, doctor_binary: &Path) -> Value {
+    let diagnostic = fixture.doctor(doctor_binary, client);
+    let context = format!(
+        "{client}, doctor run as {}: {diagnostic}",
+        doctor_binary.display()
+    );
     assert_eq!(diagnostic["mcp_configured"], true, "{context}");
     assert_eq!(diagnostic["skill_current"], true, "{context}");
     assert_eq!(diagnostic["ready"], true, "{context}");
     assert_eq!(diagnostic["next_step"], Value::Null, "{context}");
-    assert_eq!(diagnostic["warning"], Value::Null, "{context}");
+    diagnostic
+}
+
+/// Set up and diagnosed under the same name: nothing left to do or warn about.
+fn assert_ready(fixture: &Fixture, client: &str, binary: &Path) {
+    let diagnostic = assert_configured(fixture, client, binary);
+    assert_eq!(
+        diagnostic["warning"],
+        Value::Null,
+        "{client}, set up and diagnosed as {}: {diagnostic}",
+        binary.display()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -438,10 +453,25 @@ fn doctors_force_step_repairs_a_stale_registration_under_every_name() {
             let args: Vec<&str> = words.collect();
             assert!(args.contains(&"--force"), "{client}: {step}");
 
-            // Run exactly what doctor said, under this binary's name.
-            fixture.foremerge(binary, &args);
-            assert_registers(&fixture, client, binary);
-            assert_ready(&fixture, client, binary);
+            // Run exactly what doctor said. The step names `foremerge` whichever
+            // name doctor ran under, so that is the binary a user would run.
+            fixture.foremerge(foremerge_bin(), &args);
+            assert_registers(&fixture, client, foremerge_bin());
+            assert_ready(&fixture, client, foremerge_bin());
+
+            // Doctor under the name that gave the advice must agree the
+            // registration is repaired. Under `fmg` it also says, rightly,
+            // that the client now launches a different binary than itself.
+            let diagnostic = assert_configured(&fixture, client, binary);
+            if binary != foremerge_bin() {
+                let warning = diagnostic["warning"].as_str().unwrap_or_else(|| {
+                    panic!("{client}: doctor as fmg must name the binary the client launches: {diagnostic}")
+                });
+                let registered = fixture
+                    .registered_command(client)
+                    .expect("the repaired registration is readable");
+                assert!(warning.contains(&registered), "{client}: {warning}");
+            }
         }
     }
 }
