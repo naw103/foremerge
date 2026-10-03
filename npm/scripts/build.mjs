@@ -10,11 +10,14 @@
 // release published beside it before anything is unpacked. The launcher
 // package is copied from npm/foremerge with its version pins checked.
 //
-// The launcher comes from this checkout, so the checkout must be the release:
-// HEAD must be the commit `v<version>` names and the tree must be clean, or a
-// launcher changed after the tag would ship under a version already released.
-// --allow-untagged skips that for tests and local experiments, and marks every
-// package it writes `private`, which npm refuses to publish.
+// The checkout must be the release: HEAD must be the commit `v<version>` names
+// and the tree must be clean, or a launcher changed after the tag would ship
+// under a version already released. Even then the launcher and LICENSE are
+// exported from the tag with `git archive` rather than copied from the
+// working tree, because ignored files never show as changes and would
+// otherwise be published beside the launcher. --allow-untagged skips all of
+// that for tests and local experiments, copies the working tree, and marks
+// every package it writes `private`, which npm refuses to publish.
 //
 // Nothing is published. The script prints the publish commands, platform
 // packages first, because the launcher's optional dependencies must already
@@ -206,7 +209,17 @@ async function main() {
   prepareOutput(dist);
   const work = path.join(dist, '.work');
   fs.mkdirSync(work, { recursive: true });
-  const license = path.join(repoRoot, 'LICENSE');
+  let license = path.join(repoRoot, 'LICENSE');
+  let launcherFiles = launcherSource;
+  if (!args.allowUntagged) {
+    const exported = path.join(work, 'tag');
+    const tarball = path.join(work, 'tag.tar');
+    git('archive', '--format=tar', '-o', tarball, tag, '--', 'npm/foremerge', 'LICENSE');
+    fs.mkdirSync(exported);
+    execFileSync(tarCommand(), ['-xf', tarball, '-C', exported]);
+    license = path.join(exported, 'LICENSE');
+    launcherFiles = path.join(exported, 'npm', 'foremerge');
+  }
 
   for (const t of TARGETS) {
     const ext = t.os === 'win32' ? 'zip' : 'tar.gz';
@@ -261,7 +274,7 @@ async function main() {
   }
 
   const launcherOut = path.join(dist, 'foremerge');
-  fs.cpSync(launcherSource, launcherOut, {
+  fs.cpSync(launcherFiles, launcherOut, {
     recursive: true,
     filter: (source) => !source.includes(`${path.sep}node_modules`),
   });

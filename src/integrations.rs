@@ -502,11 +502,13 @@ fn launcher_names() -> &'static [&'static str] {
 /// `PATH`, when it has the shape npm gives one.
 ///
 /// On Unix npm links `bin/foremerge` to the package's `bin/foremerge.js`, so
-/// the canonical path is the script itself. On Windows npm writes
-/// `foremerge.cmd` into the global prefix, beside the prefix's
-/// `node_modules`. The shim's text is never parsed or run: only the script at
-/// npm's fixed location beside it is considered, and [`launches_this_binary`]
-/// still decides whether it is this installation's.
+/// the canonical path is the script itself. On Windows npm writes a
+/// `foremerge.cmd` shim instead: a global install puts it in the prefix,
+/// beside the prefix's `node_modules`, and a project install or an `npx` run
+/// puts it in `node_modules\.bin`, which `npx` and npm scripts add to `PATH`.
+/// The shim's text is never parsed or run: only the script at npm's fixed
+/// location for that layout is considered, and [`launches_this_binary`] still
+/// decides whether it is this installation's.
 fn npm_launcher_script(candidate: &Path) -> Option<PathBuf> {
     let name = candidate.file_name()?.to_str()?;
     if name == "foremerge.js" {
@@ -515,9 +517,16 @@ fn npm_launcher_script(candidate: &Path) -> Option<PathBuf> {
     if !name.eq_ignore_ascii_case("foremerge.cmd") {
         return None;
     }
-    candidate
-        .parent()?
-        .join("node_modules")
+    let directory = candidate.parent()?;
+    let packages = if directory
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case(".bin"))
+    {
+        directory.parent()?.to_path_buf()
+    } else {
+        directory.join("node_modules")
+    };
+    packages
         .join("foremerge")
         .join("bin")
         .join("foremerge.js")
@@ -1578,6 +1587,45 @@ mod tests {
 
         let shim = prefix.join("foremerge.cmd").canonicalize().unwrap();
         let script = npm_launcher_script(&shim).expect("the launcher beside the shim");
+        assert_eq!(
+            script,
+            launcher.join("bin/foremerge.js").canonicalize().unwrap()
+        );
+        assert!(launches_this_binary(
+            &script,
+            &platform.join("bin/foremerge.exe")
+        ));
+
+        // A project install, or an `npx` run, which uses the same layout in
+        // npm's cache: the shim in `node_modules\.bin`, the packages beside
+        // that directory.
+        let project = tempfile::tempdir().unwrap();
+        let modules = project.path().join("node_modules");
+        let launcher = modules.join("foremerge");
+        let platform = modules.join("foremerge-test-platform");
+        fs::create_dir_all(launcher.join("bin")).unwrap();
+        fs::create_dir_all(platform.join("bin")).unwrap();
+        fs::create_dir_all(modules.join(".bin")).unwrap();
+        fs::write(
+            launcher.join("package.json"),
+            json!({
+                "name": "foremerge",
+                "version": version,
+                "optionalDependencies": { "foremerge-test-platform": version }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(launcher.join("bin/foremerge.js"), "").unwrap();
+        fs::write(
+            platform.join("package.json"),
+            json!({ "name": "foremerge-test-platform", "version": version }).to_string(),
+        )
+        .unwrap();
+        fs::write(platform.join("bin/foremerge.exe"), "binary").unwrap();
+        fs::write(modules.join(".bin/foremerge.cmd"), "@ECHO off\r\n").unwrap();
+        let shim = modules.join(".bin/foremerge.cmd").canonicalize().unwrap();
+        let script = npm_launcher_script(&shim).expect("the launcher beside .bin");
         assert_eq!(
             script,
             launcher.join("bin/foremerge.js").canonicalize().unwrap()

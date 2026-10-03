@@ -198,12 +198,16 @@ optional.
 The first npm release is 0.5.1. Earlier tags predate the npm packaging, so the
 build below cannot run from them, by design.
 
+Build on macOS or Linux: CI tests the package builder there, not on Windows.
+The launcher and the Windows package it produces are tested on all three.
+
 The npm packages carry the GitHub release's binaries, so they can only be built
 once the release exists. The build downloads each archive, refuses any whose
 SHA-256 differs from the digest the release published beside it, and writes
-six packages to `npm/dist/`, which is ignored. The launcher package is copied
-from the checkout, so the build refuses to run unless `HEAD` is the commit the
-tag names and the tree is clean:
+six packages to `npm/dist/`, which is ignored. The build refuses to run unless
+`HEAD` is the commit the tag names and the tree is clean, and it exports the
+launcher package from the tag itself, so an ignored file in the checkout cannot
+be published with it:
 
 ```console
 git switch --detach v<version>
