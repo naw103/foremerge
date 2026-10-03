@@ -1,6 +1,6 @@
 {
   "name": "foremerge",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Coordinate parallel coding agents, above Git. Installs the Foremerge CLI and MCP server.",
   "license": "Apache-2.0",
   "homepage": "https://foremerge.com",
@@ -36,10 +36,10 @@
     "test": "node --test"
   },
   "optionalDependencies": {
-    "foremerge-darwin-arm64": "0.5.0",
-    "foremerge-darwin-x64": "0.5.0",
-    "foremerge-linux-arm64": "0.5.0",
-    "foremerge-linux-x64": "0.5.0",
-    "foremerge-win32-x64": "0.5.0"
+    "foremerge-darwin-arm64": "0.5.1",
+    "foremerge-darwin-x64": "0.5.1",
+    "foremerge-linux-arm64": "0.5.1",
+    "foremerge-linux-x64": "0.5.1",
+    "foremerge-win32-x64": "0.5.1"
   }
 }

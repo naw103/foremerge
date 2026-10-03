@@ -3,7 +3,7 @@
   "name": "io.github.naw103/foremerge",
   "title": "Foremerge",
   "description": "Coordinate parallel coding agents, above Git",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "repository": {
     "url": "https://github.com/naw103/foremerge",
     "source": "github"
@@ -13,7 +13,7 @@
     {
       "registryType": "cargo",
       "identifier": "foremerge",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "transport": {
         "type": "stdio"
       },
