@@ -63,8 +63,6 @@ validation must leave the target Git ref unchanged.
   adoption, and recovery diagnostics shipped across 0.4.x.
 - Support the 2026-07-28 MCP protocol revision alongside 2025-11-25, rather than
   declining it ([#23](https://github.com/naw103/foremerge/issues/23)).
-- Add `foremerge update`, and tell an installation that a newer release exists
-  ([#33](https://github.com/naw103/foremerge/issues/33)).
 - Community-raised during launch week (August 2026), in design order:
   - `scope_drift`: derive touched paths and symbols from the candidate diff at
     ChangeSet publish and compare them against declared scopes, raising a
