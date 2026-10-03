@@ -435,7 +435,8 @@ Successful tool calls return both text content and `structuredContent`. Domain
 failures are returned as a tool result with `isError: true`; malformed JSON-RPC,
 unknown methods, and invalid tool names use JSON-RPC errors.
 
-If the server cannot open its coordination store, it still answers
+If the server cannot open its coordination store, or was started outside a Git
+repository and so has none, it still answers
 `initialize`, `ping`, `server/discover`, and `tools/list`. The `initialize`
 instructions start with `Foremerge unavailable:` and give the reason, and every
 tool call returns `isError: true` with `code`, `message`, `guidance` for the
@@ -462,18 +463,25 @@ clients, because that erases ownership and model provenance.
 - Run `foremerge mcp --help` in a terminal.
 - Confirm the configured binary path is absolute or on the client's `PATH`.
 - Ensure global flags such as `--database` appear before the `mcp` subcommand.
-- Check the MCP client's stderr log for Git discovery errors. Outside a Git
-  repository the server exits rather than coordinate against a stray store.
+- Check the MCP client's stderr log for Git discovery errors.
 
 ### Tools answer "Foremerge unavailable"
 
-The server started but could not open the coordination ledger. It stays up so
+The server started but could not open the coordination ledger, or there was
+none to open. It stays up so
 the reason reaches the agent: the `initialize` instructions and every tool
 result carry the error code, the message, and a remedy, and the error is also
 written to the server's stderr log. The instructions ask the agent to tell you
 and to leave the ledger and the client configuration alone. Until it is fixed,
 the session is not coordinated with other agents.
 
+- `NOT_A_REPOSITORY` means the client started the server outside a Git
+  repository, so there is nothing to coordinate. Start the client inside the
+  repository, or register the server with `--cwd /absolute/path/to/repository`
+  before `mcp` for clients that do not spawn servers in the workspace. No store
+  is created, so `structuredContent.database` is `null`. Registry and directory
+  checkers start servers this way to read the handshake and tool list, which
+  both still work.
 - `UNSUPPORTED_SCHEMA` means a newer Foremerge build has already migrated the
   ledger. From 0.4.3 the message names that build's version when the ledger
   recorded it. Upgrade the binary the client launches to that version or newer,

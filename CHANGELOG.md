@@ -11,6 +11,16 @@ changes when they are called out here with a migration note.
 
 ### Changed
 
+- `foremerge mcp` started outside a Git repository, without `--database`, no
+  longer exits before the handshake. It answers `initialize` and `tools/list`
+  as an unavailable server does: the instructions begin
+  `Foremerge unavailable: NOT_A_REPOSITORY:`, and every tool call returns
+  `isError: true` with code `NOT_A_REPOSITORY`, a `null` `database`, and a
+  remedy naming `--cwd`. It still creates no store. MCP registry and directory
+  checkers verify servers with a live handshake from a directory that is not a
+  repository, and clients launched from a home directory do the same; both saw
+  only a closed connection before. The reason still goes to stderr.
+
 - The agent skill, the MCP server's instructions and the MCP tool descriptions
   now say that coordination covers every file meant to land in the repository,
   new files and documents included, not only code. Plans, specs and runbooks

@@ -53,7 +53,9 @@ const INSTRUCTIONS: &str = "Publish intent and the scopes you will change, decla
 pub struct StoreUnavailable {
     code: String,
     message: String,
-    database: String,
+    /// The ledger that could not be opened, or `None` when the server was
+    /// started outside a repository and so has no ledger to name.
+    database: Option<String>,
     remedy: String,
 }
 
@@ -66,18 +68,37 @@ impl StoreUnavailable {
         Self {
             code,
             message: message.into(),
-            database: database.display().to_string(),
+            database: Some(database.display().to_string()),
             remedy,
         }
     }
 
+    /// The server was started outside a Git repository, so there is no
+    /// ledger to open. Directory and registry checkers start servers that
+    /// way to read the handshake and the tool catalog, and so do clients
+    /// launched from a home directory; exiting would show either one nothing
+    /// but a closed connection.
+    pub fn outside_repository(message: impl Into<String>) -> Self {
+        Self {
+            code: NOT_A_REPOSITORY.to_string(),
+            message: message.into(),
+            database: None,
+            remedy: remedy(NOT_A_REPOSITORY),
+        }
+    }
+
     fn instructions(&self) -> String {
-        format!(
-            "Foremerge unavailable: {}. The server is running, but it could not open the coordination ledger at {}, so every Foremerge tool returns this error and this session is not coordinated with other agents. {UNAVAILABLE_GUIDANCE} For the user: {}",
-            self.message.trim_end().trim_end_matches('.'),
-            self.database,
-            self.remedy
-        )
+        let reason = self.message.trim_end().trim_end_matches('.');
+        match &self.database {
+            Some(database) => format!(
+                "Foremerge unavailable: {reason}. The server is running, but it could not open the coordination ledger at {database}, so every Foremerge tool returns this error and this session is not coordinated with other agents. {UNAVAILABLE_GUIDANCE} For the user: {}",
+                self.remedy
+            ),
+            None => format!(
+                "Foremerge unavailable: {reason}. The server is running, but it was not started inside a Git repository, so there is no coordination ledger, every Foremerge tool returns this error, and this session is not coordinated with other agents. {UNAVAILABLE_GUIDANCE} For the user: {}",
+                self.remedy
+            ),
+        }
     }
 
     /// Answer a tool call with the reason instead of a result. An unknown tool
@@ -107,12 +128,23 @@ impl StoreUnavailable {
 /// What an agent does on meeting an unavailable store. Tool results carry it
 /// as well as the instructions, because not every client shows the agent the
 /// instructions, and the remedy is addressed to whoever configures the client.
+/// The code an unavailable server reports when it was started outside a
+/// repository.
+pub const NOT_A_REPOSITORY: &str = "NOT_A_REPOSITORY";
+
 const UNAVAILABLE_GUIDANCE: &str = "Tell the user and leave the fix to them: do not delete, move, or edit the ledger, and do not change the MCP client configuration.";
 
 /// What the operator does about a store the server could not open.
 fn remedy(code: &str) -> String {
     const RELAUNCH: &str = "then restart the client session so it relaunches `foremerge mcp`";
-    if code == "NOT_INITIALIZED" {
+    if code == NOT_A_REPOSITORY {
+        // Nothing is broken: the client started the server somewhere that is
+        // not a repository. Which repository to coordinate is the operator's
+        // choice, so the server names both ways to make it.
+        format!(
+            "Start the client from inside the repository you want coordinated, or register the server as `foremerge --cwd /absolute/path/to/repository mcp`, {RELAUNCH}. Nothing else is wrong."
+        )
+    } else if code == "NOT_INITIALIZED" {
         // Initializing a repository is the operator's decision, so the server
         // says what to run rather than running it. A client starting is not
         // permission to opt a repository into coordination.
@@ -1563,6 +1595,61 @@ mod tests {
                 .is_some_and(|text| text.starts_with("Foremerge unavailable:")),
             "{initialized}"
         );
+    }
+
+    #[tokio::test]
+    async fn outside_a_repository_the_handshake_names_no_ledger_and_the_way_in() {
+        let unavailable = StoreUnavailable::outside_repository(
+            "NOT_A_REPOSITORY: no Git repository at /home/user; start the client inside a repository",
+        );
+        let backend = Backend::Unavailable(&unavailable);
+        let initialized = respond(
+            backend,
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
+        )
+        .await
+        .unwrap();
+        let instructions = initialized["result"]["instructions"].as_str().unwrap();
+        assert!(
+            instructions.starts_with("Foremerge unavailable: NOT_A_REPOSITORY:"),
+            "{instructions}"
+        );
+        // There is no ledger, so the instructions must not claim one failed to
+        // open, and the remedy is starting in, or pointing at, a repository.
+        assert!(
+            !instructions.contains("could not open the coordination ledger"),
+            "{instructions}"
+        );
+        assert!(
+            instructions.contains("not started inside a Git repository"),
+            "{instructions}"
+        );
+        assert!(instructions.contains("--cwd"), "{instructions}");
+
+        let listed = respond(
+            backend,
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(listed["result"]["tools"], Value::Array(tool_catalog()));
+
+        let refused = respond(
+            backend,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": { "name": "status", "arguments": {} }
+            }),
+        )
+        .await
+        .unwrap();
+        let error = &refused["result"]["structuredContent"];
+        assert_eq!(refused["result"]["isError"], true, "{refused}");
+        assert_eq!(error["code"], NOT_A_REPOSITORY, "{refused}");
+        assert_eq!(error["database"], Value::Null, "{refused}");
+        assert_eq!(error["remedy"], remedy(NOT_A_REPOSITORY), "{refused}");
     }
 
     #[tokio::test]

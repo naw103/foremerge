@@ -934,18 +934,28 @@ async fn execute(cli: Cli) -> Result<Completion> {
             // directory the operator is working in, so the repository is
             // resolved here the way git resolves one: from where the process
             // runs. Outside a repository that resolution has no answer, and
-            // continuing would create a stray store beside the spawn directory
-            // rather than coordinating anything, so fail where the operator can
-            // still read the reason. Plugin hosts may start MCP automatically,
-            // so the default repository store must also exist already: starting
-            // a client is not permission to opt a repository into coordination.
+            // opening a store would create a stray one beside the spawn
+            // directory rather than coordinate anything. So serve the reason
+            // without a store instead: registry and directory checkers spawn
+            // servers outside any repository to read the handshake, and so
+            // do clients launched from a home directory. Plugin hosts may
+            // start MCP automatically, so the default repository store must
+            // also exist already: starting a client is not permission to opt
+            // a repository into coordination.
             if cli.database.is_none() {
-                git::discover(&cwd).with_context(|| {
-                    format!(
-                        "INVALID_INPUT: no Git repository at {}; the MCP server resolves its repository from the directory the client spawns it in, so start the client inside a repository or register it with an explicit --cwd",
+                if let Err(error) = git::discover(&cwd) {
+                    let reason = format!(
+                        "{}: no Git repository at {}; the MCP server resolves its repository from the directory the client spawns it in, so start the client inside a repository or register it with an explicit --cwd: {error:#}",
+                        mcp::NOT_A_REPOSITORY,
                         cwd.display()
-                    )
-                })?;
+                    );
+                    eprintln!("error: {reason}");
+                    return mcp::run_stdio_unavailable(mcp::StoreUnavailable::outside_repository(
+                        reason,
+                    ))
+                    .await
+                    .map(|()| completion);
+                }
                 // Serve the reason rather than exiting, for the same reason
                 // an unopenable ledger does: a server that dies before the
                 // handshake reaches the operator as nothing but a closed
