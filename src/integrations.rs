@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -385,6 +386,26 @@ fn executable_name() -> &'static str {
     } else {
         "foremerge"
     }
+}
+
+/// The names this crate installs its binary under: `foremerge`, and `fmg`, the
+/// same program under a short name. Release archives and `cargo install` put
+/// both in one directory from one build.
+const BINARY_NAMES: [&str; 2] = ["foremerge", "fmg"];
+
+/// Whether `file_name` is one of this crate's binaries as this platform names
+/// executables. Windows appends `.exe` and compares file names without regard
+/// to case, so `FOREMERGE.EXE` is the same file there; elsewhere the name is
+/// exact.
+fn is_foremerge_binary_name(file_name: &str) -> bool {
+    BINARY_NAMES.iter().any(|name| {
+        let expected = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+        if cfg!(windows) {
+            file_name.eq_ignore_ascii_case(&expected)
+        } else {
+            file_name == expected
+        }
+    })
 }
 
 /// The version of the binary at `path`, known only when it is this process's
@@ -1218,7 +1239,7 @@ fn mcp_json_entry_stale(path: &Path, root: &Path) -> bool {
 }
 
 /// True only for an entry that is verifiably current for this repository: its
-/// command is an absolute path to an existing `foremerge` binary, its last
+/// command is an absolute path to an existing Foremerge binary, its last
 /// argument is `mcp`, and any `--cwd` argument canonicalizes to `root`.
 fn mcp_entry_current(entry: &Value, root: &Path) -> bool {
     let Some(command) = entry.get("command").and_then(Value::as_str) else {
@@ -1242,7 +1263,8 @@ fn mcp_entry_current(entry: &Value, root: &Path) -> bool {
     }
 }
 
-/// Only an absolute path to an existing file named `foremerge` is verifiably
+/// Only an absolute path to an existing file named for one of this crate's
+/// binaries (`foremerge` or `fmg`, with `.exe` on Windows) is verifiably
 /// current. A bare or relative command would be resolved in the MCP client's
 /// own PATH and working directory, which need not match this process's, so
 /// such entries are treated as not current; setup writes absolute paths, so
@@ -1251,7 +1273,10 @@ fn mcp_entry_current(entry: &Value, root: &Path) -> bool {
 fn command_resolves_to_foremerge(command: &str) -> bool {
     let path = Path::new(command);
     path.is_absolute()
-        && path.file_name().and_then(|value| value.to_str()) == Some("foremerge")
+        && path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(is_foremerge_binary_name)
         && path.is_file()
 }
 
@@ -1369,12 +1394,45 @@ mod tests {
         assert!(!command_resolves_to_foremerge("target/debug/foremerge"));
         assert!(!command_resolves_to_foremerge("/nonexistent/foremerge"));
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("foremerge");
-        fs::write(&path, b"#!/bin/sh\n").unwrap();
-        assert!(command_resolves_to_foremerge(&path.to_string_lossy()));
+        // Both installed names, as this platform spells them. Windows names
+        // the release binaries `foremerge.exe` and `fmg.exe`, so a test that
+        // used the bare name there would pass without modelling a real install.
+        for name in BINARY_NAMES {
+            let path = temp
+                .path()
+                .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+            fs::write(&path, b"#!/bin/sh\n").unwrap();
+            assert!(
+                command_resolves_to_foremerge(&path.to_string_lossy()),
+                "{} must resolve",
+                path.display()
+            );
+        }
         let other = temp.path().join("not-foremerge");
         fs::write(&other, b"#!/bin/sh\n").unwrap();
         assert!(!command_resolves_to_foremerge(&other.to_string_lossy()));
+    }
+
+    #[test]
+    fn binary_names_follow_the_platform_convention() {
+        for other in ["foremerge-old", "not-foremerge", "fmgx", "foremerge.sh", ""] {
+            assert!(!is_foremerge_binary_name(other), "{other:?} must not match");
+        }
+        if cfg!(windows) {
+            for name in ["foremerge.exe", "fmg.exe", "FOREMERGE.EXE", "Fmg.Exe"] {
+                assert!(is_foremerge_binary_name(name), "{name:?} must match");
+            }
+            // Windows does not run a file without its extension.
+            assert!(!is_foremerge_binary_name("foremerge"));
+            assert!(!is_foremerge_binary_name("fmg"));
+        } else {
+            assert!(is_foremerge_binary_name("foremerge"));
+            assert!(is_foremerge_binary_name("fmg"));
+            // Unix file names are case-sensitive, and nothing installs an
+            // `.exe` there.
+            assert!(!is_foremerge_binary_name("Foremerge"));
+            assert!(!is_foremerge_binary_name("foremerge.exe"));
+        }
     }
 
     #[cfg(unix)]
@@ -1420,7 +1478,7 @@ mod tests {
         // command_resolves_to_foremerge requires the binary to exist, so point
         // at one that does.
         let temp = tempfile::tempdir().unwrap();
-        let exe = temp.path().join("foremerge");
+        let exe = temp.path().join(executable_name());
         fs::write(&exe, b"#!/bin/sh\n").unwrap();
         let mut entry = parse_codex_entry(&portable).expect("entry parses");
         entry.command = Some(exe.to_string_lossy().into_owned());
@@ -1438,7 +1496,7 @@ mod tests {
     #[test]
     fn a_cwd_with_no_value_does_not_read_as_a_pinned_registration() {
         let temp = tempfile::tempdir().unwrap();
-        let exe = temp.path().join("foremerge");
+        let exe = temp.path().join(executable_name());
         fs::write(&exe, b"#!/bin/sh\n").unwrap();
 
         // A `--cwd` carrying no value pins the entry to nothing. Reading it as
@@ -1481,7 +1539,7 @@ mod tests {
     #[test]
     fn disabled_unverifiable_or_foreign_codex_entries_need_force() {
         let temp = tempfile::tempdir().unwrap();
-        let exe = temp.path().join("foremerge");
+        let exe = temp.path().join(executable_name());
         fs::write(&exe, b"#!/bin/sh\n").unwrap();
 
         // A registration the operator disabled must not be silently re-added.
@@ -1535,7 +1593,7 @@ mod tests {
 
         // An absent file and a current entry must not demand --force.
         assert!(!mcp_json_entry_stale(&path, &root));
-        let exe = root.join("foremerge");
+        let exe = root.join(executable_name());
         fs::write(&exe, b"#!/bin/sh\n").unwrap();
         fs::write(
             &path,

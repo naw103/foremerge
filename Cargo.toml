@@ -53,6 +53,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.18", features = ["v4", "serde"] }
 
+# Runs its own harness so the test binary can stand in for the Codex, Claude
+# and Cursor CLIs as a real executable on every platform, Windows included.
+[[test]]
+name = "client_setup_roundtrip"
+harness = false
+
 [dev-dependencies]
 assert_cmd = "2.0"
 http-body-util = "0.1"

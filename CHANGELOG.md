@@ -24,6 +24,23 @@ changes when they are called out here with a migration note.
   tell the user when an uncoordinated file changes underneath it rather than
   overwriting the change. Tool names, schemas and behaviour are unchanged.
 
+### Fixed
+
+- `foremerge doctor` no longer reports MCP as unconfigured for a registration
+  that `foremerge setup` wrote, when the binary is not named exactly
+  `foremerge`. On Windows the binary is `foremerge.exe`, so doctor rejected
+  every Codex, Claude Code and Cursor registration there, told the user to run
+  `setup --force`, and still rejected the registration that command rewrote.
+  Rerunning `setup codex` also failed with `ALREADY_EXISTS` on Foremerge's own
+  entry. The same happened on every platform after `fmg setup`, because `fmg`
+  is the same program under a short name. Doctor now accepts both installed
+  names, with `.exe` on Windows (compared without regard to case there). The
+  MCP server itself was unaffected.
+- A new test runs `setup` followed by `doctor` for every client under both
+  binary names on Linux, macOS and Windows, and checks that the command doctor
+  recommends for a stale registration actually repairs it. Windows CI
+  previously ran none of the setup or doctor tests.
+
 ## [0.5.0] - 2026-09-20
 
 This is a minor version because it breaks one HTTP endpoint's request body.

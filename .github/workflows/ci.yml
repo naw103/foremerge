@@ -97,6 +97,9 @@ jobs:
       - name: Execute benchmark corpus
         run: cargo test --test benchmark_scenarios -- --nocapture
 
+      - name: Test client setup and doctor round trip
+        run: cargo test --test client_setup_roundtrip
+
       - name: Test complete integration suite on macOS
         if: runner.os == 'macOS'
         run: cargo test --test e2e
