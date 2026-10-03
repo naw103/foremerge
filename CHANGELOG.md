@@ -32,8 +32,10 @@ changes when they are called out here with a migration note.
   `foremerge` package selects one of five platform packages carrying the
   release binaries unchanged, so nothing is downloaded or compiled at install
   time and there are no install scripts. `foremerge doctor` lists the npm
-  launcher on `PATH` with `npm_launcher: true` and does not warn about it as
-  a second installation, since it runs the binary it was installed with.
+  launcher on `PATH`, `foremerge.cmd` on Windows, with `npm_launcher: true`
+  and does not warn about it as a second installation, since it runs the
+  binary it was installed with. On Windows, `doctor` now also finds other
+  npm installations' `foremerge.cmd` shims and warns about them.
 
 - The agent skill, the MCP server's instructions and the MCP tool descriptions
   now say that coordination covers every file meant to land in the repository,

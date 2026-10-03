@@ -10,6 +10,8 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { tarCommand } from './build.mjs';
+
 export const TARGETS = [
   { triple: 'aarch64-apple-darwin', platform: 'darwin', arch: 'arm64' },
   { triple: 'x86_64-apple-darwin', platform: 'darwin', arch: 'x64' },
@@ -47,10 +49,13 @@ export function writeAssets(directory, version, { native } = {}) {
     const name = `foremerge-${tag}-${triple}.${platform === 'win32' ? 'zip' : 'tar.gz'}`;
     const archive = path.join(directory, name);
     const members = ['foremerge', 'fmg'].map((program) => `${program}${suffix}`);
-    if (platform === 'win32') {
+    if (platform === 'win32' && process.platform !== 'win32') {
       execFileSync('zip', ['-q', '-j', archive, ...members.map((m) => path.join(stage, m))]);
+    } else if (platform === 'win32') {
+      // bsdtar picks the archive format from the .zip suffix with -a.
+      execFileSync(tarCommand(), ['-a', '-c', '-f', archive, '-C', stage, ...members]);
     } else {
-      execFileSync('tar', ['-C', stage, '-czf', archive, ...members]);
+      execFileSync(tarCommand(), ['-C', stage, '-czf', archive, ...members]);
     }
     const digest = createHash('sha256').update(fs.readFileSync(archive)).digest('hex');
     fs.writeFileSync(`${archive}.sha256`, `${digest}  ${name}\n`);

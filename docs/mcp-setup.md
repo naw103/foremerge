@@ -573,7 +573,8 @@ To upgrade:
 1. Upgrade with the method you installed with. If you have used both, remove
    one copy. `foremerge doctor` lists every installation it finds in
    `installations` and warns about each one besides the running binary. The
-   npm launcher on `PATH` is listed with `npm_launcher: true` and no warning,
+   npm launcher on `PATH` (`foremerge.cmd` on Windows) is listed with
+   `npm_launcher: true` and no warning,
    because it runs the binary it was installed with rather than another one. It
    does not run them to check their versions, so run `<path> --version`
    yourself for any installation you mean to keep.

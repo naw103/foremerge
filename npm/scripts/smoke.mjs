@@ -37,7 +37,16 @@ const flag = process.argv.indexOf('--binaries');
 if (flag === -1 || !process.argv[flag + 1]) fail('pass --binaries DIR holding foremerge and fmg');
 const binaries = path.resolve(process.argv[flag + 1]);
 const target = nativeTarget();
-if (!target || target.platform === 'win32') fail(`no smoke test for ${process.platform}-${process.arch}`);
+if (!target) fail(`no smoke test for ${process.platform}-${process.arch}`);
+const windows = process.platform === 'win32';
+
+// On Windows `npm` and the commands npm installs are .cmd shims, which Node
+// will only start through a shell. Every path here is a temp path with no
+// spaces, so the shell sees the arguments unchanged.
+const shell = windows;
+function npm(args, options = {}) {
+  return execFileSync('npm', args, { encoding: 'utf8', shell, ...options });
+}
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'foremerge-npm-smoke-')));
 const assets = path.join(root, 'assets');
@@ -56,22 +65,27 @@ const platformPackage = Object.keys(launcherManifest.optionalDependencies).find(
 const packed = [platformPackage, 'foremerge'].map((name) => {
   // An untagged build is private so it can never be published. npm still
   // packs and installs it, which is all this needs.
-  const [info] = JSON.parse(
-    execFileSync('npm', ['pack', '--json', '--pack-destination', tarballs, path.join(out, name)], { encoding: 'utf8' }),
-  );
+  const [info] = JSON.parse(npm(['pack', '--json', '--pack-destination', tarballs, path.join(out, name)]));
   return path.join(tarballs, info.filename);
 });
-execFileSync('npm', ['install', '--global', '--prefix', prefix, '--no-audit', '--no-fund', ...packed], { stdio: 'inherit' });
+npm(['install', '--global', '--prefix', prefix, '--no-audit', '--no-fund', ...packed], { stdio: 'inherit' });
 
+// npm puts global commands in <prefix>/bin on Unix and in <prefix> itself on
+// Windows. Only that, Node, and the system's own tools are on PATH, so the
+// only Foremerge to find is the one just installed.
+const commands = windows ? prefix : path.join(prefix, 'bin');
+const systemPath = windows ? process.env.PATH.split(path.delimiter) : ['/usr/bin', '/bin'];
 const env = {
   ...process.env,
   HOME: home,
-  PATH: [path.join(prefix, 'bin'), path.dirname(process.execPath), '/usr/bin', '/bin'].join(path.delimiter),
+  USERPROFILE: home,
+  PATH: [commands, path.dirname(process.execPath), ...systemPath].join(path.delimiter),
 };
 delete env.CARGO_HOME;
+delete env.Path;
 
 function run(command, args, options = {}) {
-  const result = spawnSync(command, args, { encoding: 'utf8', env, ...options });
+  const result = spawnSync(command, args, { encoding: 'utf8', env, shell, ...options });
   if (result.error) fail(`${command} ${args.join(' ')}: ${result.error.message}`);
   return result;
 }

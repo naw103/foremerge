@@ -40,6 +40,11 @@ const TARGETS = [
 ];
 const PROGRAMS = ['foremerge', 'fmg'];
 
+// Written into every output directory. A directory is only ever emptied when
+// it holds this file, so --out cannot erase anything this script did not
+// write, whatever path it is given.
+const OUTPUT_MARKER = '.foremerge-npm-build';
+
 function parseArgs(argv) {
   const args = {};
   for (let i = 0; i < argv.length; i += 1) {
@@ -90,6 +95,33 @@ function requireReleaseCheckout(tag) {
   if (dirty) fail(`the checkout has uncommitted changes, which would ship in the launcher:\n${dirty}`);
 }
 
+function isWithin(child, parent) {
+  const relative = path.relative(parent, child);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+// Empty the output directory, or create it, refusing anything that could hold
+// files this script did not write: the checkout, a directory containing it,
+// the launcher source, or an existing directory without the marker.
+function prepareOutput(dist) {
+  if (isWithin(repoRoot, dist)) fail(`--out ${dist} contains the checkout; choose a new or empty directory`);
+  if (isWithin(dist, launcherSource)) fail(`--out ${dist} is inside npm/foremerge, which the launcher is copied from`);
+  let entries = null;
+  try {
+    const stat = fs.lstatSync(dist);
+    if (!stat.isDirectory()) fail(`--out ${dist} exists and is not a directory`);
+    entries = fs.readdirSync(dist);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  if (entries && entries.length && !entries.includes(OUTPUT_MARKER)) {
+    fail(`--out ${dist} already holds files this script did not write; choose a new or empty directory, or remove it yourself`);
+  }
+  fs.rmSync(dist, { recursive: true, force: true });
+  fs.mkdirSync(dist, { recursive: true });
+  fs.writeFileSync(path.join(dist, OUTPUT_MARKER), 'Written by npm/scripts/build.mjs, which replaces this directory on every run.\n');
+}
+
 function cargoVersion() {
   const manifest = fs.readFileSync(path.join(repoRoot, 'Cargo.toml'), 'utf8');
   const match = manifest.match(/^\[package\][^[]*?^version\s*=\s*"([^"]+)"/m);
@@ -115,12 +147,20 @@ function publishedDigest(file, archiveName) {
   return digest;
 }
 
+// Windows ships bsdtar as System32\tar.exe, which reads zip as well as gzip.
+// Named by path, because Git for Windows puts a GNU tar on PATH that does not.
+export function tarCommand() {
+  return process.platform === 'win32'
+    ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe')
+    : 'tar';
+}
+
 function unpack(archive, destination) {
   fs.mkdirSync(destination, { recursive: true });
-  if (archive.endsWith('.zip')) {
+  if (archive.endsWith('.zip') && process.platform !== 'win32') {
     execFileSync('unzip', ['-q', '-o', archive, '-d', destination]);
   } else {
-    execFileSync('tar', ['-xzf', archive, '-C', destination]);
+    execFileSync(tarCommand(), ['-xf', archive, '-C', destination]);
   }
 }
 
@@ -163,7 +203,7 @@ async function main() {
   if (extra.length) fail(`npm/foremerge pins unknown packages: ${extra.join(', ')}`);
 
   const dist = path.resolve(args.out || path.join(npmRoot, 'dist'));
-  fs.rmSync(dist, { recursive: true, force: true });
+  prepareOutput(dist);
   const work = path.join(dist, '.work');
   fs.mkdirSync(work, { recursive: true });
   const license = path.join(repoRoot, 'LICENSE');
@@ -240,4 +280,9 @@ async function main() {
   console.log(`  npm publish --access public ${path.relative(process.cwd(), launcherOut)}`);
 }
 
-await main();
+// Run only when executed, not when fixtures.mjs imports tarCommand. Both
+// sides are real paths, so a symlinked invocation still runs.
+const invoked = process.argv[1] ? fs.realpathSync(process.argv[1]) : '';
+if (invoked === fs.realpathSync(fileURLToPath(import.meta.url))) {
+  await main();
+}

@@ -384,14 +384,6 @@ pub struct Installation {
     pub npm_launcher: bool,
 }
 
-fn executable_name() -> &'static str {
-    if cfg!(windows) {
-        "foremerge.exe"
-    } else {
-        "foremerge"
-    }
-}
-
 /// The names this crate installs its binary under: `foremerge`, and `fmg`, the
 /// same program under a short name. Release archives and `cargo install` put
 /// both in one directory from one build.
@@ -462,11 +454,11 @@ pub fn installations(current_exe: &Path) -> Vec<Installation> {
             .canonicalize()
             .unwrap_or_else(|_| current_exe.to_path_buf()),
     )
-    .chain(
-        directories
-            .into_iter()
-            .map(|directory| directory.join(executable_name())),
-    );
+    .chain(directories.into_iter().flat_map(|directory| {
+        launcher_names()
+            .iter()
+            .map(move |name| directory.join(name))
+    }));
     for candidate in candidates {
         if !candidate.is_file() {
             continue;
@@ -478,7 +470,9 @@ pub fn installations(current_exe: &Path) -> Vec<Installation> {
             continue;
         }
         let (mut version, this_binary) = version_of(&candidate, current_exe);
-        let npm_launcher = !this_binary && launches_this_binary(&canonical, current_exe);
+        let npm_launcher = !this_binary
+            && npm_launcher_script(&canonical)
+                .is_some_and(|script| launches_this_binary(&script, current_exe));
         seen.push(canonical);
         if npm_launcher {
             version = Some(env!("CARGO_PKG_VERSION").to_string());
@@ -491,6 +485,44 @@ pub fn installations(current_exe: &Path) -> Vec<Installation> {
         });
     }
     found
+}
+
+/// The names a shell or client could launch Foremerge by from a `PATH`
+/// directory. On Windows npm installs a `foremerge.cmd` shim rather than an
+/// executable, so without it an npm installation there is never found.
+fn launcher_names() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &["foremerge.exe", "foremerge.cmd"]
+    } else {
+        &["foremerge"]
+    }
+}
+
+/// The npm launcher script behind `candidate`, a canonical path found on
+/// `PATH`, when it has the shape npm gives one.
+///
+/// On Unix npm links `bin/foremerge` to the package's `bin/foremerge.js`, so
+/// the canonical path is the script itself. On Windows npm writes
+/// `foremerge.cmd` into the global prefix, beside the prefix's
+/// `node_modules`. The shim's text is never parsed or run: only the script at
+/// npm's fixed location beside it is considered, and [`launches_this_binary`]
+/// still decides whether it is this installation's.
+fn npm_launcher_script(candidate: &Path) -> Option<PathBuf> {
+    let name = candidate.file_name()?.to_str()?;
+    if name == "foremerge.js" {
+        return Some(candidate.to_path_buf());
+    }
+    if !name.eq_ignore_ascii_case("foremerge.cmd") {
+        return None;
+    }
+    candidate
+        .parent()?
+        .join("node_modules")
+        .join("foremerge")
+        .join("bin")
+        .join("foremerge.js")
+        .canonicalize()
+        .ok()
 }
 
 /// Whether `launcher`, a canonical path found on `PATH`, is the npm
@@ -1415,6 +1447,14 @@ fn write_managed(path: &Path, content: &[u8], force: bool) -> Result<FileInstall
 mod tests {
     use super::*;
 
+    fn executable_name() -> &'static str {
+        if cfg!(windows) {
+            "foremerge.exe"
+        } else {
+            "foremerge"
+        }
+    }
+
     /// Lay out an npm install the way npm does: the launcher package and its
     /// platform package, either hoisted side by side or nested under the
     /// launcher. Returns the launcher script and the platform binary.
@@ -1503,6 +1543,60 @@ mod tests {
             &script.canonicalize().unwrap(),
             &binary
         ));
+    }
+
+    #[test]
+    fn a_windows_npm_shim_leads_to_the_launcher_beside_it() {
+        // npm's global layout on Windows: the shim in the prefix, packages in
+        // the prefix's `node_modules`, the platform package hoisted beside
+        // the launcher.
+        let version = env!("CARGO_PKG_VERSION");
+        let temp = tempfile::tempdir().unwrap();
+        let prefix = temp.path().join("npm");
+        let launcher = prefix.join("node_modules/foremerge");
+        let platform = prefix.join("node_modules/foremerge-test-platform");
+        fs::create_dir_all(launcher.join("bin")).unwrap();
+        fs::create_dir_all(platform.join("bin")).unwrap();
+        fs::write(
+            launcher.join("package.json"),
+            json!({
+                "name": "foremerge",
+                "version": version,
+                "optionalDependencies": { "foremerge-test-platform": version }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(launcher.join("bin/foremerge.js"), "").unwrap();
+        fs::write(
+            platform.join("package.json"),
+            json!({ "name": "foremerge-test-platform", "version": version }).to_string(),
+        )
+        .unwrap();
+        fs::write(platform.join("bin/foremerge.exe"), "binary").unwrap();
+        fs::write(prefix.join("foremerge.cmd"), "@ECHO off\r\n").unwrap();
+
+        let shim = prefix.join("foremerge.cmd").canonicalize().unwrap();
+        let script = npm_launcher_script(&shim).expect("the launcher beside the shim");
+        assert_eq!(
+            script,
+            launcher.join("bin/foremerge.js").canonicalize().unwrap()
+        );
+        assert!(launches_this_binary(
+            &script,
+            &platform.join("bin/foremerge.exe")
+        ));
+
+        // A `foremerge.cmd` with no npm package beside it is some other
+        // wrapper, so it stays a separate installation to warn about.
+        let other = tempfile::tempdir().unwrap();
+        fs::write(other.path().join("foremerge.cmd"), "").unwrap();
+        let shim = other.path().join("foremerge.cmd").canonicalize().unwrap();
+        assert_eq!(npm_launcher_script(&shim), None);
+        assert_eq!(
+            npm_launcher_script(Path::new("/usr/local/bin/foremerge")),
+            None
+        );
     }
 
     #[test]
