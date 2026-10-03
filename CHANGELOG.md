@@ -9,6 +9,13 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-03
+
+A patch release, compatible with 0.5.0. The ledger schema is unchanged, so the
+two read the same coordination store. It fixes `doctor` on Windows
+and for anyone who ran setup as `fmg`, keeps `foremerge mcp` answering when it
+starts outside a repository, and adds npm as an install channel.
+
 ### Changed
 
 - `foremerge mcp` started outside a Git repository, without `--database`, no
@@ -905,7 +912,8 @@ schema 4 store rather than migrate it backwards.
 - Apache-2.0 licensing, contribution and security policies, CI, release checks,
   limitations, roadmap, and a reproducible benchmark specification.
 
-[Unreleased]: https://github.com/naw103/foremerge/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/naw103/foremerge/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/naw103/foremerge/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/naw103/foremerge/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/naw103/foremerge/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/naw103/foremerge/compare/v0.4.1...v0.4.2

@@ -15,7 +15,7 @@ a platform package, so installing does not download or compile anything.
 ## Install
 
 ```sh
-npm install -g foremerge@0.5.0
+npm install -g foremerge@0.5.1
 foremerge --version
 ```
 
@@ -62,7 +62,7 @@ exact version:
   "mcpServers": {
     "foremerge": {
       "command": "npx",
-      "args": ["-y", "foremerge@0.5.0", "mcp"]
+      "args": ["-y", "foremerge@0.5.1", "mcp"]
     }
   }
 }
