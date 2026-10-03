@@ -8,3 +8,5 @@
 *.sqlite3-shm
 *.sqlite3-wal
 .DS_Store
+/npm/dist/
+node_modules/
