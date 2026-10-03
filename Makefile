@@ -4,7 +4,7 @@ CARGO ?= cargo
 
 MSRV ?= 1.85.0
 
-.PHONY: help fmt fmt-check check clippy test benchmarks query-benchmark doc build release verify msrv clean
+.PHONY: help fmt fmt-check check clippy test benchmarks query-benchmark doc build release verify msrv npm-test clean
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "; printf "Foremerge development targets:\n"} /^[a-zA-Z_-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -46,6 +46,10 @@ msrv: ## Run clippy and tests on the pinned MSRV toolchain, as CI does
 	rustup toolchain list | grep -q '^$(MSRV)' || rustup toolchain install $(MSRV) --profile minimal --component clippy,rustfmt
 	rustup run $(MSRV) $(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
 	rustup run $(MSRV) $(CARGO) test --workspace --all-targets --all-features
+
+npm-test: ## Test the npm launcher and package builder (needs Node 18+, tar, zip)
+	npm test --prefix npm/foremerge
+	node --test npm/scripts/build.test.mjs
 
 verify: fmt-check check clippy test query-smoke doc ## Run the local release gate
 # `query-smoke` is here because `cargo test` only ever *compiles* the example.

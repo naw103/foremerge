@@ -4015,27 +4015,24 @@ fn setup_codex_registers_the_global_mcp_entry_and_is_idempotent() {
     assert_eq!(doctor["data"]["clients"][0]["mcp_configured"], true);
 }
 
-#[test]
-fn mcp_outside_a_repository_serves_the_reason_without_creating_a_stray_store() {
-    // The portable registration resolves its repository from the directory the
-    // client spawns the server in. Outside a repository there is no answer, and
-    // silently coordinating against a store created beside the spawn directory
-    // would be worse than refusing. The server still completes the handshake,
-    // because registry checkers and clients launched from a home directory
-    // spawn it outside any repository, and a server that exits reaches them
-    // as nothing but a closed connection.
-    let temp = tempfile::tempdir().expect("temp dir");
-    let outside = temp.path().canonicalize().expect("canonicalize temp dir");
-    let mut child = Command::new(foremerge_bin())
+/// Run `foremerge mcp` from `cwd` with no `--database`, send `initialize`,
+/// `tools/list` and one `status` call, and return the three answers and the
+/// server's stderr. The process must exit cleanly and write only protocol to
+/// stdout: a diagnosis there would corrupt the JSON-RPC stream.
+fn mcp_session_without_a_store(cwd: &Path, path: Option<&std::ffi::OsStr>) -> (Vec<Value>, String) {
+    let mut command = Command::new(foremerge_bin());
+    command
         .arg("--json")
         .arg("--cwd")
-        .arg(&outside)
+        .arg(cwd)
         .arg("mcp")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn foremerge mcp");
+        .stderr(Stdio::piped());
+    if let Some(path) = path {
+        command.env("PATH", path);
+    }
+    let mut child = command.spawn().expect("spawn foremerge mcp");
     let mut stdin = child.stdin.take().expect("MCP stdin");
     let requests = [
         json!({
@@ -4062,14 +4059,12 @@ fn mcp_outside_a_repository_serves_the_reason_without_creating_a_stray_store() {
     drop(stdin);
 
     let output = child.wait_with_output().expect("wait for MCP server");
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(
         output.status.success(),
         "MCP process failed\nstdout: {}\nstderr: {stderr}",
         String::from_utf8_lossy(&output.stdout)
     );
-    // Every stdout line is protocol: a diagnosis written there would corrupt
-    // the JSON-RPC stream the client is reading.
     let responses = String::from_utf8(output.stdout)
         .expect("MCP output is UTF-8")
         .lines()
@@ -4081,14 +4076,59 @@ fn mcp_outside_a_repository_serves_the_reason_without_creating_a_stray_store() {
         3,
         "every request gets an answer: {responses:?}"
     );
+    assert_eq!(
+        responses[1]["result"]["tools"],
+        Value::Array(mcp::tool_catalog()),
+        "tools/list must stay the complete catalog"
+    );
+    assert_eq!(
+        responses[2]["result"]["isError"], true,
+        "{:?}",
+        responses[2]
+    );
+    assert_eq!(
+        responses[2]["result"]["structuredContent"]["database"],
+        Value::Null,
+        "no repository was resolved, so there is no ledger to name: {:?}",
+        responses[2]
+    );
+    (responses, stderr)
+}
 
+fn assert_unavailable_with(responses: &[Value], stderr: &str, code: &str) -> String {
     let instructions = responses[0]["result"]["instructions"]
         .as_str()
-        .expect("initialize instructions");
+        .expect("initialize instructions")
+        .to_string();
     assert!(
-        instructions.starts_with("Foremerge unavailable: NOT_A_REPOSITORY:"),
+        instructions.starts_with(&format!("Foremerge unavailable: {code}:")),
         "{instructions}"
     );
+    assert_eq!(
+        responses[2]["result"]["structuredContent"]["code"], code,
+        "{:?}",
+        responses[2]
+    );
+    assert!(
+        stderr.contains(&format!("error: {code}:")),
+        "the reason must still reach the client's server log: {stderr}"
+    );
+    instructions
+}
+
+#[test]
+fn mcp_outside_a_repository_serves_the_reason_without_creating_a_stray_store() {
+    // The portable registration resolves its repository from the directory the
+    // client spawns the server in. Outside a repository there is no answer, and
+    // silently coordinating against a store created beside the spawn directory
+    // would be worse than refusing. The server still completes the handshake,
+    // because registry checkers and clients launched from a home directory
+    // spawn it outside any repository, and a server that exits reaches them
+    // as nothing but a closed connection.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let outside = temp.path().canonicalize().expect("canonicalize temp dir");
+    let (responses, stderr) = mcp_session_without_a_store(&outside, None);
+    let instructions = assert_unavailable_with(&responses, &stderr, "NOT_A_REPOSITORY");
     assert!(
         instructions.contains(&outside.display().to_string()),
         "the reason must name the directory it was spawned in: {instructions}"
@@ -4097,29 +4137,49 @@ fn mcp_outside_a_repository_serves_the_reason_without_creating_a_stray_store() {
         instructions.contains("--cwd"),
         "the instructions must name the operator's action: {instructions}"
     );
-    assert_eq!(
-        responses[1]["result"]["tools"],
-        Value::Array(mcp::tool_catalog()),
-        "tools/list must stay the complete catalog"
-    );
-    let refused = &responses[2]["result"];
-    assert_eq!(refused["isError"], true, "{refused}");
-    assert_eq!(
-        refused["structuredContent"]["code"], "NOT_A_REPOSITORY",
-        "{refused}"
-    );
-    assert_eq!(
-        refused["structuredContent"]["database"],
-        Value::Null,
-        "there is no ledger to name outside a repository: {refused}"
-    );
-    assert!(
-        stderr.contains("error: NOT_A_REPOSITORY:")
-            && stderr.contains(&outside.display().to_string()),
-        "the reason must still reach the client's server log: {stderr}"
-    );
     assert!(
         !outside.join(".foremerge").exists(),
+        "serving the reason must not leave a stray store behind"
+    );
+}
+
+#[test]
+fn mcp_in_a_repository_without_git_on_path_does_not_claim_there_is_no_repository() {
+    // The repository is there; the client simply cannot run Git. Telling the
+    // operator to start inside a repository, or that nothing else is wrong,
+    // would send them after the wrong fix.
+    let repo = create_repo();
+    let empty = tempfile::tempdir().expect("empty PATH directory");
+    let (responses, stderr) =
+        mcp_session_without_a_store(&repo.root, Some(empty.path().as_os_str()));
+    let instructions = assert_unavailable_with(&responses, &stderr, "GIT_UNAVAILABLE");
+    assert!(
+        !instructions.contains("Nothing else is wrong"),
+        "{instructions}"
+    );
+    assert!(instructions.contains("Install Git"), "{instructions}");
+}
+
+#[test]
+fn mcp_in_a_repository_git_refuses_keeps_gits_reason() {
+    // A gitfile that points nowhere: there is a repository marker, and Git
+    // refuses it. The same path covers safe.directory ownership protection
+    // and unreadable metadata, which a test cannot portably arrange.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let broken = temp.path().canonicalize().expect("canonicalize temp dir");
+    fs::write(broken.join(".git"), "gitdir: /nonexistent/foremerge-e2e\n").expect("write gitfile");
+    let (responses, stderr) = mcp_session_without_a_store(&broken, None);
+    let instructions = assert_unavailable_with(&responses, &stderr, "REPOSITORY_UNREADABLE");
+    assert!(
+        instructions.contains("git status"),
+        "the remedy must point at Git's own diagnosis: {instructions}"
+    );
+    assert!(
+        !instructions.contains("Nothing else is wrong"),
+        "{instructions}"
+    );
+    assert!(
+        !broken.join(".foremerge").exists(),
         "serving the reason must not leave a stray store behind"
     );
 }

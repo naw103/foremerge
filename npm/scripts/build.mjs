@@ -1,13 +1,20 @@
 #!/usr/bin/env node
 // Builds the npm packages for one Foremerge release into npm/dist/.
 //
-//   node npm/scripts/build.mjs [--version 0.5.0] [--assets DIR]
+//   node npm/scripts/build.mjs [--version 0.5.0] [--assets DIR] [--out DIR]
+//                              [--allow-untagged]
 //
 // Each platform package carries the binaries from that release's GitHub
 // archive, unmodified. Archives are read from --assets when given, otherwise
 // downloaded from the release, and every archive must match the SHA-256 the
 // release published beside it before anything is unpacked. The launcher
 // package is copied from npm/foremerge with its version pins checked.
+//
+// The launcher comes from this checkout, so the checkout must be the release:
+// HEAD must be the commit `v<version>` names and the tree must be clean, or a
+// launcher changed after the tag would ship under a version already released.
+// --allow-untagged skips that for tests and local experiments, and marks every
+// package it writes `private`, which npm refuses to publish.
 //
 // Nothing is published. The script prints the publish commands, platform
 // packages first, because the launcher's optional dependencies must already
@@ -23,7 +30,6 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const npmRoot = path.resolve(here, '..');
 const repoRoot = path.resolve(npmRoot, '..');
 const launcherSource = path.join(npmRoot, 'foremerge');
-const dist = path.join(npmRoot, 'dist');
 
 const TARGETS = [
   { pkg: 'foremerge-darwin-arm64', target: 'aarch64-apple-darwin', os: 'darwin', cpu: 'arm64', label: 'macOS on Apple silicon' },
@@ -38,7 +44,9 @@ function parseArgs(argv) {
   const args = {};
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
-    if (flag === '--version' || flag === '--assets') {
+    if (flag === '--allow-untagged') {
+      args.allowUntagged = true;
+    } else if (flag === '--version' || flag === '--assets' || flag === '--out') {
       const value = argv[i + 1];
       if (!value) fail(`${flag} needs a value`);
       args[flag.slice(2)] = value;
@@ -61,6 +69,25 @@ function readJson(file) {
 
 function writeJson(file, value) {
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function git(...gitArgs) {
+  return execFileSync('git', ['-C', repoRoot, ...gitArgs], { encoding: 'utf8' }).trim();
+}
+
+function requireReleaseCheckout(tag) {
+  let tagged;
+  try {
+    tagged = git('rev-parse', '--verify', '--quiet', `${tag}^{commit}`);
+  } catch {
+    fail(`no ${tag} tag in this checkout; build from the release tag, or pass --allow-untagged for a local build that cannot be published`);
+  }
+  const head = git('rev-parse', 'HEAD');
+  if (head !== tagged) {
+    fail(`HEAD is ${head.slice(0, 12)}, but ${tag} is ${tagged.slice(0, 12)}; run \`git switch --detach ${tag}\` first, so the launcher is the one that release tagged`);
+  }
+  const dirty = git('status', '--porcelain');
+  if (dirty) fail(`the checkout has uncommitted changes, which would ship in the launcher:\n${dirty}`);
 }
 
 function cargoVersion() {
@@ -116,6 +143,11 @@ async function main() {
   const version = args.version || launcher.version;
   const tag = `v${version}`;
 
+  if (args.allowUntagged) {
+    console.warn('build: --allow-untagged: not bound to a release tag; every package is marked private and cannot be published');
+  } else {
+    requireReleaseCheckout(tag);
+  }
   if (launcher.version !== version) {
     fail(`npm/foremerge/package.json is ${launcher.version}, building ${version}`);
   }
@@ -130,6 +162,7 @@ async function main() {
   const extra = Object.keys(pins).filter((name) => !TARGETS.some((t) => t.pkg === name));
   if (extra.length) fail(`npm/foremerge pins unknown packages: ${extra.join(', ')}`);
 
+  const dist = path.resolve(args.out || path.join(npmRoot, 'dist'));
   fs.rmSync(dist, { recursive: true, force: true });
   const work = path.join(dist, '.work');
   fs.mkdirSync(work, { recursive: true });
@@ -179,6 +212,7 @@ async function main() {
       ...(t.libc ? { libc: [t.libc] } : {}),
       files: ['bin'],
       preferUnplugged: true,
+      ...(args.allowUntagged ? { private: true } : {}),
     };
     writeJson(path.join(out, 'package.json'), manifest);
     fs.writeFileSync(path.join(out, 'README.md'), platformReadme(t, version));
@@ -192,10 +226,15 @@ async function main() {
     filter: (source) => !source.includes(`${path.sep}node_modules`),
   });
   fs.copyFileSync(license, path.join(launcherOut, 'LICENSE'));
+  if (args.allowUntagged) {
+    const manifestPath = path.join(launcherOut, 'package.json');
+    writeJson(manifestPath, { ...readJson(manifestPath), private: true });
+  }
   console.log(`build: foremerge@${version} launcher`);
 
   fs.rmSync(work, { recursive: true, force: true });
 
+  if (args.allowUntagged) return;
   console.log('\nPublish platform packages first, then the launcher:');
   for (const t of TARGETS) console.log(`  npm publish --access public ${path.relative(process.cwd(), path.join(dist, t.pkg))}`);
   console.log(`  npm publish --access public ${path.relative(process.cwd(), launcherOut)}`);

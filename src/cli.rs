@@ -944,14 +944,41 @@ async fn execute(cli: Cli) -> Result<Completion> {
             // a repository into coordination.
             if cli.database.is_none() {
                 if let Err(error) = git::discover(&cwd) {
-                    let reason = format!(
-                        "{}: no Git repository at {}; the MCP server resolves its repository from the directory the client spawns it in, so start the client inside a repository or register it with an explicit --cwd: {error:#}",
-                        mcp::NOT_A_REPOSITORY,
-                        cwd.display()
-                    );
+                    // Only a directory with no repository marker anywhere
+                    // above it is outside a repository. Git missing, or Git
+                    // refusing a repository that is there, has a different
+                    // cause and a different fix, so it keeps Git's own error.
+                    let (code, reason) = if !git::available() {
+                        (
+                            mcp::GIT_UNAVAILABLE,
+                            format!(
+                                "{}: could not run git to resolve the repository at {}; Foremerge needs Git on the PATH of the client that starts it: {error:#}",
+                                mcp::GIT_UNAVAILABLE,
+                                cwd.display()
+                            ),
+                        )
+                    } else if !git::repository_marker_exists(&cwd) {
+                        (
+                            mcp::NOT_A_REPOSITORY,
+                            format!(
+                                "{}: no Git repository at {}; the MCP server resolves its repository from the directory the client spawns it in, so start the client inside a repository or register it with an explicit --cwd",
+                                mcp::NOT_A_REPOSITORY,
+                                cwd.display()
+                            ),
+                        )
+                    } else {
+                        (
+                            mcp::REPOSITORY_UNREADABLE,
+                            format!(
+                                "{}: Git could not open the repository at {}: {error:#}",
+                                mcp::REPOSITORY_UNREADABLE,
+                                cwd.display()
+                            ),
+                        )
+                    };
                     eprintln!("error: {reason}");
-                    return mcp::run_stdio_unavailable(mcp::StoreUnavailable::outside_repository(
-                        reason,
+                    return mcp::run_stdio_unavailable(mcp::StoreUnavailable::without_repository(
+                        code, reason,
                     ))
                     .await
                     .map(|()| completion);
