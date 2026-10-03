@@ -482,6 +482,15 @@ the session is not coordinated with other agents.
   is created, so `structuredContent.database` is `null`. Registry and directory
   checkers start servers this way to read the handshake and tool list, which
   both still work.
+- `GIT_UNAVAILABLE` means the server could not run `git`. Clients started from
+  a desktop launcher do not inherit your shell's `PATH`, so Git can be
+  installed and still missing for them. Make it available on the client's
+  `PATH`, then restart the client.
+- `REPOSITORY_UNREADABLE` means there is a repository but Git refused to open
+  it. The message carries Git's own error. Run `git status` there as the user
+  the client runs as: common causes are `safe.directory` ownership protection,
+  a `.git` file pointing at a worktree that no longer exists, and metadata that
+  user cannot read.
 - `UNSUPPORTED_SCHEMA` means a newer Foremerge build has already migrated the
   ledger. From 0.4.3 the message names that build's version when the ledger
   recorded it. Upgrade the binary the client launches to that version or newer,
@@ -553,7 +562,8 @@ your shell or each client's MCP server, has to run the same version.
 `foremerge setup` writes the absolute path of the binary that ran it into each
 client's MCP configuration, because clients started from a desktop launcher do
 not inherit your shell's `PATH`. The installers put that binary in different
-places: `install.sh` in `~/.local/bin` and `cargo install` in `~/.cargo/bin`.
+places: `install.sh` in `~/.local/bin`, `cargo install` in `~/.cargo/bin`, and
+`npm install -g` in the platform package under npm's global `node_modules`.
 Upgrading with a different method than you installed with leaves two binaries:
 your shell runs the new one and your clients still launch the old one, and the
 first command you run migrates the ledger out from under them.
@@ -562,7 +572,9 @@ To upgrade:
 
 1. Upgrade with the method you installed with. If you have used both, remove
    one copy. `foremerge doctor` lists every installation it finds in
-   `installations` and warns about each one besides the running binary. It
+   `installations` and warns about each one besides the running binary. The
+   npm launcher on `PATH` is listed with `npm_launcher: true` and no warning,
+   because it runs the binary it was installed with rather than another one. It
    does not run them to check their versions, so run `<path> --version`
    yourself for any installation you mean to keep.
 2. Close the agent client sessions in each coordinated repository.

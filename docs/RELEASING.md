@@ -70,7 +70,7 @@ Keep the Keep a Changelog headings (`Added`, `Changed`, `Fixed`, `Removed`).
 
 ## 4. Bump every file that carries the version
 
-Six files carry the version string, plus the lockfile. `CHANGELOG.md` is step
+Seven files carry the version string, plus the lockfile. `CHANGELOG.md` is step
 3 and is not repeated here. Missing any one of them ships assets that disagree
 with each other.
 
@@ -83,9 +83,11 @@ with each other.
 | `plugins/foremerge/.claude-plugin/plugin.json` | the Claude Code plugin manifest; the marketplace shows this version and nothing else in this list touches it |
 | `server.json` | the MCP registry entry, in two places: `version` and `packages[0].version`. Both name the crate version, because the registry lists the crates.io package |
 | `npm/foremerge/package.json` | the npm launcher, in six places: `version` and the five pins under `optionalDependencies`. The platform packages are generated from it in step 9 |
+| `npm/foremerge/README.md` | the npm package page: the pinned `foremerge@<version>` in the install and `npx` examples |
 
 `tests/skill_parity.rs` fails when the plugin manifest, either version in
-`server.json`, or any version in the npm launcher falls behind the crate. That test is the backstop, not the
+`server.json`, or any version in the npm launcher or its README falls behind
+the crate. That test is the backstop, not the
 checklist.
 
 Then sweep for anything the table does not know about. Run it before tagging,
@@ -191,11 +193,17 @@ optional.
 The npm packages carry the GitHub release's binaries, so they can only be built
 once the release exists. The build downloads each archive, refuses any whose
 SHA-256 differs from the digest the release published beside it, and writes
-six packages to `npm/dist/`, which is ignored:
+six packages to `npm/dist/`, which is ignored. The launcher package is copied
+from the checkout, so the build refuses to run unless `HEAD` is the commit the
+tag names and the tree is clean:
 
 ```console
+git switch --detach v<version>
 node npm/scripts/build.mjs
 ```
+
+`--allow-untagged` exists for tests and local experiments. It marks every
+package it writes `private`, so npm refuses to publish them.
 
 It prints the publish commands. Run them in that order, the five platform
 packages first and `foremerge` last, because the launcher's optional
@@ -204,6 +212,7 @@ the npm account's second factor. Then confirm from a directory that is not a
 repository:
 
 ```console
+git switch main
 npx -y foremerge@<version> --version
 ```
 

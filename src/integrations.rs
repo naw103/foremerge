@@ -378,6 +378,10 @@ pub struct Installation {
     pub version: Option<String>,
     /// Whether this is the binary currently running.
     pub this_binary: bool,
+    /// Whether this is the npm package's launcher script for the binary
+    /// currently running. It is not a second installation: it runs this one.
+    #[serde(default)]
+    pub npm_launcher: bool,
 }
 
 fn executable_name() -> &'static str {
@@ -473,15 +477,84 @@ pub fn installations(current_exe: &Path) -> Vec<Installation> {
         if seen.contains(&canonical) {
             continue;
         }
+        let (mut version, this_binary) = version_of(&candidate, current_exe);
+        let npm_launcher = !this_binary && launches_this_binary(&canonical, current_exe);
         seen.push(canonical);
-        let (version, this_binary) = version_of(&candidate, current_exe);
+        if npm_launcher {
+            version = Some(env!("CARGO_PKG_VERSION").to_string());
+        }
         found.push(Installation {
             path: candidate.to_string_lossy().into_owned(),
             version,
             this_binary,
+            npm_launcher,
         });
     }
     found
+}
+
+/// Whether `launcher`, a canonical path found on `PATH`, is the npm
+/// `foremerge` package's launcher for the binary running as `current_exe`.
+///
+/// npm puts a link to the package's `bin/foremerge.js` on `PATH`, and that
+/// script runs the binary from a platform package such as
+/// `foremerge-darwin-arm64`. Without this, every npm install reported its own
+/// launcher as a second installation of unknown version. Nothing is run to
+/// decide: the launcher's manifest must be the `foremerge` package at this
+/// version, pin the running binary's platform package at this version, and
+/// that platform package must be where Node resolves it from the launcher.
+fn launches_this_binary(launcher: &Path, current_exe: &Path) -> bool {
+    let version = env!("CARGO_PKG_VERSION");
+    let manifest = |dir: &Path| -> Option<Value> {
+        serde_json::from_str(&fs::read_to_string(dir.join("package.json")).ok()?).ok()
+    };
+    let Some(launcher_package) = launcher
+        .file_name()
+        .filter(|name| *name == "foremerge.js")
+        .and_then(|_| launcher.parent())
+        .filter(|bin| bin.file_name().is_some_and(|name| name == "bin"))
+        .and_then(Path::parent)
+    else {
+        return false;
+    };
+    let Ok(binary) = current_exe.canonicalize() else {
+        return false;
+    };
+    let Some(platform_package) = binary
+        .parent()
+        .filter(|bin| bin.file_name().is_some_and(|name| name == "bin"))
+        .and_then(Path::parent)
+    else {
+        return false;
+    };
+    let Some(platform_name) = platform_package
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| name.starts_with("foremerge-"))
+    else {
+        return false;
+    };
+    let Some(launcher_manifest) = manifest(launcher_package) else {
+        return false;
+    };
+    let pinned = launcher_manifest["name"] == "foremerge"
+        && launcher_manifest["version"] == version
+        && launcher_manifest["optionalDependencies"][platform_name] == version;
+    let platform_matches = manifest(platform_package).is_some_and(|platform| {
+        platform["name"] == platform_name && platform["version"] == version
+    });
+    // Node looks for a dependency in `node_modules` beside the requiring
+    // package and then in each ancestor's, skipping directories that are
+    // themselves named `node_modules`.
+    let resolved = launcher_package
+        .ancestors()
+        .filter(|directory| {
+            directory
+                .file_name()
+                .is_none_or(|name| name != "node_modules")
+        })
+        .any(|directory| directory.join("node_modules").join(platform_name) == platform_package);
+    pinned && platform_matches && resolved
 }
 
 /// A warning for each other installation. Their versions are not checked,
@@ -496,7 +569,7 @@ pub fn installation_warnings(installations: &[Installation]) -> Vec<String> {
         .map_or("this binary", |value| value.path.as_str());
     installations
         .iter()
-        .filter(|value| !value.this_binary)
+        .filter(|value| !value.this_binary && !value.npm_launcher)
         .map(|value| {
             format!(
                 "Another foremerge is installed at {}, while {this_path} is {current}. Its version was not checked, because that would mean running it. A shell and an MCP client can each launch a different installation, and a newer build migrates the ledger so an older one cannot open it. Keep one installation, or upgrade both the same way, then run `foremerge setup` so every client launches the one you kept.",
@@ -1341,6 +1414,123 @@ fn write_managed(path: &Path, content: &[u8], force: bool) -> Result<FileInstall
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Lay out an npm install the way npm does: the launcher package and its
+    /// platform package, either hoisted side by side or nested under the
+    /// launcher. Returns the launcher script and the platform binary.
+    fn npm_layout(
+        root: &Path,
+        nested: bool,
+        launcher_version: &str,
+        pin: &str,
+    ) -> (PathBuf, PathBuf) {
+        let version = env!("CARGO_PKG_VERSION");
+        let launcher = root.join("lib/node_modules/foremerge");
+        let platform = if nested {
+            launcher.join("node_modules/foremerge-test-platform")
+        } else {
+            root.join("lib/node_modules/foremerge-test-platform")
+        };
+        fs::create_dir_all(launcher.join("bin")).unwrap();
+        fs::create_dir_all(platform.join("bin")).unwrap();
+        fs::write(
+            launcher.join("package.json"),
+            json!({
+                "name": "foremerge",
+                "version": launcher_version,
+                "optionalDependencies": { "foremerge-test-platform": pin }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(launcher.join("bin/foremerge.js"), "#!/usr/bin/env node\n").unwrap();
+        fs::write(
+            platform.join("package.json"),
+            json!({ "name": "foremerge-test-platform", "version": version }).to_string(),
+        )
+        .unwrap();
+        fs::write(platform.join("bin/foremerge"), "binary").unwrap();
+        (
+            launcher.join("bin/foremerge.js").canonicalize().unwrap(),
+            platform.join("bin/foremerge"),
+        )
+    }
+
+    #[test]
+    fn the_npm_launcher_for_this_binary_is_not_a_second_installation() {
+        let version = env!("CARGO_PKG_VERSION");
+        for nested in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let (launcher, binary) = npm_layout(temp.path(), nested, version, version);
+            assert!(launches_this_binary(&launcher, &binary), "nested: {nested}");
+        }
+    }
+
+    #[test]
+    fn an_npm_launcher_that_does_not_pin_this_binary_is_still_reported() {
+        let version = env!("CARGO_PKG_VERSION");
+        let temp = tempfile::tempdir().unwrap();
+        let (launcher, binary) = npm_layout(temp.path(), false, "0.0.1", version);
+        assert!(
+            !launches_this_binary(&launcher, &binary),
+            "launcher version differs"
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let (launcher, binary) = npm_layout(temp.path(), false, version, "0.0.1");
+        assert!(
+            !launches_this_binary(&launcher, &binary),
+            "platform pin differs"
+        );
+
+        // The same packages, but this binary is a copy Node would not resolve
+        // from the launcher, so the launcher runs some other binary.
+        let temp = tempfile::tempdir().unwrap();
+        let (launcher, _) = npm_layout(temp.path(), false, version, version);
+        let elsewhere = tempfile::tempdir().unwrap();
+        let (_, other_binary) = npm_layout(elsewhere.path(), false, version, version);
+        assert!(
+            !launches_this_binary(&launcher, &other_binary),
+            "unrelated binary"
+        );
+
+        // Not a launcher script at all.
+        let temp = tempfile::tempdir().unwrap();
+        let (_, binary) = npm_layout(temp.path(), false, version, version);
+        let script = temp.path().join("lib/node_modules/foremerge/bin/other.js");
+        fs::write(&script, "").unwrap();
+        assert!(!launches_this_binary(
+            &script.canonicalize().unwrap(),
+            &binary
+        ));
+    }
+
+    #[test]
+    fn installation_warnings_skip_the_npm_launcher() {
+        let installations = vec![
+            Installation {
+                path: "/prefix/lib/node_modules/foremerge-x/bin/foremerge".to_string(),
+                version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                this_binary: true,
+                npm_launcher: false,
+            },
+            Installation {
+                path: "/prefix/bin/foremerge".to_string(),
+                version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                this_binary: false,
+                npm_launcher: true,
+            },
+            Installation {
+                path: "/home/user/.local/bin/foremerge".to_string(),
+                version: None,
+                this_binary: false,
+                npm_launcher: false,
+            },
+        ];
+        let warnings = installation_warnings(&installations);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("/home/user/.local/bin/foremerge"));
+    }
 
     #[test]
     fn project_integrations_merge_without_clobbering_other_servers() {

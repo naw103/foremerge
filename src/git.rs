@@ -54,6 +54,22 @@ pub fn available() -> bool {
     Command::new("git").arg("--version").output().is_ok()
 }
 
+/// Whether anything at or above `start` could make it a repository: a `.git`
+/// directory or gitfile, or `GIT_DIR` in the environment.
+///
+/// This tells "not a repository" apart from "a repository Git refused to
+/// open" (dubious ownership, a broken gitfile, unreadable metadata) without
+/// parsing Git's messages, which follow the user's locale. A `false` here
+/// means no answer exists; a `true` alongside a failed [`discover`] means Git
+/// had one and refused it, and its own error says why.
+pub fn repository_marker_exists(start: impl AsRef<Path>) -> bool {
+    std::env::var_os("GIT_DIR").is_some()
+        || start
+            .as_ref()
+            .ancestors()
+            .any(|directory| std::fs::symlink_metadata(directory.join(".git")).is_ok())
+}
+
 pub fn discover(start: impl AsRef<Path>) -> Result<RepoContext> {
     let start = start.as_ref();
     let root = git_output(start, &["rev-parse", "--show-toplevel"])

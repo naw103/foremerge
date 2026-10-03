@@ -141,6 +141,35 @@ fn the_npm_launcher_versions_match_the_crate_version() {
             "every platform package pin must be bumped with the crate: {package}"
         );
     }
+
+    // The package README pins the version in its install and `npx` examples,
+    // because an unpinned `npx` registration can change versions on its own
+    // and migrate the ledger out from under every other client.
+    let readme = read(&repo_root().join("npm/foremerge/README.md"));
+    let pins: Vec<&str> = readme
+        .split("foremerge@")
+        .skip(1)
+        .map(|rest| {
+            rest.split(|character: char| {
+                !(character.is_ascii_alphanumeric()
+                    || character == '.'
+                    || character == '-'
+                    || character == '<'
+                    || character == '>')
+            })
+            .next()
+            .unwrap_or_default()
+        })
+        .filter(|pin| *pin != "<version>")
+        .collect();
+    assert!(!pins.is_empty(), "npm/foremerge/README.md pins a version");
+    for pin in pins {
+        assert_eq!(
+            pin,
+            env!("CARGO_PKG_VERSION"),
+            "every version pinned in npm/foremerge/README.md must be bumped with the crate"
+        );
+    }
 }
 
 /// A plugin directory is not installable on its own. Claude Code resolves

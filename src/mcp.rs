@@ -53,8 +53,8 @@ const INSTRUCTIONS: &str = "Publish intent and the scopes you will change, decla
 pub struct StoreUnavailable {
     code: String,
     message: String,
-    /// The ledger that could not be opened, or `None` when the server was
-    /// started outside a repository and so has no ledger to name.
+    /// The ledger that could not be opened, or `None` when no repository was
+    /// resolved and so there is no ledger to name.
     database: Option<String>,
     remedy: String,
 }
@@ -73,17 +73,18 @@ impl StoreUnavailable {
         }
     }
 
-    /// The server was started outside a Git repository, so there is no
-    /// ledger to open. Directory and registry checkers start servers that
-    /// way to read the handshake and the tool catalog, and so do clients
-    /// launched from a home directory; exiting would show either one nothing
-    /// but a closed connection.
-    pub fn outside_repository(message: impl Into<String>) -> Self {
+    /// No repository was resolved, so there is no ledger to open: `code` is
+    /// [`NOT_A_REPOSITORY`], [`GIT_UNAVAILABLE`] or [`REPOSITORY_UNREADABLE`].
+    /// Directory and registry checkers start servers outside any repository
+    /// to read the handshake and the tool catalog, and so do clients launched
+    /// from a home directory; exiting would show them nothing but a closed
+    /// connection.
+    pub fn without_repository(code: &str, message: impl Into<String>) -> Self {
         Self {
-            code: NOT_A_REPOSITORY.to_string(),
+            code: code.to_string(),
             message: message.into(),
             database: None,
-            remedy: remedy(NOT_A_REPOSITORY),
+            remedy: remedy(code),
         }
     }
 
@@ -95,7 +96,7 @@ impl StoreUnavailable {
                 self.remedy
             ),
             None => format!(
-                "Foremerge unavailable: {reason}. The server is running, but it was not started inside a Git repository, so there is no coordination ledger, every Foremerge tool returns this error, and this session is not coordinated with other agents. {UNAVAILABLE_GUIDANCE} For the user: {}",
+                "Foremerge unavailable: {reason}. The server is running, but it could not resolve a Git repository where it was started, so there is no coordination ledger, every Foremerge tool returns this error, and this session is not coordinated with other agents. {UNAVAILABLE_GUIDANCE} For the user: {}",
                 self.remedy
             ),
         }
@@ -132,6 +133,13 @@ impl StoreUnavailable {
 /// repository.
 pub const NOT_A_REPOSITORY: &str = "NOT_A_REPOSITORY";
 
+/// The code an unavailable server reports when it could not run Git at all.
+pub const GIT_UNAVAILABLE: &str = "GIT_UNAVAILABLE";
+
+/// The code an unavailable server reports when a repository is there but Git
+/// refused to open it.
+pub const REPOSITORY_UNREADABLE: &str = "REPOSITORY_UNREADABLE";
+
 const UNAVAILABLE_GUIDANCE: &str = "Tell the user and leave the fix to them: do not delete, move, or edit the ledger, and do not change the MCP client configuration.";
 
 /// What the operator does about a store the server could not open.
@@ -143,6 +151,17 @@ fn remedy(code: &str) -> String {
         // choice, so the server names both ways to make it.
         format!(
             "Start the client from inside the repository you want coordinated, or register the server as `foremerge --cwd /absolute/path/to/repository mcp`, {RELAUNCH}. Nothing else is wrong."
+        )
+    } else if code == GIT_UNAVAILABLE {
+        format!(
+            "Install Git, or make it available on the PATH of the client that starts Foremerge, {RELAUNCH}."
+        )
+    } else if code == REPOSITORY_UNREADABLE {
+        // Git's own error, carried in the message, names the cause: commonly
+        // `safe.directory` ownership protection, a gitfile pointing nowhere,
+        // or metadata the client's user cannot read.
+        format!(
+            "Run `git status` in that directory as the user the client runs as, fix what Git reports there, {RELAUNCH}."
         )
     } else if code == "NOT_INITIALIZED" {
         // Initializing a repository is the operator's decision, so the server
@@ -1599,7 +1618,8 @@ mod tests {
 
     #[tokio::test]
     async fn outside_a_repository_the_handshake_names_no_ledger_and_the_way_in() {
-        let unavailable = StoreUnavailable::outside_repository(
+        let unavailable = StoreUnavailable::without_repository(
+            NOT_A_REPOSITORY,
             "NOT_A_REPOSITORY: no Git repository at /home/user; start the client inside a repository",
         );
         let backend = Backend::Unavailable(&unavailable);
@@ -1621,7 +1641,7 @@ mod tests {
             "{instructions}"
         );
         assert!(
-            instructions.contains("not started inside a Git repository"),
+            instructions.contains("could not resolve a Git repository"),
             "{instructions}"
         );
         assert!(instructions.contains("--cwd"), "{instructions}");

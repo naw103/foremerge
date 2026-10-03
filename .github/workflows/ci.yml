@@ -107,3 +107,65 @@ jobs:
       - name: Test Windows validation timeout cleanup
         if: runner.os == 'Windows'
         run: cargo test --test e2e validation_timeout_kills_direct_child_on_windows -- --exact --nocapture
+
+  npm:
+    name: npm launcher ${{ matrix.os }} Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # 18 is the launcher's `engines` floor.
+        node: ["18", current]
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Test the launcher
+        run: npm test --prefix npm/foremerge
+
+      # The fixtures pack archives with tar and zip, as the release does.
+      - name: Test the package builder
+        if: runner.os != 'Windows'
+        run: node --test npm/scripts/build.test.mjs
+
+  npm-smoke:
+    name: npm install smoke ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Select stable Rust
+        run: rustup override set stable
+
+      - name: Install Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: current
+
+      - name: Build binaries
+        run: cargo build --locked --bins
+
+      - name: Install the packed tarballs and run them
+        run: node npm/scripts/smoke.mjs --binaries target/debug

@@ -19,7 +19,21 @@ changes when they are called out here with a migration note.
   remedy naming `--cwd`. It still creates no store. MCP registry and directory
   checkers verify servers with a live handshake from a directory that is not a
   repository, and clients launched from a home directory do the same; both saw
-  only a closed connection before. The reason still goes to stderr.
+  only a closed connection before. The reason still goes to stderr. A
+  repository that is there but cannot be resolved is not reported as missing:
+  Git absent from the client's `PATH` answers `GIT_UNAVAILABLE`, and a
+  repository Git refuses to open (`safe.directory` ownership, a broken
+  gitfile, unreadable metadata) answers `REPOSITORY_UNREADABLE` with Git's own
+  error.
+
+### Added
+
+- Foremerge is installable from npm: `npm install -g foremerge`. The
+  `foremerge` package selects one of five platform packages carrying the
+  release binaries unchanged, so nothing is downloaded or compiled at install
+  time and there are no install scripts. `foremerge doctor` lists the npm
+  launcher on `PATH` with `npm_launcher: true` and does not warn about it as
+  a second installation, since it runs the binary it was installed with.
 
 - The agent skill, the MCP server's instructions and the MCP tool descriptions
   now say that coordination covers every file meant to land in the repository,
