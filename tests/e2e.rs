@@ -4016,43 +4016,111 @@ fn setup_codex_registers_the_global_mcp_entry_and_is_idempotent() {
 }
 
 #[test]
-fn mcp_outside_a_repository_fails_instead_of_creating_a_stray_store() {
+fn mcp_outside_a_repository_serves_the_reason_without_creating_a_stray_store() {
     // The portable registration resolves its repository from the directory the
     // client spawns the server in. Outside a repository there is no answer, and
     // silently coordinating against a store created beside the spawn directory
-    // would be worse than refusing.
+    // would be worse than refusing. The server still completes the handshake,
+    // because registry checkers and clients launched from a home directory
+    // spawn it outside any repository, and a server that exits reaches them
+    // as nothing but a closed connection.
     let temp = tempfile::tempdir().expect("temp dir");
     let outside = temp.path().canonicalize().expect("canonicalize temp dir");
-    let output = Command::new(foremerge_bin())
+    let mut child = Command::new(foremerge_bin())
         .arg("--json")
         .arg("--cwd")
         .arg(&outside)
         .arg("mcp")
-        .output()
-        .expect("run foremerge mcp");
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn foremerge mcp");
+    let mut stdin = child.stdin.take().expect("MCP stdin");
+    let requests = [
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "foremerge-e2e", "version": "1" }
+            }
+        }),
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": { "name": "status", "arguments": {} }
+        }),
+    ];
+    for request in requests {
+        writeln!(stdin, "{request}").expect("write MCP request");
+    }
+    drop(stdin);
+
+    let output = child.wait_with_output().expect("wait for MCP server");
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        !output.status.success(),
-        "mcp must refuse outside a repository"
-    );
-    // The diagnosis goes to stderr: anything written to stdout would corrupt
-    // the JSON-RPC stream the client is reading.
-    assert!(
-        output.stdout.is_empty(),
-        "mcp must not write to stdout before the stream is usable: {}",
+        output.status.success(),
+        "MCP process failed\nstdout: {}\nstderr: {stderr}",
         String::from_utf8_lossy(&output.stdout)
     );
-    let message = String::from_utf8_lossy(&output.stderr);
+    // Every stdout line is protocol: a diagnosis written there would corrupt
+    // the JSON-RPC stream the client is reading.
+    let responses = String::from_utf8(output.stdout)
+        .expect("MCP output is UTF-8")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).expect("every MCP stdout line is JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        responses.len(),
+        3,
+        "every request gets an answer: {responses:?}"
+    );
+
+    let instructions = responses[0]["result"]["instructions"]
+        .as_str()
+        .expect("initialize instructions");
     assert!(
-        message.contains("INVALID_INPUT"),
-        "the refusal must carry a typed code: {message}"
+        instructions.starts_with("Foremerge unavailable: NOT_A_REPOSITORY:"),
+        "{instructions}"
     );
     assert!(
-        message.contains(&outside.display().to_string()),
-        "the error must name the directory it was spawned in: {message}"
+        instructions.contains(&outside.display().to_string()),
+        "the reason must name the directory it was spawned in: {instructions}"
+    );
+    assert!(
+        instructions.contains("--cwd"),
+        "the instructions must name the operator's action: {instructions}"
+    );
+    assert_eq!(
+        responses[1]["result"]["tools"],
+        Value::Array(mcp::tool_catalog()),
+        "tools/list must stay the complete catalog"
+    );
+    let refused = &responses[2]["result"];
+    assert_eq!(refused["isError"], true, "{refused}");
+    assert_eq!(
+        refused["structuredContent"]["code"], "NOT_A_REPOSITORY",
+        "{refused}"
+    );
+    assert_eq!(
+        refused["structuredContent"]["database"],
+        Value::Null,
+        "there is no ledger to name outside a repository: {refused}"
+    );
+    assert!(
+        stderr.contains("error: NOT_A_REPOSITORY:")
+            && stderr.contains(&outside.display().to_string()),
+        "the reason must still reach the client's server log: {stderr}"
     );
     assert!(
         !outside.join(".foremerge").exists(),
-        "refusing must not leave a stray store behind"
+        "serving the reason must not leave a stray store behind"
     );
 }
 

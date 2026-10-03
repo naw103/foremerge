@@ -92,12 +92,13 @@ does, from the directory the client spawns it in:
 repository.** Not every client does. Cline has been reported to start stdio
 servers with a working directory of `/` rather than the open workspace
 ([cline#9950](https://github.com/cline/cline/issues/9950)); in that case the
-server exits before serving a single request:
+server starts but coordinates nothing: every tool returns `NOT_A_REPOSITORY`,
+and the `initialize` instructions begin:
 
 ```
-INVALID_INPUT: no Git repository at /; the MCP server resolves its repository
-from the directory the client spawns it in, so start the client inside a
-repository or register it with an explicit --cwd
+Foremerge unavailable: NOT_A_REPOSITORY: no Git repository at /; the MCP server
+resolves its repository from the directory the client spawns it in, so start
+the client inside a repository or register it with an explicit --cwd
 ```
 
 Pass the repository as an argument rather than relying on the spawn directory.
