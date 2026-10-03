@@ -2,7 +2,7 @@
 //
 //   node --test npm/scripts/build.test.mjs
 //
-// Needs `tar` and `zip`, so CI runs it on Linux and macOS.
+// Needs `git`, `tar`, and `zip`, so CI runs it on Linux and macOS.
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -143,4 +143,101 @@ test('a version the launcher does not pin is refused', () => {
   const result = runBuild(['--allow-untagged', '--version', '999.0.0', '--assets', assets, '--out', path.join(root, 'out')]);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, new RegExp(`npm/foremerge/package.json is ${version.replace(/\./g, '\\.')}, building 999\\.0\\.0`));
+});
+
+test('--out refuses a directory this script did not write, and leaves it alone', () => {
+  const root = scratch();
+  const assets = path.join(root, 'assets');
+  writeAssets(assets, version);
+  const precious = path.join(root, 'precious');
+  fs.mkdirSync(precious);
+  fs.writeFileSync(path.join(precious, 'sentinel'), 'keep me');
+  const result = runBuild(['--allow-untagged', '--assets', assets, '--out', precious]);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /already holds files this script did not write/);
+  assert.equal(fs.readFileSync(path.join(precious, 'sentinel'), 'utf8'), 'keep me');
+  assert.deepEqual(fs.readdirSync(precious), ['sentinel']);
+});
+
+test('--out refuses the checkout and anything containing it', () => {
+  const root = scratch();
+  const assets = path.join(root, 'assets');
+  writeAssets(assets, version);
+  const checkout = path.resolve(here, '..', '..');
+  for (const out of [checkout, path.dirname(checkout)]) {
+    const result = runBuild(['--allow-untagged', '--assets', assets, '--out', out]);
+    assert.notEqual(result.status, 0, out);
+    assert.match(result.stderr, /contains the checkout/, out);
+  }
+  const inside = path.join(here, '..', 'foremerge', 'out');
+  const result = runBuild(['--allow-untagged', '--assets', assets, '--out', inside]);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /inside npm\/foremerge/);
+  assert.ok(!fs.existsSync(inside));
+});
+
+test('--out replaces its own earlier output', () => {
+  const root = scratch();
+  const assets = path.join(root, 'assets');
+  const out = path.join(root, 'out');
+  writeAssets(assets, version);
+  assert.equal(runBuild(['--allow-untagged', '--assets', assets, '--out', out]).status, 0);
+  fs.writeFileSync(path.join(out, 'stale'), 'from an earlier run');
+  const again = runBuild(['--allow-untagged', '--assets', assets, '--out', out]);
+  assert.equal(again.status, 0, again.stderr);
+  assert.ok(!fs.existsSync(path.join(out, 'stale')));
+});
+
+// A throwaway repository holding just what the build reads, committed and
+// tagged the way a release is, so release mode runs for real.
+function taggedCheckout() {
+  const root = scratch();
+  const repo = path.join(root, 'repo');
+  const source = path.resolve(here, '..', '..');
+  fs.mkdirSync(path.join(repo, 'npm'), { recursive: true });
+  fs.cpSync(path.join(source, 'npm', 'foremerge'), path.join(repo, 'npm', 'foremerge'), {
+    recursive: true,
+    filter: (file) => !file.includes(`${path.sep}node_modules`),
+  });
+  fs.cpSync(path.join(source, 'npm', 'scripts'), path.join(repo, 'npm', 'scripts'), { recursive: true });
+  for (const file of ['Cargo.toml', 'LICENSE']) fs.copyFileSync(path.join(source, file), path.join(repo, file));
+  fs.writeFileSync(path.join(repo, '.gitignore'), '/out/\n');
+  const git = (...args) =>
+    execFileSync('git', ['-C', repo, '-c', 'user.name=Foremerge Test', '-c', 'user.email=test@example.invalid', '-c', 'commit.gpgsign=false', '-c', 'tag.gpgsign=false', ...args], { encoding: 'utf8' });
+  git('init', '--quiet');
+  git('add', '.');
+  git('commit', '--quiet', '-m', 'release');
+  git('tag', '-a', `v${version}`, '-m', 'release');
+  return { root, repo, git, build: path.join(repo, 'npm', 'scripts', 'build.mjs') };
+}
+
+test('release mode builds publishable packages from a clean checkout of the tag', () => {
+  const { root, repo, build: tagged } = taggedCheckout();
+  const assets = path.join(root, 'assets');
+  writeAssets(assets, version);
+  const result = spawnSync(process.execPath, [tagged, '--assets', assets, '--out', path.join(repo, 'out')], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Publish platform packages first/);
+  for (const name of ['foremerge', ...Object.keys(launcher.optionalDependencies)]) {
+    const manifest = JSON.parse(fs.readFileSync(path.join(repo, 'out', name, 'package.json'), 'utf8'));
+    assert.equal(manifest.private, undefined, `${name} must be publishable from the tag`);
+  }
+});
+
+test('release mode refuses uncommitted changes and commits after the tag', () => {
+  const { root, repo, git, build: tagged } = taggedCheckout();
+  const assets = path.join(root, 'assets');
+  writeAssets(assets, version);
+  const buildTagged = () =>
+    spawnSync(process.execPath, [tagged, '--assets', assets, '--out', path.join(repo, 'out')], { encoding: 'utf8' });
+
+  fs.appendFileSync(path.join(repo, 'npm', 'foremerge', 'lib', 'run.js'), '\n// edited after the tag\n');
+  let result = buildTagged();
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /uncommitted changes/);
+
+  git('commit', '--quiet', '-am', 'after the tag');
+  result = buildTagged();
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, new RegExp(`HEAD is [0-9a-f]{12}, but v${version.replace(/\./g, '\\.')} is`));
 });

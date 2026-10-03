@@ -36,6 +36,7 @@ silently omit commits the original branch has gained since.
 ```console
 make verify
 make msrv
+make npm-test
 ```
 
 `make verify` runs fmt, check, clippy, the full test suite, the `query-smoke`
@@ -45,7 +46,11 @@ on the pinned minimum supported Rust version, currently 1.85.0. Clippy's lint se
 differs between the MSRV toolchain and stable, so a green `make verify` on a
 newer toolchain does not predict a green CI run.
 
-Both must pass before the version bump, not after.
+`make npm-test` runs the npm launcher's tests and the package builder's, which
+need Node 18 or newer, `git`, `tar` and `zip`. CI's `npm` and `npm-smoke` jobs
+cover the other platforms and an install of the packed tarballs.
+
+All three must pass before the version bump, not after.
 
 `make verify` only ever runs on the platform you are sitting at. macOS and
 Windows coverage comes from CI's `platform` job, which runs on every pull
@@ -189,6 +194,9 @@ crates.io version cannot be replaced, only yanked, so the dry run is not
 optional.
 
 ### Then npm
+
+The first npm release is 0.5.1. Earlier tags predate the npm packaging, so the
+build below cannot run from them, by design.
 
 The npm packages carry the GitHub release's binaries, so they can only be built
 once the release exists. The build downloads each archive, refuses any whose
