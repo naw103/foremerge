@@ -25,6 +25,18 @@ changes when they are called out here with a migration note.
   repository Git refuses to open (`safe.directory` ownership, a broken
   gitfile, unreadable metadata) answers `REPOSITORY_UNREADABLE` with Git's own
   error.
+- The agent skill, the MCP server's instructions and the MCP tool descriptions
+  now say that coordination covers every file meant to land in the repository,
+  new files and documents included, not only code. Plans, specs and runbooks
+  are rewritten wholesale more often than code is, and two overlapping rewrites
+  rarely merge cleanly. `publish_intent` is described as the first write for a
+  task the agent is committed to rather than the first call for every task:
+  while only planning, the skill and the tool descriptions point to
+  `check_conflicts`, which stores nothing and runs the same comparison as
+  publishing. The skill notes that `query_work` matches a scope exactly and can
+  miss related work on its own. It also tells an agent to stop and
+  tell the user when an uncoordinated file changes underneath it rather than
+  overwriting the change. Tool names, schemas and behaviour are unchanged.
 
 ### Added
 
@@ -38,19 +50,6 @@ changes when they are called out here with a migration note.
   shim, `doctor` recognises it in a global prefix, a project's
   `node_modules\.bin` and an `npx` run, and warns about any other npm
   installation's shim.
-
-- The agent skill, the MCP server's instructions and the MCP tool descriptions
-  now say that coordination covers every file meant to land in the repository,
-  new files and documents included, not only code. Plans, specs and runbooks
-  are rewritten wholesale more often than code is, and two overlapping rewrites
-  rarely merge cleanly. `publish_intent` is described as the first write for a
-  task the agent is committed to rather than the first call for every task:
-  while only planning, the skill and the tool descriptions point to
-  `check_conflicts`, which stores nothing and runs the same comparison as
-  publishing. The skill notes that `query_work` matches a scope exactly and can
-  miss related work on its own. It also tells an agent to stop and
-  tell the user when an uncoordinated file changes underneath it rather than
-  overwriting the change. Tool names, schemas and behaviour are unchanged.
 
 ### Fixed
 
