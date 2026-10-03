@@ -132,6 +132,14 @@ curl -fsSL https://foremerge.com/install.sh | sh
 > binary under a shorter name, so `fmg status` and `foremerge status` do the
 > same thing. Examples below spell out `foremerge`; type whichever you prefer.
 
+Or install from npm (macOS, Linux with glibc, Windows x64). The package
+carries the same release binaries, so nothing is compiled or downloaded at
+install time:
+
+```sh
+npm install -g foremerge
+```
+
 Or build from source with Rust 1.85+: `cargo install --locked --git
 https://github.com/naw103/foremerge foremerge`, or `cargo install --locked
 --path .` from a checkout. Windows binaries are on the

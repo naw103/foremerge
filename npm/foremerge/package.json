@@ -1,0 +1,45 @@
+{
+  "name": "foremerge",
+  "version": "0.5.0",
+  "description": "Coordinate parallel coding agents, above Git. Installs the Foremerge CLI and MCP server.",
+  "license": "Apache-2.0",
+  "homepage": "https://foremerge.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/naw103/foremerge.git",
+    "directory": "npm/foremerge"
+  },
+  "bugs": "https://github.com/naw103/foremerge/issues",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "coding-agents",
+    "git",
+    "coordination",
+    "claude-code",
+    "codex",
+    "cursor"
+  ],
+  "mcpName": "io.github.naw103/foremerge",
+  "bin": {
+    "foremerge": "bin/foremerge.js",
+    "fmg": "bin/fmg.js"
+  },
+  "files": [
+    "bin",
+    "lib"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "optionalDependencies": {
+    "foremerge-darwin-arm64": "0.5.0",
+    "foremerge-darwin-x64": "0.5.0",
+    "foremerge-linux-arm64": "0.5.0",
+    "foremerge-linux-x64": "0.5.0",
+    "foremerge-win32-x64": "0.5.0"
+  }
+}
