@@ -201,7 +201,7 @@ function taggedCheckout() {
   });
   fs.cpSync(path.join(source, 'npm', 'scripts'), path.join(repo, 'npm', 'scripts'), { recursive: true });
   for (const file of ['Cargo.toml', 'LICENSE']) fs.copyFileSync(path.join(source, file), path.join(repo, file));
-  fs.writeFileSync(path.join(repo, '.gitignore'), '/out/\n');
+  fs.writeFileSync(path.join(repo, '.gitignore'), '/out/\n*.db\n.DS_Store\n');
   const git = (...args) =>
     execFileSync('git', ['-C', repo, '-c', 'user.name=Foremerge Test', '-c', 'user.email=test@example.invalid', '-c', 'commit.gpgsign=false', '-c', 'tag.gpgsign=false', ...args], { encoding: 'utf8' });
   git('init', '--quiet');
@@ -240,4 +240,22 @@ test('release mode refuses uncommitted changes and commits after the tag', () =>
   result = buildTagged();
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, new RegExp(`HEAD is [0-9a-f]{12}, but v${version.replace(/\./g, '\\.')} is`));
+});
+
+test('release mode packs the launcher from the tag, not from ignored files beside it', () => {
+  const { root, repo, build: tagged } = taggedCheckout();
+  const assets = path.join(root, 'assets');
+  writeAssets(assets, version);
+  // Ignored files never show in `git status`, so a clean-tree check cannot
+  // see them. Only what the tag holds may reach the published launcher.
+  fs.writeFileSync(path.join(repo, 'npm', 'foremerge', 'lib', 'ledger.db'), 'not for publishing');
+  fs.writeFileSync(path.join(repo, 'npm', 'foremerge', 'bin', '.DS_Store'), 'not for publishing');
+  const out = path.join(repo, 'out');
+  const result = spawnSync(process.execPath, [tagged, '--assets', assets, '--out', out], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  const [packed] = JSON.parse(execFileSync('npm', ['pack', '--dry-run', '--json', path.join(out, 'foremerge')], { encoding: 'utf8' }));
+  assert.deepEqual(
+    packed.files.map((file) => file.path).sort(),
+    ['LICENSE', 'README.md', 'bin/fmg.js', 'bin/foremerge.js', 'lib/run.js', 'package.json'],
+  );
 });
