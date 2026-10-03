@@ -70,7 +70,7 @@ Keep the Keep a Changelog headings (`Added`, `Changed`, `Fixed`, `Removed`).
 
 ## 4. Bump every file that carries the version
 
-Five files carry the version string, plus the lockfile. `CHANGELOG.md` is step
+Six files carry the version string, plus the lockfile. `CHANGELOG.md` is step
 3 and is not repeated here. Missing any one of them ships assets that disagree
 with each other.
 
@@ -82,9 +82,10 @@ with each other.
 | `docs/openapi.yaml` | `info.version`, the published API contract |
 | `plugins/foremerge/.claude-plugin/plugin.json` | the Claude Code plugin manifest; the marketplace shows this version and nothing else in this list touches it |
 | `server.json` | the MCP registry entry, in two places: `version` and `packages[0].version`. Both name the crate version, because the registry lists the crates.io package |
+| `npm/foremerge/package.json` | the npm launcher, in six places: `version` and the five pins under `optionalDependencies`. The platform packages are generated from it in step 9 |
 
-`tests/skill_parity.rs` fails when the plugin manifest or either version in
-`server.json` falls behind the crate. That test is the backstop, not the
+`tests/skill_parity.rs` fails when the plugin manifest, either version in
+`server.json`, or any version in the npm launcher falls behind the crate. That test is the backstop, not the
 checklist.
 
 Then sweep for anything the table does not know about. Run it before tagging,
@@ -184,6 +185,30 @@ Naming the package costs nothing and removes the question.
 Publish only after the GitHub release exists, so the two never disagree. A
 crates.io version cannot be replaced, only yanked, so the dry run is not
 optional.
+
+### Then npm
+
+The npm packages carry the GitHub release's binaries, so they can only be built
+once the release exists. The build downloads each archive, refuses any whose
+SHA-256 differs from the digest the release published beside it, and writes
+six packages to `npm/dist/`, which is ignored:
+
+```console
+node npm/scripts/build.mjs
+```
+
+It prints the publish commands. Run them in that order, the five platform
+packages first and `foremerge` last, because the launcher's optional
+dependencies must already exist when anyone installs it. Each publish asks for
+the npm account's second factor. Then confirm from a directory that is not a
+repository:
+
+```console
+npx -y foremerge@<version> --version
+```
+
+An npm version cannot be republished once unpublished, so check the printed
+SHA-256 values against the release page before the first `npm publish`.
 
 ## 10. Update the MCP registry listing
 
@@ -290,12 +315,16 @@ happened in the changelog.
 
 ## Known gaps
 
-Three steps are not automated, and each is a place a release can go wrong quietly:
+Four steps are not automated, and each is a place a release can go wrong quietly:
 
 - **crates.io publishing is manual** (step 9). A `publish-crate` job in
   `release.yml`, gated on the same `release` environment and holding a
   `CARGO_REGISTRY_TOKEN` secret, would make it impossible to forget while
   keeping the approval requirement.
+- **npm publishing is manual** (step 9). A job in `release.yml` after the
+  GitHub release, using npm trusted publishing, would remove the second-factor
+  prompts and add provenance attestations linking each package to the workflow
+  run that built it.
 - **The MCP registry listing is published by hand** (step 10). The entry sat
   unpublished from launch week until 0.5.0 because nothing mentioned it.
   `tests/skill_parity.rs` now fails a release whose `server.json` still names

@@ -111,6 +111,38 @@ fn the_registry_entry_versions_match_the_crate_version() {
     }
 }
 
+/// The npm launcher pins each platform package to its own version, and
+/// `npm/scripts/build.mjs` refuses to package a release that disagrees with
+/// it. A release that forgets the launcher could not be packaged for npm at
+/// all, so catch it here, before the tag.
+#[test]
+fn the_npm_launcher_versions_match_the_crate_version() {
+    let manifest = read(&repo_root().join("npm/foremerge/package.json"));
+    let manifest: Value =
+        serde_json::from_str(&manifest).expect("npm/foremerge/package.json is valid JSON");
+    assert_eq!(
+        manifest["version"]
+            .as_str()
+            .expect("version in package.json"),
+        env!("CARGO_PKG_VERSION"),
+        "npm/foremerge/package.json `version` must be bumped with the crate"
+    );
+    let pins = manifest["optionalDependencies"]
+        .as_object()
+        .expect("the launcher lists its platform packages");
+    assert!(
+        !pins.is_empty(),
+        "the launcher lists at least one platform package"
+    );
+    for (package, version) in pins {
+        assert_eq!(
+            version.as_str(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "every platform package pin must be bumped with the crate: {package}"
+        );
+    }
+}
+
 /// A plugin directory is not installable on its own. Claude Code resolves
 /// `/plugin install <plugin>@<marketplace>` through a marketplace catalogue at
 /// the repository root, so an entry that stops naming the plugin directory
