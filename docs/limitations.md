@@ -142,10 +142,12 @@ repository-local `foremerge` runtime directory reset; they are not an upgrade
 compatibility promise. Tagged-release schema changes will carry migrations and
 changelog guidance.
 
-Migrations run automatically on open, in one transaction, and only forward. A
-build refuses to open a store stamped with a schema newer than it understands
-rather than migrating it backwards, so upgrading one worktree's binary while
-another still runs an older one will make the older one fail closed. From 0.4.3
+Migrations run only when the operator runs `foremerge ledger migrate`, which
+backs the ledger up first; every other command refuses a ledger at an older
+schema with `MIGRATION_REQUIRED`. They run in one transaction, and only forward.
+A build refuses to open a store stamped with a schema newer than it understands
+rather than migrating it backwards, so migrating while another worktree still
+runs an older binary will make the older one fail closed. From 0.4.3
 a build that already has the ledger open checks again on every call, so an MCP
 server that was running when another build migrated the ledger stops instead of
 writing to it. Upgrade every agent on a shared repository together, following
