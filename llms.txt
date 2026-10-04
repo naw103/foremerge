@@ -14,4 +14,7 @@
 - [31 hard questions about coordinating parallel coding agents](https://foremerge.com/blog/31-questions-coordinating-parallel-coding-agents/)
 - [Orchestrators and coordinators are not the same layer](https://foremerge.com/blog/orchestrator-vs-coordinator/)
 ## Install
-- `curl -fsSL https://foremerge.com/install.sh | sh` or `cargo install foremerge`
+- macOS and Linux: `curl -fsSL https://foremerge.com/install.sh | sh`
+- npm on macOS and Linux: `npm install -g foremerge`
+- With Rust: `cargo install --locked foremerge`
+- Windows: binaries on the [releases page](https://github.com/naw103/foremerge/releases)
