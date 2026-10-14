@@ -7,6 +7,13 @@
     <language>en</language>
     <atom:link href="https://foremerge.com/blog/feed.xml" rel="self" type="application/rss+xml"/>
     <item>
+      <title>Running multiple Claude Code agents in parallel: what worktrees cannot see</title>
+      <link>https://foremerge.com/blog/running-multiple-claude-code-agents-in-parallel/</link>
+      <guid isPermaLink="true">https://foremerge.com/blog/running-multiple-claude-code-agents-in-parallel/</guid>
+      <pubDate>Wed, 14 Oct 2026 09:00:00 +0000</pubDate>
+      <description>Give each agent its own worktree, split the work by what each task changes, and test the merged result. That handles files. It does not handle two plans that cannot both be true, and Git will merge those without a word.</description>
+    </item>
+    <item>
       <title>AI agents introduced several new layers to the development stack. You are probably missing this one.</title>
       <link>https://foremerge.com/blog/the-coordination-layer/</link>
       <guid isPermaLink="true">https://foremerge.com/blog/the-coordination-layer/</guid>

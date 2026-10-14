@@ -13,6 +13,7 @@
 - [The coordination layer you are probably missing](https://foremerge.com/blog/the-coordination-layer/)
 - [31 hard questions about coordinating parallel coding agents](https://foremerge.com/blog/31-questions-coordinating-parallel-coding-agents/)
 - [Orchestrators and coordinators are not the same layer](https://foremerge.com/blog/orchestrator-vs-coordinator/)
+- [Running multiple Claude Code agents in parallel](https://foremerge.com/blog/running-multiple-claude-code-agents-in-parallel/)
 ## Install
 - macOS and Linux: `curl -fsSL https://foremerge.com/install.sh | sh`
 - npm on macOS and Linux: `npm install -g foremerge`
