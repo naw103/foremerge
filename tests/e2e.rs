@@ -4547,12 +4547,12 @@ fn mcp_explains_a_ledger_it_cannot_even_inspect_instead_of_exiting() {
 }
 
 #[test]
-fn a_modern_client_probe_over_stdio_is_refused_and_the_handshake_names_this_revision() {
+fn a_malformed_modern_probe_over_stdio_is_refused_and_the_handshake_names_the_legacy_revision() {
     // The 2026-07-28 revision tells a dual-era client to probe `server/discover`
-    // first on stdio and fall back to `initialize` when it is refused. The
-    // server used to answer that probe with a result that satisfied none of
-    // that revision's requirements, which points such a client at a wire
-    // contract this server cannot hold up.
+    // first on stdio and fall back to `initialize` when it is refused. This
+    // probe omits the client capabilities that revision requires on every
+    // request, so it is malformed and refused with `-32602`, and the fallback
+    // must still reach a working legacy session.
     let repo = create_repo();
     let _ = database_from_doctor(&repo.root);
 
@@ -4602,7 +4602,7 @@ fn a_modern_client_probe_over_stdio_is_refused_and_the_handshake_names_this_revi
         3,
         "every request gets an answer: {responses:?}"
     );
-    assert_eq!(responses[0]["error"]["code"], -32601, "{:?}", responses[0]);
+    assert_eq!(responses[0]["error"]["code"], -32602, "{:?}", responses[0]);
     // Exactly the JSON-RPC 2.0 error members. A strict client that finds any
     // other member treats the refusal as unrecognized and waits out its whole
     // probe timeout instead of falling back.
@@ -4625,6 +4625,403 @@ fn a_modern_client_probe_over_stdio_is_refused_and_the_handshake_names_this_revi
         Value::Array(mcp::tool_catalog()),
         "{:?}",
         responses[2]
+    );
+}
+
+/// The per-request `_meta` a 2026-07-28 client sends with every request, in
+/// place of the `initialize` session.
+fn modern_meta() -> Value {
+    json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": { "name": "foremerge-e2e", "version": "1" },
+        "io.modelcontextprotocol/clientCapabilities": {}
+    })
+}
+
+fn modern_request(id: u64, method: &str, mut params: Value) -> Value {
+    params["_meta"] = modern_meta();
+    json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })
+}
+
+fn legacy_initialize(id: u64) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": { "name": "foremerge-e2e", "version": "1" }
+        }
+    })
+}
+
+/// Run `foremerge mcp` from `cwd`, with `--database` when given, send
+/// `requests` one per line, close stdin, and return every response. The
+/// process must exit cleanly and write only protocol to stdout.
+fn mcp_exchange(cwd: &Path, database: Option<&Path>, requests: &[Value]) -> Vec<Value> {
+    let mut command = Command::new(foremerge_bin());
+    command.arg("--cwd").arg(cwd);
+    if let Some(database) = database {
+        command.arg("--database").arg(database);
+    }
+    let mut child = command
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn MCP server");
+    let mut stdin = child.stdin.take().expect("MCP stdin");
+    for request in requests {
+        writeln!(stdin, "{request}").expect("write MCP request");
+    }
+    drop(stdin);
+    let output = child.wait_with_output().expect("wait for MCP server");
+    assert!(
+        output.status.success(),
+        "MCP process failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("MCP output is UTF-8")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).expect("every MCP stdout line is JSON"))
+        .collect()
+}
+
+/// An error response with exactly the JSON-RPC 2.0 members, `data` only
+/// inside `error` and only on the unsupported-version error, and `code`.
+fn assert_strict_error(response: &Value, code: i64) {
+    let mut members: Vec<&str> = response
+        .as_object()
+        .expect("a response object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    members.sort_unstable();
+    assert_eq!(members, ["error", "id", "jsonrpc"], "{response}");
+    assert_eq!(response["error"]["code"], code, "{response}");
+    let mut error_members: Vec<&str> = response["error"]
+        .as_object()
+        .expect("an error object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    error_members.sort_unstable();
+    if code == -32022 {
+        assert_eq!(error_members, ["code", "data", "message"], "{response}");
+    } else {
+        assert_eq!(error_members, ["code", "message"], "{response}");
+    }
+}
+
+fn initialized_repo() -> RepoFixture {
+    let repo = create_repo();
+    let _ = database_from_doctor(&repo.root);
+    repo
+}
+
+#[test]
+fn a_modern_client_discovers_and_calls_a_tool_without_a_handshake() {
+    let repo = initialized_repo();
+    let responses = mcp_exchange(
+        &repo.root,
+        None,
+        &[
+            modern_request(1, "server/discover", json!({})),
+            modern_request(
+                2,
+                "tools/call",
+                json!({ "name": "status", "arguments": {} }),
+            ),
+        ],
+    );
+    assert_eq!(responses.len(), 2, "{responses:?}");
+
+    let discovered = &responses[0]["result"];
+    assert_eq!(responses[0]["id"], 1);
+    assert_eq!(discovered["resultType"], "complete", "{:?}", responses[0]);
+    assert_eq!(
+        discovered["supportedVersions"],
+        json!(["2026-07-28", "2025-11-25"])
+    );
+    assert!(discovered["capabilities"]["tools"].is_object());
+    assert_eq!(
+        discovered["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+        "foremerge"
+    );
+    let instructions = discovered["instructions"]
+        .as_str()
+        .expect("discover instructions");
+    assert!(
+        instructions.starts_with("Publish intent"),
+        "a working store gets the lifecycle instructions: {instructions}"
+    );
+    assert!(discovered["ttlMs"].as_u64().is_some(), "{discovered}");
+    assert_eq!(discovered["cacheScope"], "private");
+    // A modern result carries no legacy handshake members.
+    assert!(discovered.get("protocolVersion").is_none());
+
+    let status = &responses[1]["result"];
+    assert_eq!(status["resultType"], "complete", "{:?}", responses[1]);
+    assert_eq!(status["isError"], false, "{:?}", responses[1]);
+    assert!(status["structuredContent"].is_object(), "{status}");
+    assert_eq!(
+        status["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+        "foremerge"
+    );
+}
+
+#[test]
+fn a_modern_tools_list_carries_caching_hints_and_a_legacy_one_does_not() {
+    let repo = initialized_repo();
+    let responses = mcp_exchange(
+        &repo.root,
+        None,
+        &[
+            modern_request(1, "tools/list", json!({})),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} }),
+        ],
+    );
+    let modern = &responses[0]["result"];
+    assert_eq!(modern["resultType"], "complete", "{modern}");
+    assert_eq!(modern["tools"], Value::Array(mcp::tool_catalog()));
+    assert!(
+        modern["ttlMs"].as_u64().is_some_and(|ttl| ttl > 0),
+        "{modern}"
+    );
+    assert_eq!(modern["cacheScope"], "public", "{modern}");
+
+    let legacy = &responses[1]["result"];
+    assert_eq!(legacy["tools"], modern["tools"]);
+    for member in ["resultType", "ttlMs", "cacheScope"] {
+        assert!(legacy.get(member).is_none(), "{member}: {legacy}");
+    }
+}
+
+#[test]
+fn ping_is_removed_for_a_modern_request_and_kept_for_a_legacy_session() {
+    let repo = initialized_repo();
+    let responses = mcp_exchange(
+        &repo.root,
+        None,
+        &[
+            modern_request(1, "ping", json!({})),
+            legacy_initialize(2),
+            json!({ "jsonrpc": "2.0", "id": 3, "method": "ping" }),
+        ],
+    );
+    assert_eq!(responses.len(), 3, "{responses:?}");
+    assert_strict_error(&responses[0], -32601);
+    assert!(responses[2].get("error").is_none(), "{:?}", responses[2]);
+    assert!(responses[2]["result"].get("resultType").is_none());
+}
+
+#[test]
+fn a_legacy_session_is_unchanged_beside_modern_requests() {
+    // The era is decided per request, so a modern request on the same process
+    // must leave the legacy session exactly as it was before the newer
+    // revision was supported.
+    let repo = initialized_repo();
+    let responses = mcp_exchange(
+        &repo.root,
+        None,
+        &[
+            legacy_initialize(1),
+            json!({ "jsonrpc": "2.0", "method": "notifications/initialized", "params": {} }),
+            modern_request(2, "server/discover", json!({})),
+            json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {} }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": { "name": "register_agent", "arguments": { "name": "legacy-agent", "model": "test" } }
+            }),
+            json!({ "jsonrpc": "2.0", "id": 5, "method": "ping" }),
+        ],
+    );
+    assert_eq!(
+        responses.len(),
+        5,
+        "notifications get no response: {responses:?}"
+    );
+    let members = |value: &Value| {
+        let mut keys: Vec<String> = value
+            .as_object()
+            .expect("a result object")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort_unstable();
+        keys
+    };
+    let initialized = &responses[0]["result"];
+    assert_eq!(
+        members(initialized),
+        [
+            "_meta",
+            "capabilities",
+            "instructions",
+            "protocolVersion",
+            "serverInfo"
+        ]
+    );
+    assert_eq!(initialized["protocolVersion"], "2025-11-25");
+    assert_eq!(
+        initialized["capabilities"],
+        json!({ "tools": { "listChanged": false } })
+    );
+
+    assert_eq!(responses[1]["result"]["resultType"], "complete");
+    assert_eq!(
+        responses[1]["result"]["instructions"], initialized["instructions"],
+        "both eras tell the agent the same thing"
+    );
+
+    assert_eq!(members(&responses[2]["result"]), ["_meta", "tools"]);
+    let registered = &responses[3]["result"];
+    assert_eq!(
+        members(registered),
+        ["_meta", "content", "isError", "structuredContent"]
+    );
+    assert_eq!(registered["isError"], false, "{registered}");
+    assert_eq!(members(&responses[4]["result"]), ["_meta"]);
+}
+
+#[test]
+fn every_error_over_stdio_is_a_strict_envelope_in_both_eras() {
+    let repo = initialized_repo();
+    let outside = tempfile::tempdir().expect("temp dir");
+    let mut unsupported = modern_request(9, "tools/list", json!({}));
+    unsupported["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"] = json!("2099-01-01");
+    let mut incomplete = modern_request(8, "tools/list", json!({}));
+    incomplete["params"]["_meta"]
+        .as_object_mut()
+        .expect("meta object")
+        .remove("io.modelcontextprotocol/clientCapabilities");
+    for cwd in [repo.root.as_path(), outside.path()] {
+        let responses = mcp_exchange(
+            cwd,
+            None,
+            &[
+                // Legacy era.
+                json!({ "jsonrpc": "2.0", "id": 1, "method": "no/such/method" }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": { "name": "no_such_tool", "arguments": {} }
+                }),
+                json!({ "jsonrpc": "2.0", "id": 3, "method": "server/discover", "params": {} }),
+                // Modern era.
+                modern_request(4, "no/such/method", json!({})),
+                modern_request(
+                    5,
+                    "tools/call",
+                    json!({ "name": "no_such_tool", "arguments": {} }),
+                ),
+                modern_request(6, "initialize", json!({})),
+                modern_request(7, "ping", json!({})),
+                incomplete.clone(),
+                unsupported.clone(),
+            ],
+        );
+        assert_eq!(responses.len(), 9, "{responses:?}");
+        for (response, code) in responses.iter().zip([
+            -32601, -32602, -32602, -32601, -32602, -32601, -32601, -32602, -32022,
+        ]) {
+            assert_strict_error(response, code);
+        }
+        assert_eq!(
+            responses[8]["error"]["data"],
+            json!({ "supported": ["2026-07-28", "2025-11-25"], "requested": "2099-01-01" })
+        );
+    }
+}
+
+/// Send both eras to a server that has no store and check that each one gets
+/// the reason: the legacy handshake and the modern discovery carry the same
+/// instructions, the catalog stays complete, and every tool call answers
+/// `isError` with `code`.
+fn assert_unavailable_in_both_eras(cwd: &Path, code: &str) {
+    let responses = mcp_exchange(
+        cwd,
+        None,
+        &[
+            legacy_initialize(1),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": { "name": "status", "arguments": {} }
+            }),
+            modern_request(4, "server/discover", json!({})),
+            modern_request(5, "tools/list", json!({})),
+            modern_request(
+                6,
+                "tools/call",
+                json!({ "name": "status", "arguments": {} }),
+            ),
+        ],
+    );
+    assert_eq!(responses.len(), 6, "{responses:?}");
+    let instructions = responses[0]["result"]["instructions"]
+        .as_str()
+        .expect("initialize instructions");
+    assert!(
+        instructions.starts_with(&format!("Foremerge unavailable: {code}:")),
+        "{instructions}"
+    );
+    let discovered = &responses[3]["result"];
+    assert_eq!(discovered["resultType"], "complete", "{discovered}");
+    assert_eq!(discovered["instructions"], instructions, "{discovered}");
+    assert_eq!(
+        discovered["supportedVersions"],
+        json!(["2026-07-28", "2025-11-25"])
+    );
+    // The operator is expected to fix this, so no client should hold on to it.
+    assert_eq!(discovered["ttlMs"], 0, "{discovered}");
+    for listed in [&responses[1], &responses[4]] {
+        assert_eq!(
+            listed["result"]["tools"],
+            Value::Array(mcp::tool_catalog()),
+            "{listed}"
+        );
+    }
+    assert_eq!(responses[4]["result"]["resultType"], "complete");
+    for called in [&responses[2], &responses[5]] {
+        assert_eq!(called["result"]["isError"], true, "{called}");
+        assert_eq!(
+            called["result"]["structuredContent"]["code"], code,
+            "{called}"
+        );
+    }
+    assert!(responses[2]["result"].get("resultType").is_none());
+    assert_eq!(responses[5]["result"]["resultType"], "complete");
+}
+
+#[test]
+fn both_eras_get_the_reason_in_a_repository_that_has_not_run_init() {
+    let repo = create_repo();
+    assert_unavailable_in_both_eras(&repo.root, "NOT_INITIALIZED");
+    assert!(
+        !repo.root.join(".git/foremerge").exists(),
+        "neither era may create coordination state before `foremerge init`"
+    );
+}
+
+#[test]
+fn both_eras_get_the_reason_outside_any_repository() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let outside = temp.path().canonicalize().expect("canonicalize temp dir");
+    assert_unavailable_in_both_eras(&outside, "NOT_A_REPOSITORY");
+    assert!(
+        !outside.join(".foremerge").exists(),
+        "neither era may leave a stray store behind"
     );
 }
 

@@ -404,8 +404,10 @@ Call this only after ordinary Git or pull-request integration.
 ## Transport smoke test
 
 For protocol debugging, run `foremerge mcp` directly and send one compact JSON
-object per line. A real MCP client should begin with `initialize`, followed by
-the initialized notification and `tools/list`.
+object per line. A `2025-11-25` client begins with `initialize`, followed by the
+initialized notification and `tools/list`. A `2026-07-28` client sends no
+handshake: it may begin with `server/discover` or go straight to `tools/list`,
+with the per-request `_meta` on every request.
 
 Tool names such as `list_agents` are not commands, so typing one on its own
 returns a `-32700` parse error. When stdin is a terminal the server prints
@@ -414,31 +416,64 @@ line. That guidance is suppressed when stdin is a pipe, so client sessions are
 unaffected. To read coordination state as a person, use the CLI instead, for
 example `foremerge status` or `foremerge agent list`.
 
-The server implements MCP protocol revision `2025-11-25` and answers
-`initialize` with that version whatever the client asks for. It also responds to
-`ping`. Notifications have no response.
+The server implements MCP protocol revisions `2026-07-28` and `2025-11-25`, and
+decides which one applies for each request rather than for the whole process.
+Notifications have no response in either.
 
-`server/discover` belongs to the `2026-07-28` revision, which this server does
-not implement, so it answers `-32601`. That is deliberate: a dual-era client,
-one that speaks both revisions, probes `server/discover` first and falls back to
-the `initialize` handshake when it is refused, which is the path that works
-here. A client that speaks only the newer revision cannot use this server.
-Support for the newer revision is tracked in
-[issue #23](https://github.com/naw103/foremerge/issues/23).
+A request whose `params._meta` names `io.modelcontextprotocol/protocolVersion`
+is served under the revision it names. A request without it is a `2025-11-25`
+request. A `2026-07-28` request must also carry
+`io.modelcontextprotocol/clientCapabilities`, and `clientInfo` when present
+must have a string `name` and `version`:
 
-JSON-RPC error responses carry exactly `jsonrpc`, `id` and `error`. Strict
-clients validate that envelope, and the official TypeScript client treats any
-other member as an unrecognized response, so a refused probe with an extra
-member reads as no answer at all.
+```json
+{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"probe","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}
+```
+
+Under `2026-07-28`:
+
+- `server/discover` returns `supportedVersions` (`["2026-07-28", "2025-11-25"]`),
+  `capabilities`, the same `instructions` that `initialize` returns, and the
+  server's identity in `_meta`. It is cacheable with `cacheScope` `private`, and
+  `ttlMs` is one hour, or `0` when the store is unavailable, because that answer
+  should not outlive the operator's fix.
+- `tools/list` returns the catalog with `ttlMs` of one hour and `cacheScope`
+  `public`. The catalog is compiled into the binary and is the same for every
+  caller.
+- Every result carries `resultType: "complete"` and the server's identity in
+  `_meta`.
+- `initialize` and `ping` do not exist and answer `-32601`.
+- A request missing `clientCapabilities`, or with a malformed protocol version
+  or `clientInfo`, answers `-32602`. `server/discover` without the protocol
+  version answers `-32602` too, since it exists only in this revision.
+- A protocol version the server does not speak answers `-32022` with
+  `error.data` naming `supported` and `requested`.
+
+Under `2025-11-25`, the server behaves as it always has: it answers
+`initialize` with `2025-11-25` whatever the client asks for, responds to
+`ping`, and its results carry no `resultType` or caching hints. `initialize`
+stays the legacy handshake unless it carries a complete `2026-07-28` envelope,
+in which case it answers `-32601`.
+
+A dual-era client, one that speaks both revisions, probes `server/discover`
+first and gets a result, so it stays on `2026-07-28`. A `2025-11-25` client never
+sends the probe. Both can share one server process.
+
+JSON-RPC error responses carry exactly `jsonrpc`, `id` and `error`, in both
+revisions. Strict clients validate that envelope, and the official TypeScript
+client treats any other member as an unrecognized response, so a refused probe
+with an extra member reads as no answer at all. The only error with `data`
+inside `error` is the unsupported-version error.
 
 Successful tool calls return both text content and `structuredContent`. Domain
 failures are returned as a tool result with `isError: true`; malformed JSON-RPC,
 unknown methods, and invalid tool names use JSON-RPC errors.
 
 If the server cannot open its coordination store, or was started outside a Git
-repository and so has none, it still answers
-`initialize`, `ping`, `server/discover`, and `tools/list`. The `initialize`
-instructions start with `Foremerge unavailable:` and give the reason, and every
+repository and so has none, it still answers both revisions: `initialize`,
+`ping`, `server/discover`, and `tools/list`. The instructions in the
+`initialize` and `server/discover` results start with `Foremerge unavailable:`
+and give the reason, and every
 tool call returns `isError: true` with `code`, `message`, `guidance` for the
 agent, and `remedy` for the operator in `structuredContent`. See
 [Tools answer "Foremerge unavailable"](#tools-answer-foremerge-unavailable).

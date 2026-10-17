@@ -63,6 +63,11 @@ The complete lifecycle and core read parity are available through 18 MCP tools:
 - `start_work`
 - `status`
 
+The MCP server speaks protocol revisions `2026-07-28` and `2025-11-25` and
+decides which applies for each request, so clients of either revision can share
+one server process. [MCP setup](mcp-setup.md#transport-smoke-test) describes
+how a request is assigned to a revision and what each method returns in each.
+
 `run_verification` accepts only a trusted check name from repository-private
 Foremerge configuration, as does the HTTP API's validate operation. Only the
 CLI retains direct argv validation. Consult [MCP setup](mcp-setup.md), [agent client setup](agent-clients.md),
