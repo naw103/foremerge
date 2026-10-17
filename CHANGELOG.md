@@ -9,6 +9,26 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+### Added
+
+- `foremerge mcp` now speaks MCP protocol revision `2026-07-28` alongside
+  `2025-11-25`, so a client that speaks only the newer revision can use it.
+  The revision is decided for each request: one that names
+  `io.modelcontextprotocol/protocolVersion` in its `_meta` is served under
+  that revision, and one without it is served exactly as before. Under
+  `2026-07-28`, `server/discover` returns both supported versions, the
+  capabilities, the same instructions `initialize` returns, and the server's
+  identity; every result carries `resultType`; `tools/list` and
+  `server/discover` carry the `ttlMs` and `cacheScope` caching hints; `ping`
+  and `initialize` answer `-32601`; a request missing its client capabilities
+  answers `-32602`; and an unknown protocol version answers `-32022` with the
+  supported list. A server that cannot open its store answers both revisions
+  with the reason, inside a repository or outside one. Clients negotiating
+  `2025-11-25` are unaffected. With the official TypeScript client 2.3.1,
+  `versionNegotiation` mode `'auto'` now connects on `2026-07-28` instead of
+  falling back, and a client pinned to `2026-07-28` now connects at all
+  ([#23](https://github.com/naw103/foremerge/issues/23)).
+
 ### Changed
 
 - **Breaking.** Foremerge no longer migrates a ledger as a side effect of

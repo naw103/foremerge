@@ -6,15 +6,38 @@ use std::io::IsTerminal;
 use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-/// The one MCP revision this server implements.
+/// The legacy MCP revision: a session opened by `initialize`.
 ///
-/// It used to answer `2026-07-28` to a client that asked for it, while
-/// speaking this revision's wire shape: `initialize` and `ping` exist, results
-/// carry no `resultType`, and `server/discover` returned neither
-/// `supportedVersions` nor the caching hints that revision requires. A client
-/// that speaks only the newer era would have taken that answer at face value
-/// and continued against a server that cannot hold up its end.
-const PROTOCOL: &str = "2025-11-25";
+/// `initialize` answers with this whatever the client asks for. It used to
+/// echo `2026-07-28` back while speaking this revision's wire shape, and a
+/// client that speaks only the newer era took that answer at face value. The
+/// newer revision has no handshake at all, so this is the only version
+/// `initialize` can honestly name.
+const LEGACY_PROTOCOL: &str = "2025-11-25";
+
+/// The modern MCP revision: no session, and every request carries its
+/// protocol version and client capabilities in `params._meta`.
+const MODERN_PROTOCOL: &str = "2026-07-28";
+
+/// Every revision this server speaks, newest first, as `server/discover` and
+/// the unsupported-version error list them. A dual-era client picks the
+/// modern entry and ignores the legacy one.
+const SUPPORTED_PROTOCOLS: [&str; 2] = [MODERN_PROTOCOL, LEGACY_PROTOCOL];
+
+/// The per-request `_meta` keys of the modern revision.
+const PROTOCOL_VERSION_KEY: &str = "io.modelcontextprotocol/protocolVersion";
+const CLIENT_CAPABILITIES_KEY: &str = "io.modelcontextprotocol/clientCapabilities";
+const CLIENT_INFO_KEY: &str = "io.modelcontextprotocol/clientInfo";
+
+/// `UnsupportedProtocolVersionError` in the modern revision.
+const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
+
+/// How long a modern client may treat the tool catalog as fresh.
+///
+/// The catalog is compiled into the binary and is the same for every caller
+/// and every store state, so it changes only when the binary does, and a
+/// client relaunches the server for that.
+const CATALOG_TTL_MS: u64 = 3_600_000;
 
 /// Shown once when a person runs `foremerge mcp` in a terminal.
 ///
@@ -38,7 +61,8 @@ To read coordination state yourself, use the ordinary CLI:
 Press Ctrl-C to exit.
 ";
 
-/// What a server with a working store tells the agent during initialize.
+/// What a server with a working store tells the agent, in the `initialize`
+/// and the `server/discover` result alike.
 const INSTRUCTIONS: &str = "Publish intent and the scopes you will change, declaring what you do to each, before creating or editing any file meant for the repository. publish_intent returns related_work: assess each entry and call record_assessment before changing files. then claim and start work. Claims are advisory. Resolve durable HIGH conflicts, publish a clean ChangeSet, run a trusted named verification check, and accept before ordinary Git integration. Record the landing commit afterward.";
 
 /// Why the MCP server is running without its coordination store.
@@ -48,7 +72,8 @@ const INSTRUCTIONS: &str = "Publish intent and the scopes you will change, decla
 /// the agent carries on uncoordinated without saying so. A ledger migrated by
 /// a newer build went unnoticed that way for days. So the server stays up,
 /// completes the handshake, and puts this in front of the agent instead, in
-/// the initialize instructions and in the result of every tool call.
+/// the instructions `initialize` and `server/discover` return and in the
+/// result of every tool call.
 #[derive(Debug, Clone)]
 pub struct StoreUnavailable {
     code: String,
@@ -319,32 +344,144 @@ pub async fn handle_message(service: &Foremerge, message: Value) -> Option<Value
     respond(Backend::Ready(service), message).await
 }
 
+/// Which MCP revision one request is served under.
+///
+/// Decided per request, never per process: the modern revision is stateless,
+/// and a legacy session must keep working beside it. The modern revision
+/// allows one server to serve both eras on the same stdio process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Era {
+    /// `initialize`, then requests without a protocol version in `_meta`.
+    Legacy,
+    /// Requests whose `_meta` names `2026-07-28`.
+    Modern,
+}
+
+/// Why a request was refused before either era could serve it.
+#[derive(Debug, PartialEq, Eq)]
+enum Refusal {
+    /// The per-request `_meta` is incomplete or mistyped. The modern revision
+    /// requires `-32602` for this.
+    Malformed(String),
+    /// `_meta` names a revision this server does not speak.
+    Unsupported(String),
+}
+
+impl Refusal {
+    fn response(self, id: Value) -> Value {
+        match self {
+            Self::Malformed(message) => jsonrpc_error(id, -32602, &message),
+            Self::Unsupported(requested) => jsonrpc_error_with_data(
+                id,
+                UNSUPPORTED_PROTOCOL_VERSION,
+                "Unsupported protocol version",
+                json!({ "supported": SUPPORTED_PROTOCOLS, "requested": requested }),
+            ),
+        }
+    }
+}
+
+/// Tell the era of one request from its `params._meta`.
+///
+/// The protocol version key is the claim, as in the official SDK: present
+/// means the client chose a revision for this request, absent means a legacy
+/// request. `initialize` stays the legacy handshake unless it carries a
+/// complete modern envelope, so a legacy client that happens to send `_meta`
+/// is never refused its handshake. `server/discover` exists only in the
+/// modern revision, so without the claim it is a malformed modern request
+/// rather than an unknown method.
+fn era(method: &str, params: &Value) -> Result<Era, Refusal> {
+    let meta = params
+        .get("_meta")
+        .filter(|meta| meta.is_object())
+        .unwrap_or(&Value::Null);
+    let Some(claim) = meta.get(PROTOCOL_VERSION_KEY) else {
+        if method == "server/discover" {
+            return Err(Refusal::Malformed(format!(
+                "server/discover belongs to MCP {MODERN_PROTOCOL} and requires params._meta with {PROTOCOL_VERSION_KEY} and {CLIENT_CAPABILITIES_KEY}"
+            )));
+        }
+        return Ok(Era::Legacy);
+    };
+    let checked = match claim.as_str() {
+        None => Err(Refusal::Malformed(format!(
+            "{PROTOCOL_VERSION_KEY} must be a string"
+        ))),
+        Some(MODERN_PROTOCOL) => match envelope_problem(meta) {
+            Some(problem) => Err(Refusal::Malformed(problem)),
+            None => Ok(Era::Modern),
+        },
+        // Listed in `supported`, so a client that retries with it is served
+        // under the revision it named rather than refused in a loop.
+        Some(LEGACY_PROTOCOL) => Ok(Era::Legacy),
+        Some(requested) => Err(Refusal::Unsupported(requested.to_string())),
+    };
+    if method == "initialize" && checked != Ok(Era::Modern) {
+        return Ok(Era::Legacy);
+    }
+    checked
+}
+
+/// The first problem with a modern request's `_meta`, or `None` when it is
+/// complete. The protocol version is checked by the caller.
+fn envelope_problem(meta: &Value) -> Option<String> {
+    match meta.get(CLIENT_CAPABILITIES_KEY) {
+        None => {
+            return Some(format!(
+                "params._meta is missing {CLIENT_CAPABILITIES_KEY}, which MCP {MODERN_PROTOCOL} requires on every request"
+            ));
+        }
+        Some(capabilities) if !capabilities.is_object() => {
+            return Some(format!("{CLIENT_CAPABILITIES_KEY} must be an object"));
+        }
+        Some(_) => {}
+    }
+    let info = meta.get(CLIENT_INFO_KEY)?;
+    let named = |field: &str| info.get(field).is_some_and(Value::is_string);
+    if named("name") && named("version") {
+        None
+    } else {
+        Some(format!(
+            "{CLIENT_INFO_KEY} must be an object with string name and version"
+        ))
+    }
+}
+
 async fn respond(backend: Backend<'_>, message: Value) -> Option<Value> {
     let id = message.get("id").cloned()?;
     let method = message.get("method").and_then(Value::as_str).unwrap_or("");
     let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
-    let result = match method {
-        "initialize" => {
-            // Answered with what this server speaks, whatever was asked for.
+    let era = match era(method, &params) {
+        Ok(era) => era,
+        Err(refusal) => return Some(refusal.response(id)),
+    };
+    let result = match (era, method) {
+        (Era::Legacy, "initialize") => {
+            // Answered with the legacy revision, whatever was asked for.
             // Echoing a client's newer version back is how the mismatch
             // started.
-            let instructions = match backend {
-                Backend::Ready(_) => INSTRUCTIONS.to_string(),
-                Backend::Unavailable(unavailable) => unavailable.instructions(),
-            };
             Ok(json!({
-                "protocolVersion": PROTOCOL,
-                "capabilities": { "tools": { "listChanged": false } },
+                "protocolVersion": LEGACY_PROTOCOL,
+                "capabilities": capabilities(),
                 "serverInfo": server_info(),
-                "instructions": instructions
+                "instructions": instructions(backend)
             }))
         }
-        "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tool_catalog() })),
-        "tools/call" => match backend {
+        (Era::Legacy, "ping") => Ok(json!({})),
+        (Era::Legacy, "tools/list") => Ok(json!({ "tools": tool_catalog() })),
+        (Era::Modern, "server/discover") => Ok(discover(backend)),
+        (Era::Modern, "tools/list") => Ok(json!({
+            "tools": tool_catalog(),
+            "ttlMs": CATALOG_TTL_MS,
+            "cacheScope": "public"
+        })),
+        (_, "tools/call") => match backend {
             Backend::Ready(service) => call_tool(service, params).await,
             Backend::Unavailable(unavailable) => unavailable.tool_call(&params),
         },
+        // `initialize`, `notifications/initialized` and `ping` do not exist in
+        // the modern revision, and `server/discover` does not exist in the
+        // legacy one.
         _ => {
             return Some(jsonrpc_error(
                 id,
@@ -360,11 +497,47 @@ async fn respond(backend: Backend<'_>, message: Value) -> Option<Value> {
                     "_meta".to_string(),
                     json!({ "io.modelcontextprotocol/serverInfo": server_info() }),
                 );
+                // Required on every modern result. Legacy results stay as
+                // they were: the field means nothing to a 2025-11-25 client.
+                if era == Era::Modern {
+                    object.insert("resultType".to_string(), json!("complete"));
+                }
             }
             Some(json!({ "jsonrpc": "2.0", "id": id, "result": value }))
         }
         Err((code, message)) => Some(jsonrpc_error(id, code, &message)),
     }
+}
+
+fn capabilities() -> Value {
+    json!({ "tools": { "listChanged": false } })
+}
+
+fn instructions(backend: Backend<'_>) -> String {
+    match backend {
+        Backend::Ready(_) => INSTRUCTIONS.to_string(),
+        Backend::Unavailable(unavailable) => unavailable.instructions(),
+    }
+}
+
+/// The modern revision's replacement for the `initialize` result.
+///
+/// It is cacheable, and `private` because the instructions can name this
+/// machine's repository and ledger. An unavailable store is the operator's to
+/// fix, so that answer is marked stale at once rather than held by a client
+/// after the fix.
+fn discover(backend: Backend<'_>) -> Value {
+    let ttl_ms = match backend {
+        Backend::Ready(_) => CATALOG_TTL_MS,
+        Backend::Unavailable(_) => 0,
+    };
+    json!({
+        "supportedVersions": SUPPORTED_PROTOCOLS,
+        "capabilities": capabilities(),
+        "instructions": instructions(backend),
+        "ttlMs": ttl_ms,
+        "cacheScope": "private"
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -683,6 +856,16 @@ fn jsonrpc_error(id: Value, code: i64, message: &str) -> Value {
         "jsonrpc": "2.0",
         "id": id,
         "error": { "code": code, "message": message },
+    })
+}
+
+/// The same envelope with the error's optional `data` member, which JSON-RPC
+/// 2.0 allows inside `error` and the unsupported-version error requires.
+fn jsonrpc_error_with_data(id: Value, code: i64, message: &str, data: Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": code, "message": message, "data": data },
     })
 }
 
@@ -1411,7 +1594,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(initialized["result"]["protocolVersion"], PROTOCOL);
+        assert_eq!(initialized["result"]["protocolVersion"], LEGACY_PROTOCOL);
 
         let registered = handle_message(
             &service,
@@ -1472,7 +1655,7 @@ mod tests {
         .unwrap();
         // Asked for a revision this server does not speak, it still answers
         // with the one it does.
-        assert_eq!(initialized["result"]["protocolVersion"], PROTOCOL);
+        assert_eq!(initialized["result"]["protocolVersion"], LEGACY_PROTOCOL);
         assert_eq!(initialized["result"]["serverInfo"]["name"], "foremerge");
         let instructions = initialized["result"]["instructions"].as_str().unwrap();
         assert!(
@@ -1509,13 +1692,165 @@ mod tests {
         assert_eq!(listed["result"]["tools"], Value::Array(tool_catalog()));
     }
 
-    /// A dual-era client, one that speaks both revisions, probes
-    /// `server/discover` first and falls back to the `initialize` handshake
-    /// when that fails, per the 2026-07-28 stdio backward-compatibility rule. Answering the probe
-    /// at all, with a result missing everything the revision requires, is what
-    /// put such a client on the wrong path.
+    /// The per-request `_meta` a 2026-07-28 client sends.
+    fn modern_meta() -> Value {
+        json!({
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": { "name": "modern", "version": "1" },
+            "io.modelcontextprotocol/clientCapabilities": {}
+        })
+    }
+
+    fn modern(id: u64, method: &str, mut params: Value) -> Value {
+        params["_meta"] = modern_meta();
+        json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })
+    }
+
+    #[test]
+    fn the_era_is_told_from_the_protocol_version_in_meta() {
+        let with_meta = |meta: Value| json!({ "_meta": meta });
+        assert_eq!(era("tools/list", &json!({})), Ok(Era::Legacy));
+        assert_eq!(
+            era("tools/list", &with_meta(json!({ "progressToken": 1 }))),
+            Ok(Era::Legacy)
+        );
+        assert_eq!(
+            era("tools/list", &with_meta(modern_meta())),
+            Ok(Era::Modern)
+        );
+        // A client retrying with the legacy entry from `supported` is served
+        // under the revision it named.
+        let mut legacy = modern_meta();
+        legacy[PROTOCOL_VERSION_KEY] = json!(LEGACY_PROTOCOL);
+        assert_eq!(era("tools/list", &with_meta(legacy)), Ok(Era::Legacy));
+
+        let mut future = modern_meta();
+        future[PROTOCOL_VERSION_KEY] = json!("2099-01-01");
+        assert_eq!(
+            era("tools/list", &with_meta(future.clone())),
+            Err(Refusal::Unsupported("2099-01-01".to_string()))
+        );
+        let mut incomplete = modern_meta();
+        incomplete
+            .as_object_mut()
+            .unwrap()
+            .remove(CLIENT_CAPABILITIES_KEY);
+        assert!(matches!(
+            era("tools/list", &with_meta(incomplete.clone())),
+            Err(Refusal::Malformed(_))
+        ));
+        let mut mistyped = modern_meta();
+        mistyped[PROTOCOL_VERSION_KEY] = json!(20260728);
+        assert!(matches!(
+            era("tools/list", &with_meta(mistyped)),
+            Err(Refusal::Malformed(_))
+        ));
+        let mut nameless = modern_meta();
+        nameless[CLIENT_INFO_KEY] = json!({ "version": "1" });
+        assert!(matches!(
+            era("tools/list", &with_meta(nameless)),
+            Err(Refusal::Malformed(_))
+        ));
+
+        // `initialize` stays the legacy handshake unless the envelope is a
+        // complete modern one.
+        for meta in [future, incomplete] {
+            assert_eq!(era("initialize", &with_meta(meta)), Ok(Era::Legacy));
+        }
+        assert_eq!(
+            era("initialize", &with_meta(modern_meta())),
+            Ok(Era::Modern)
+        );
+        // `server/discover` exists only in the modern revision.
+        assert!(matches!(
+            era("server/discover", &json!({})),
+            Err(Refusal::Malformed(_))
+        ));
+    }
+
     #[tokio::test]
-    async fn a_modern_discovery_probe_is_refused_so_the_client_falls_back() {
+    async fn server_discover_names_both_revisions_with_caching_hints() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let discovered = handle_message(&service, modern(1, "server/discover", json!({})))
+            .await
+            .unwrap();
+        let result = &discovered["result"];
+        assert_eq!(result["resultType"], "complete", "{discovered}");
+        assert_eq!(
+            result["supportedVersions"],
+            json!(["2026-07-28", "2025-11-25"])
+        );
+        assert_eq!(result["capabilities"], capabilities());
+        assert_eq!(result["instructions"], INSTRUCTIONS);
+        assert_eq!(
+            result["_meta"]["io.modelcontextprotocol/serverInfo"],
+            server_info()
+        );
+        assert_eq!(result["ttlMs"], CATALOG_TTL_MS);
+        assert_eq!(result["cacheScope"], "private");
+
+        let listed = handle_message(&service, modern(2, "tools/list", json!({})))
+            .await
+            .unwrap();
+        assert_eq!(listed["result"]["resultType"], "complete");
+        assert_eq!(listed["result"]["ttlMs"], CATALOG_TTL_MS);
+        assert_eq!(listed["result"]["cacheScope"], "public");
+        assert_eq!(listed["result"]["tools"], Value::Array(tool_catalog()));
+
+        let called = handle_message(
+            &service,
+            modern(
+                3,
+                "tools/call",
+                json!({ "name": "register_agent", "arguments": { "name": "modern-agent", "model": "test" } }),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(called["result"]["resultType"], "complete", "{called}");
+        assert_eq!(called["result"]["isError"], false, "{called}");
+
+        // Removed in the modern revision, and still there for a legacy one.
+        for method in ["ping", "initialize"] {
+            let refused = handle_message(&service, modern(4, method, json!({})))
+                .await
+                .unwrap();
+            assert_eq!(refused["error"]["code"], -32601, "{method}: {refused}");
+        }
+        let legacy_ping = handle_message(
+            &service,
+            json!({ "jsonrpc": "2.0", "id": 5, "method": "ping" }),
+        )
+        .await
+        .unwrap();
+        assert!(legacy_ping.get("error").is_none(), "{legacy_ping}");
+        assert!(legacy_ping["result"].get("resultType").is_none());
+    }
+
+    #[tokio::test]
+    async fn an_unsupported_revision_is_refused_with_the_supported_list() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let mut request = modern(1, "tools/list", json!({}));
+        request["params"]["_meta"][PROTOCOL_VERSION_KEY] = json!("2099-01-01");
+        let refused = handle_message(&service, request).await.unwrap();
+        assert_eq!(
+            refused["error"],
+            json!({
+                "code": -32022,
+                "message": "Unsupported protocol version",
+                "data": { "supported": ["2026-07-28", "2025-11-25"], "requested": "2099-01-01" }
+            }),
+            "{refused}"
+        );
+    }
+
+    /// A dual-era client, one that speaks both revisions, probes
+    /// `server/discover` first and falls back to the `initialize` handshake on
+    /// any error that is not a recognized modern one. A probe missing the
+    /// required client capabilities is malformed, so it is refused, and the
+    /// fallback still reaches a working handshake.
+    #[tokio::test]
+    async fn a_malformed_discovery_probe_is_refused_and_the_handshake_still_works() {
         let service = Foremerge::new(Store::in_memory().unwrap());
         let probe = handle_message(
             &service,
@@ -1531,11 +1866,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(probe["error"]["code"], -32601, "{probe}");
+        assert_eq!(probe["error"]["code"], -32602, "{probe}");
         assert!(probe.get("result").is_none(), "{probe}");
 
-        // The fallback then works, and names this revision rather than the
-        // client's.
+        // The fallback then works, and names the legacy revision rather than
+        // the client's.
         let initialized = handle_message(
             &service,
             json!({
@@ -1551,10 +1886,9 @@ mod tests {
     }
 
     /// Every JSON-RPC error this server sends has exactly the three members a
-    /// JSON-RPC 2.0 error response may have. The unknown-method case matters
-    /// most: it is how a dual-era client's discovery probe is refused, and an
-    /// extra member made the official TypeScript client ignore the refusal and
-    /// wait out its probe timeout.
+    /// JSON-RPC 2.0 error response may have, in both eras. The refused
+    /// discovery probe matters most: an extra member made the official
+    /// TypeScript client ignore the refusal and wait out its probe timeout.
     #[tokio::test]
     async fn every_error_response_is_a_strict_json_rpc_envelope() {
         let assert_strict = |response: &Value| {
@@ -1569,8 +1903,16 @@ mod tests {
                 .map(String::as_str)
                 .collect();
             error_keys.sort_unstable();
-            assert_eq!(error_keys, ["code", "message"], "{response}");
+            // `data` belongs inside `error`, and only the unsupported-version
+            // error carries it.
+            if response["error"]["code"] == UNSUPPORTED_PROTOCOL_VERSION {
+                assert_eq!(error_keys, ["code", "data", "message"], "{response}");
+            } else {
+                assert_eq!(error_keys, ["code", "message"], "{response}");
+            }
         };
+        let mut unsupported = modern(9, "tools/list", json!({}));
+        unsupported["params"]["_meta"][PROTOCOL_VERSION_KEY] = json!("2099-01-01");
         let service = Foremerge::new(Store::in_memory().unwrap());
         let unavailable = unsupported_schema();
         for backend in [Backend::Ready(&service), Backend::Unavailable(&unavailable)] {
@@ -1584,6 +1926,16 @@ mod tests {
                     "params": { "name": "no_such_tool", "arguments": {} }
                 }),
                 json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {} }),
+                modern(5, "ping", json!({})),
+                modern(6, "initialize", json!({})),
+                modern(7, "tools/call", json!({ "name": "no_such_tool" })),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 8,
+                    "method": "server/discover",
+                    "params": { "_meta": { PROTOCOL_VERSION_KEY: MODERN_PROTOCOL } }
+                }),
+                unsupported.clone(),
             ] {
                 let response = respond(backend, request).await.expect("a response");
                 assert_strict(&response);
@@ -1593,20 +1945,51 @@ mod tests {
         assert_strict(&jsonrpc_error(Value::Null, -32700, "parse error"));
     }
 
-    /// The refusal does not depend on the store. A server that cannot open its
-    /// ledger must route a dual-era client to the same working handshake, where
-    /// the instructions then explain what is wrong.
+    /// Discovery does not depend on the store. A server that cannot open its
+    /// ledger answers a modern client as it answers a legacy one, with the
+    /// reason in the instructions, and marks that answer stale at once.
     #[tokio::test]
-    async fn the_discovery_probe_is_refused_the_same_way_while_the_store_is_unavailable() {
+    async fn discovery_while_the_store_is_unavailable_carries_the_reason() {
         let unavailable = unsupported_schema();
         let backend = Backend::Unavailable(&unavailable);
-        let probe = respond(
+        let discovered = respond(backend, modern(1, "server/discover", json!({})))
+            .await
+            .unwrap();
+        let result = &discovered["result"];
+        assert_eq!(result["resultType"], "complete", "{discovered}");
+        assert_eq!(
+            result["supportedVersions"],
+            json!(SUPPORTED_PROTOCOLS),
+            "{discovered}"
+        );
+        assert_eq!(result["instructions"], unavailable.instructions());
+        assert_eq!(result["ttlMs"], 0, "{discovered}");
+        let called = respond(
             backend,
-            json!({ "jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": {} }),
+            modern(
+                2,
+                "tools/call",
+                json!({ "name": "status", "arguments": {} }),
+            ),
         )
         .await
         .unwrap();
-        assert_eq!(probe["error"]["code"], -32601, "{probe}");
+        assert_eq!(called["result"]["resultType"], "complete", "{called}");
+        assert_eq!(called["result"]["isError"], true, "{called}");
+        assert_eq!(
+            called["result"]["structuredContent"]["code"], "UNSUPPORTED_SCHEMA",
+            "{called}"
+        );
+
+        // A probe without the envelope is refused, and the legacy handshake
+        // still works.
+        let probe = respond(
+            backend,
+            json!({ "jsonrpc": "2.0", "id": 3, "method": "server/discover", "params": {} }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(probe["error"]["code"], -32602, "{probe}");
         let initialized = respond(
             backend,
             json!({ "jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {} }),
@@ -1614,7 +1997,7 @@ mod tests {
         .await
         .unwrap();
         // No protocolVersion requested at all, as a legacy client may send.
-        assert_eq!(initialized["result"]["protocolVersion"], PROTOCOL);
+        assert_eq!(initialized["result"]["protocolVersion"], LEGACY_PROTOCOL);
         assert!(
             initialized["result"]["instructions"]
                 .as_str()
