@@ -151,7 +151,7 @@ fn run_bounded_with_timeout(mut command: Command, timeout: Duration) -> Result<B
 /// so typed codes (RESOURCE_LIMIT, ALREADY_EXISTS, ...) are not demoted to the
 /// generic ERROR by the setup failure envelope. Errors without a code get
 /// `fallback_code`.
-fn coded(error: anyhow::Error, fallback_code: &str, action: &str) -> anyhow::Error {
+pub(crate) fn coded(error: anyhow::Error, fallback_code: &str, action: &str) -> anyhow::Error {
     let message = format!("{error:#}");
     match message.split_once(':') {
         Some((code, rest)) if is_error_code(code) => {
@@ -613,7 +613,7 @@ pub fn installation_warnings(installations: &[Installation]) -> Vec<String> {
         .filter(|value| !value.this_binary && !value.npm_launcher)
         .map(|value| {
             format!(
-                "Another foremerge is installed at {}, while {this_path} is {current}. Its version was not checked, because that would mean running it. A shell and an MCP client can each launch a different installation, and a newer build migrates the ledger so an older one cannot open it. Keep one installation, or upgrade both the same way, then run `foremerge setup` so every client launches the one you kept.",
+                "Another foremerge is installed at {}, while {this_path} is {current}. Its version was not checked, because that would mean running it. A shell and an MCP client can each launch a different installation, and once a newer build has migrated the ledger an older one cannot open it. Keep one installation, or upgrade both the same way, then run `foremerge setup` so every client launches the one you kept.",
                 value.path
             )
         })

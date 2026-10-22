@@ -145,6 +145,12 @@ changelog guidance.
 Migrations run only when the operator runs `foremerge ledger migrate`, which
 backs the ledger up first; every other command refuses a ledger at an older
 schema with `MIGRATION_REQUIRED`. They run in one transaction, and only forward.
+Two things the gate does not cover. Creating a ledger is not a migration, so a
+build of unreleased schema work run where there is no ledger yet writes a new
+one at its own schema, which released builds then refuse. And the gate compares
+schema stamps only: a build that changes tables, indexes or triggers without
+raising the schema version still applies those statements to a released ledger
+on open, so every schema change must raise the version.
 A build refuses to open a store stamped with a schema newer than it understands
 rather than migrating it backwards, so migrating while another worktree still
 runs an older binary will make the older one fail closed. From 0.4.3

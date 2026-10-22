@@ -1,4 +1,5 @@
 use crate::api::{self, ApiState};
+use crate::db::DATABASE_SCHEMA_VERSION;
 use crate::git;
 use crate::model::*;
 use crate::{Foremerge, Store, checks, exclusions, integrations, ledger, mcp};
@@ -134,7 +135,7 @@ enum LedgerCommand {
         /// Apply the reset. Without it nothing is changed.
         #[arg(long)]
         yes: bool,
-        /// Let a development build write the ledger at its unreleased schema.
+        /// Allow writing the ledger at a schema newer than any published release.
         #[arg(long)]
         allow_development_build: bool,
     },
@@ -149,7 +150,7 @@ enum LedgerCommand {
         /// Apply the migration. Without it nothing is changed.
         #[arg(long)]
         yes: bool,
-        /// Let a development build migrate the ledger to its unreleased schema.
+        /// Allow migrating the ledger to a schema newer than any published release.
         #[arg(long)]
         allow_development_build: bool,
     },
@@ -730,7 +731,15 @@ async fn execute(cli: Cli) -> Result<Completion> {
             let repo = git::discover(&cwd).context(
                 "INVALID_INPUT: client setup must run inside the Git repository to coordinate",
             )?;
-            let service = open_service(&database, &cwd)?;
+            // Setup writes client configuration, which needs nothing from an
+            // existing ledger, so it leaves one alone. That lets an upgrade
+            // repoint every client at the new binary before `ledger migrate`,
+            // as the upgrade guide orders it, instead of refusing with
+            // MIGRATION_REQUIRED. A repository with no ledger yet still gets one.
+            let existing = Store::peek_schema_version(&database)?;
+            if existing.is_none() {
+                open_service(&database, &cwd)?;
+            }
             let token_path = ensure_token(&cwd)?;
             let executable = std::env::current_exe().context("resolve Foremerge executable")?;
             let doctor_client = client.name();
@@ -746,14 +755,21 @@ async fn execute(cli: Cli) -> Result<Completion> {
                         .map(|error| format!("{}: {error}", report.client))
                 })
                 .collect();
-            let warnings =
+            let mut warnings =
                 integrations::installation_warnings(&integrations::installations(&executable));
+            if let Some(stored_version) =
+                existing.filter(|stored| *stored < DATABASE_SCHEMA_VERSION)
+            {
+                warnings.push(format!(
+                    "MIGRATION_REQUIRED: the ledger is database schema {stored_version} and this build uses schema {DATABASE_SCHEMA_VERSION}, so clients cannot use it yet. Once every client is set up, close their sessions, run `foremerge ledger migrate` to see what it will do, then `foremerge ledger migrate --yes`"
+                ));
+            }
             for warning in &warnings {
                 eprintln!("warning: {warning}");
             }
             let data = json!({
                 "repository": repo.root,
-                "database": service.store().path(),
+                "database": database,
                 "token_file": token_path,
                 "clients": reports,
                 "warnings": warnings,
@@ -865,7 +881,7 @@ async fn execute(cli: Cli) -> Result<Completion> {
                     .and_then(|error| match error.code.as_str() {
                         "NOT_INITIALIZED" => None,
                         "MIGRATION_REQUIRED" => Some(
-                            "This build needs to migrate the ledger, which older builds cannot open afterwards. Upgrade every client in this repository to this version, close their sessions, then run `foremerge ledger migrate --yes`; it backs the ledger up first"
+                            "This build needs to migrate the ledger, which older builds cannot open afterwards. Upgrade every client in this repository to this version and close their sessions. Then run `foremerge ledger migrate` to see what it will do, and `foremerge ledger migrate --yes` to do it; it backs the ledger up first"
                                 .to_string(),
                         ),
                         "UNSUPPORTED_SCHEMA" => Some(format!(
@@ -1183,7 +1199,7 @@ async fn execute(cli: Cli) -> Result<Completion> {
 }
 
 fn open_service(database: &Path, cwd: &Path) -> Result<Foremerge> {
-    let service = Foremerge::new(Store::open_current(database)?);
+    let service = Foremerge::new(Store::open(database)?);
     service.bind_repository_cwd(cwd)?;
     Ok(service)
 }

@@ -9,7 +9,8 @@
 
 use crate::Store;
 use crate::db::{
-    DATABASE_SCHEMA_VERSION, SCHEMA_WRITER_KEY, WRITER_QUERY, build_label, readable_writer,
+    DATABASE_SCHEMA_VERSION, LATEST_RELEASED_SCHEMA, SCHEMA_WRITER_KEY, WRITER_QUERY, build_label,
+    readable_writer,
 };
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -416,7 +417,7 @@ fn validate_staged_schema(staged: &Path) -> Result<()> {
 
         // Bring an older backup up to this schema so the two can be compared.
         drop(
-            Store::open(staged).context(
+            Store::open_and_migrate(staged).context(
                 "INVALID_INPUT: the backup could not be brought up to this build's schema",
             )?,
         );
@@ -738,18 +739,22 @@ fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn backup_directory(database: &Path, schema: Option<i64>) -> Result<PathBuf> {
+/// A backup directory name nothing has used yet. The uniqueness check covers
+/// the whole final name, `suffix` included: checking the name before a suffix
+/// was appended let two attempts in the same second share one directory, and a
+/// failed second attempt then deleted the first one's good backup.
+fn backup_directory(database: &Path, schema: Option<i64>, suffix: &str) -> Result<PathBuf> {
     let parent = database
         .parent()
         .context("the ledger path has no parent directory")?;
     let root = parent.join("backups");
     let stamp = Utc::now().format("%Y%m%dT%H%M%SZ");
     let label = schema.map_or_else(|| "unknown-schema".to_string(), |v| format!("schema{v}"));
-    let mut candidate = root.join(format!("{stamp}-{label}"));
+    let mut candidate = root.join(format!("{stamp}-{label}{suffix}"));
     let mut attempt = 1;
     while candidate.exists() {
         attempt += 1;
-        candidate = root.join(format!("{stamp}-{label}-{attempt}"));
+        candidate = root.join(format!("{stamp}-{label}-{attempt}{suffix}"));
     }
     Ok(candidate)
 }
@@ -858,6 +863,7 @@ pub fn reset(
             current
                 .as_ref()
                 .and_then(|value| value["schema_version"].as_i64()),
+            "",
         )?)
     } else {
         None
@@ -978,7 +984,7 @@ pub fn reset(
     }
     // Opening creates a fresh ledger, or brings a restored older one up to
     // this build's schema, so the next client finds it ready.
-    let store = Store::open(database)?;
+    let store = Store::open_and_migrate(database)?;
     drop(store);
     let result = describe(database)?;
 
@@ -994,18 +1000,27 @@ pub fn reset(
     }))
 }
 
-/// Refuse to let a development build write a ledger at its schema unless the
-/// operator says the ledger may carry an unreleased schema.
+/// Refuse to write a ledger at a schema no published release can read unless
+/// the operator says the ledger may carry an unreleased schema.
 ///
-/// A development build's schema can be ahead of every release, and a ledger
-/// it migrates or creates is then unreadable by anything the operator can
-/// install. That is how a real repository's ledger was stranded twice. Release
-/// builds are compiled without debug assertions, which is what `cargo install`
-/// and the release archives produce.
+/// A ledger such a build migrates or creates is unreadable by anything the
+/// operator can install. That is how a real repository's ledger was stranded
+/// twice. The test is the schema, not the compile profile: a release-profile
+/// build of unreleased schema work is just as dangerous as a debug one, and a
+/// debug build at the released schema writes nothing a release cannot read.
 fn ensure_release_build(action: &str, allowed: bool) -> Result<()> {
-    if cfg!(debug_assertions) && !allowed {
+    unreleased_schema_guard(
+        action,
+        DATABASE_SCHEMA_VERSION,
+        LATEST_RELEASED_SCHEMA,
+        allowed,
+    )
+}
+
+fn unreleased_schema_guard(action: &str, schema: i64, released: i64, allowed: bool) -> Result<()> {
+    if schema > released && !allowed {
         bail!(
-            "DEVELOPMENT_BUILD: this is Foremerge {}, which would {action} (schema {DATABASE_SCHEMA_VERSION}); a published release may not be able to open the result. Use a release build, or pass --allow-development-build if only development builds use this ledger",
+            "DEVELOPMENT_BUILD: this is Foremerge {}, which would {action} at schema {schema}, newer than any published release (schema {released}), so no release could open the result. Use a published release, or pass --allow-development-build if only development builds use this ledger",
             build_label()
         );
     }
@@ -1056,14 +1071,7 @@ pub fn migrate(database: &Path, apply: bool, allow_development_build: bool) -> R
         }
     };
     let current = describe(database)?;
-    let backup_dir = backup_directory(database, Some(stored_version))?;
-    let backup_dir = backup_dir.with_file_name(format!(
-        "{}-before-migration",
-        backup_dir
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("backup")
-    ));
+    let backup_dir = backup_directory(database, Some(stored_version), "-before-migration")?;
     let backup = backup_dir.join(database.file_name().context("ledger file name")?);
     if !apply {
         return Ok(json!({
@@ -1088,10 +1096,19 @@ pub fn migrate(database: &Path, apply: bool, allow_development_build: bool) -> R
 
     create_backup_dir(&backup_dir)?;
     if let Err(error) = snapshot_into(database, &backup) {
+        // `backup_directory` never reuses a name, so everything in this
+        // directory came from this attempt and nothing earlier is at risk.
         let _ = std::fs::remove_file(&backup);
-        return Err(error.context("back up the ledger before migrating; nothing was migrated"));
+        let _ = std::fs::remove_dir(&backup_dir);
+        // Keep the typed code, such as CORRUPT_STORE from the integrity check,
+        // in front where JSON callers read it.
+        return Err(crate::integrations::coded(
+            error,
+            "ERROR",
+            "back up the ledger before migrating; nothing was migrated",
+        ));
     }
-    let store = Store::open(database)?;
+    let store = Store::open_and_migrate(database)?;
     drop(store);
     let migrated = describe(database)?;
     Ok(json!({
@@ -1103,8 +1120,55 @@ pub fn migrate(database: &Path, apply: bool, allow_development_build: bool) -> R
         "ledger": migrated,
         "warnings": warnings,
         "next_step": format!(
-            "Restart the agent client sessions in this repository. To roll back, install the Foremerge release that used schema {stored_version} and run `foremerge ledger reset --yes --from {}` with it",
+            "Restart the agent client sessions in this repository. To roll back, install the Foremerge release that used schema {stored_version} (0.4.3 or later, since older releases have no `ledger reset`) and run `foremerge ledger reset --yes --from {}` with it",
             backup.display()
         ),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unreleased_schema_needs_permission_whatever_the_build_profile() {
+        let refused = unreleased_schema_guard("migrate the ledger", 10, 9, false)
+            .expect_err("a schema no release reads must be refused");
+        let message = format!("{refused:#}");
+        assert!(message.starts_with("DEVELOPMENT_BUILD:"), "{message}");
+        assert!(
+            message.contains("at schema 10, newer than any published release (schema 9)"),
+            "{message}"
+        );
+        unreleased_schema_guard("migrate the ledger", 10, 9, true)
+            .expect("--allow-development-build lets it through");
+    }
+
+    #[test]
+    fn the_released_schema_needs_no_permission_whatever_the_build_profile() {
+        unreleased_schema_guard("migrate the ledger", 9, 9, false)
+            .expect("a ledger at the released schema is readable by the release");
+    }
+
+    #[test]
+    fn a_retried_backup_in_the_same_second_gets_its_own_directory() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let database = temp.path().join("state.sqlite3");
+        let first = backup_directory(&database, Some(8), "-before-migration").expect("first");
+        assert!(
+            first
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with("-schema8-before-migration")),
+            "{}",
+            first.display()
+        );
+        std::fs::create_dir_all(&first).expect("first attempt's directory");
+        let second = backup_directory(&database, Some(8), "-before-migration").expect("second");
+        assert_ne!(
+            first, second,
+            "a retry must not reuse the first backup's directory"
+        );
+        assert!(!second.exists());
+    }
 }

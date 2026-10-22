@@ -89,6 +89,7 @@ with each other.
 | `server.json` | the MCP registry entry, in two places: `version` and `packages[0].version`. Both name the crate version, because the registry lists the crates.io package |
 | `npm/foremerge/package.json` | the npm launcher, in six places: `version` and the five pins under `optionalDependencies`. The platform packages are generated from it in step 9 |
 | `npm/foremerge/README.md` | the npm package page: the pinned `foremerge@<version>` in the install and `npx` examples |
+| `src/db.rs` | `LATEST_RELEASED_SCHEMA`, **only when this release ships a ledger schema change**: set it to the new `DATABASE_SCHEMA_VERSION`. Until it is, builds of the new schema refuse `ledger migrate` and `ledger reset` without `--allow-development-build` and stamp ledgers as development builds |
 
 `tests/skill_parity.rs` fails when the plugin manifest, either version in
 `server.json`, or any version in the npm launcher or its README falls behind
