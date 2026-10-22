@@ -174,8 +174,8 @@ fn remedy(code: &str) -> String {
         // Migrating is one way, so it is the operator's step, never the
         // server's: an older client still using the ledger would be locked out.
         format!(
-            "This server is Foremerge {} and the ledger is at an older schema. Upgrade every client in this repository to this version, close their sessions, run `foremerge ledger migrate --yes` in the repository (it backs the ledger up first), {RELAUNCH}.",
-            env!("CARGO_PKG_VERSION")
+            "This server is Foremerge {} and the ledger is at an older schema. Upgrade every client in this repository to this version and close their sessions. Then, in the repository, run `foremerge ledger migrate` to see what it will do and `foremerge ledger migrate --yes` to do it (it backs the ledger up first), {RELAUNCH}.",
+            crate::db::build_label()
         )
     } else if code == "UNSUPPORTED_SCHEMA" {
         // Name the binary: the client may launch a different one than the

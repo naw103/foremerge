@@ -21,15 +21,26 @@ changes when they are called out here with a migration note.
   only reports what it would do. A migration is one way, and any command
   reached it, including ones that only read: a `status` run by a newer binary
   from the wrong directory locked every older client out of a real repository.
+  The check runs on the connection that opens the ledger, inside the
+  transaction that would migrate it, so it waits for a locked ledger as long as
+  any other open does. `foremerge setup` leaves an existing ledger alone, so
+  clients can be repointed at the new binary before the migration, and warns
+  when one is needed.
 
-  Migration: after upgrading every client, close the sessions in each
-  coordinated repository and run `foremerge ledger migrate --yes` there.
+  For library users, `foremerge::Store::open` no longer migrates either: it
+  refuses an older ledger with `MIGRATION_REQUIRED`. Migrating is available only
+  through `foremerge ledger migrate`.
+
+  Migration: after upgrading every client and running `foremerge setup` with
+  it, close the sessions in each coordinated repository and run `foremerge
+  ledger migrate` to see what it will do, then `foremerge ledger migrate --yes`.
   `foremerge doctor` reports `MIGRATION_REQUIRED` with that step.
-- A development build (one compiled with debug assertions, which `cargo
-  install` and the release archives are not) refuses `ledger migrate` and
-  `ledger reset` without `--allow-development-build`. Its schema can be ahead
-  of every release, and a ledger it writes would then open with nothing the
-  operator can install.
+- A build whose ledger schema is newer than any published release refuses
+  `ledger migrate` and `ledger reset` without `--allow-development-build`, and
+  records itself in the ledger as a development build. A ledger it writes would
+  open with nothing the operator can install. The test is the schema, not how
+  the binary was compiled: a release-profile build of unreleased schema work is
+  refused too, and a debug build at the released schema is not.
 
 ## [0.5.1] - 2026-10-03
 

@@ -494,7 +494,8 @@ the session is not coordinated with other agents.
 - `MIGRATION_REQUIRED` means the ledger is at an older schema than this build
   uses, and this build will not migrate it on its own. Follow
   [Upgrading Foremerge](#upgrading-foremerge): upgrade every client, close the
-  sessions, run `foremerge ledger migrate --yes`, and restart them.
+  sessions, run `foremerge ledger migrate` to see what it will do, then
+  `foremerge ledger migrate --yes`, and restart them.
 - `UNSUPPORTED_SCHEMA` means a newer Foremerge build has already migrated the
   ledger. From 0.4.3 the message names that build's version when the ledger
   recorded it. Upgrade the binary the client launches to that version or newer,
@@ -586,7 +587,9 @@ To upgrade:
    yourself for any installation you mean to keep.
 2. Close the agent client sessions in each coordinated repository.
 3. Run `foremerge setup all` (or the clients you use) from each repository with
-   the upgraded binary, so every client configuration launches it.
+   the upgraded binary, so every client configuration launches it. Setup only
+   writes client configuration and leaves an existing ledger alone, so it works
+   before the migration; when the ledger needs one, its `warnings` say so.
 4. Run `foremerge doctor --client all`. Each client's `mcp_command` should be
    the binary you upgraded, with no `warnings`. If `database_error` is
    `MIGRATION_REQUIRED`, run `foremerge ledger migrate` to see what it will do,
