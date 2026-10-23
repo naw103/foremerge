@@ -739,54 +739,91 @@ fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// A backup directory name nothing has used yet. The uniqueness check covers
-/// the whole final name, `suffix` included: checking the name before a suffix
-/// was appended let two attempts in the same second share one directory, and a
-/// failed second attempt then deleted the first one's good backup.
+/// The backup directory a dry run reports. It only previews a name: by the time
+/// the operator reruns with `--yes`, [`reserve_backup_dir`] may have to pick
+/// another one.
 fn backup_directory(database: &Path, schema: Option<i64>, suffix: &str) -> Result<PathBuf> {
-    let parent = database
-        .parent()
-        .context("the ledger path has no parent directory")?;
-    let root = parent.join("backups");
-    let stamp = Utc::now().format("%Y%m%dT%H%M%SZ");
-    let label = schema.map_or_else(|| "unknown-schema".to_string(), |v| format!("schema{v}"));
-    let mut candidate = root.join(format!("{stamp}-{label}{suffix}"));
+    let root = backup_root(database)?;
+    let stamp = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let label = backup_label(schema);
     let mut attempt = 1;
+    let mut candidate = root.join(backup_name(&stamp, &label, attempt, suffix));
     while candidate.exists() {
         attempt += 1;
-        candidate = root.join(format!("{stamp}-{label}-{attempt}{suffix}"));
+        candidate = root.join(backup_name(&stamp, &label, attempt, suffix));
     }
     Ok(candidate)
 }
 
-/// Create a backup directory and its `backups` parent, private to the owner.
+/// Create a backup directory that no other process can also be given, private
+/// to the owner, and return it.
 ///
-/// Only the directories this creates are made private. An earlier version also
-/// chmodded the parent of whatever it was given, which for the default ledger
-/// path is the repository's `.git` directory, and for an unusual `--database`
-/// could be any directory at all.
-fn create_backup_dir(path: &Path) -> Result<()> {
+/// Looking for a free name and then creating it is a race. Two migrations in
+/// the same second both found one name free and both wrote into it; the one
+/// that failed then deleted the other's backup while cleaning up after itself.
+/// `create_dir` either makes the directory or reports that it exists, so a
+/// name is never handed out twice, and everything in the directory it returns
+/// belongs to the caller.
+fn reserve_backup_dir(database: &Path, schema: Option<i64>, suffix: &str) -> Result<PathBuf> {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    if let Some(root) = path.parent() {
-        // Only tighten what this call brings into existence. An operator's own
-        // `backups` directory, or a symlink standing in for one, is theirs: an
-        // earlier version chmodded whatever it found, including through a
-        // symlink to a directory elsewhere.
-        let existed = root.symlink_metadata().is_ok();
-        std::fs::create_dir_all(root).with_context(|| format!("create {}", root.display()))?;
-        #[cfg(unix)]
-        if !existed {
-            std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
-        }
-    }
-    let existed = path.symlink_metadata().is_ok();
-    std::fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
+    let root = backup_root(database)?;
+    // Only tighten what this call brings into existence. An operator's own
+    // `backups` directory, or a symlink standing in for one, is theirs: an
+    // earlier version chmodded whatever it found, including through a symlink
+    // to a directory elsewhere. The ledger's own directory is never touched:
+    // for the default ledger path its parent is the repository's `.git`.
+    let existed = root.symlink_metadata().is_ok();
+    std::fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
     #[cfg(unix)]
     if !existed {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
     }
-    Ok(())
+    let stamp = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let label = backup_label(schema);
+    for attempt in 1..=MAX_BACKUP_ATTEMPTS {
+        let candidate = root.join(backup_name(&stamp, &label, attempt, suffix));
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => {
+                #[cfg(unix)]
+                std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o700))?;
+                return Ok(candidate);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(anyhow::Error::from(error))
+                    .with_context(|| format!("create {}", candidate.display()));
+            }
+        }
+    }
+    bail!(
+        "ERROR: {MAX_BACKUP_ATTEMPTS} backup directories named {stamp}-{label} already exist in {}",
+        root.display()
+    )
+}
+
+/// How many same-second names [`reserve_backup_dir`] tries before giving up.
+const MAX_BACKUP_ATTEMPTS: u32 = 1000;
+
+fn backup_root(database: &Path) -> Result<PathBuf> {
+    Ok(database
+        .parent()
+        .context("the ledger path has no parent directory")?
+        .join("backups"))
+}
+
+fn backup_label(schema: Option<i64>) -> String {
+    schema.map_or_else(|| "unknown-schema".to_string(), |v| format!("schema{v}"))
+}
+
+/// The whole final name, `suffix` included: a check on the name before the
+/// suffix was appended once let two attempts share one directory.
+fn backup_name(stamp: &str, label: &str, attempt: u32, suffix: &str) -> String {
+    if attempt == 1 {
+        format!("{stamp}-{label}{suffix}")
+    } else {
+        format!("{stamp}-{label}-{attempt}{suffix}")
+    }
 }
 
 /// `foremerge ledger reset`: set the ledger aside intact and start a fresh one
@@ -857,14 +894,11 @@ pub fn reset(
     let restore = from
         .map(|source| validate_restore_source(source, database, repository))
         .transpose()?;
+    let current_schema = current
+        .as_ref()
+        .and_then(|value| value["schema_version"].as_i64());
     let backup_dir = if present {
-        Some(backup_directory(
-            database,
-            current
-                .as_ref()
-                .and_then(|value| value["schema_version"].as_i64()),
-            "",
-        )?)
+        Some(backup_directory(database, current_schema, "")?)
     } else {
         None
     };
@@ -914,16 +948,25 @@ pub fn reset(
         None => None,
     };
 
+    // The dry run only previewed a name. The directory the files move into is
+    // reserved now, so a concurrent reset or migration cannot be given it too.
+    let backup_dir = match backup_dir {
+        Some(_) => match reserve_backup_dir(database, current_schema, "") {
+            Ok(reserved) => Some(reserved),
+            Err(error) => {
+                // A staged copy is the whole coordination history sitting
+                // beside the ledger. Failing to make the backup directory must
+                // not leave it there.
+                if let Some(staged) = staged.as_ref() {
+                    let _ = std::fs::remove_file(staged);
+                }
+                return Err(error);
+            }
+        },
+        None => None,
+    };
     let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
     if let Some(backup_dir) = backup_dir.as_ref() {
-        // A staged copy is the whole coordination history sitting beside the
-        // ledger. Failing to make the backup directory must not leave it there.
-        if let Err(error) = create_backup_dir(backup_dir) {
-            if let Some(staged) = staged.as_ref() {
-                let _ = std::fs::remove_file(staged);
-            }
-            return Err(error);
-        }
         let components = match ledger_components(database) {
             Ok(components) => components,
             Err(error) => {
@@ -1071,9 +1114,10 @@ pub fn migrate(database: &Path, apply: bool, allow_development_build: bool) -> R
         }
     };
     let current = describe(database)?;
-    let backup_dir = backup_directory(database, Some(stored_version), "-before-migration")?;
-    let backup = backup_dir.join(database.file_name().context("ledger file name")?);
+    let file_name = database.file_name().context("ledger file name")?;
     if !apply {
+        let backup_dir = backup_directory(database, Some(stored_version), "-before-migration")?;
+        let backup = backup_dir.join(file_name);
         return Ok(json!({
             "applied": false,
             "database": database,
@@ -1094,10 +1138,11 @@ pub fn migrate(database: &Path, apply: bool, allow_development_build: bool) -> R
         }));
     }
 
-    create_backup_dir(&backup_dir)?;
+    let backup_dir = reserve_backup_dir(database, Some(stored_version), "-before-migration")?;
+    let backup = backup_dir.join(file_name);
     if let Err(error) = snapshot_into(database, &backup) {
-        // `backup_directory` never reuses a name, so everything in this
-        // directory came from this attempt and nothing earlier is at risk.
+        // The directory was reserved by this process alone, so everything in
+        // it came from this attempt and no other backup is at risk.
         let _ = std::fs::remove_file(&backup);
         let _ = std::fs::remove_dir(&backup_dir);
         // Keep the typed code, such as CORRUPT_STORE from the integrity check,
@@ -1107,6 +1152,21 @@ pub fn migrate(database: &Path, apply: bool, allow_development_build: bool) -> R
             "ERROR",
             "back up the ledger before migrating; nothing was migrated",
         ));
+    }
+    // Another `ledger migrate` can finish between the version check above and
+    // the snapshot. This backup would then hold the new schema under a name and
+    // a rollback instruction that promise the old one, so it is discarded.
+    // A ledger that predates the stamp has none and reads as schema 0.
+    let backed_up = describe(&backup)
+        .ok()
+        .and_then(|summary| summary["schema_version"].as_i64())
+        .unwrap_or(0);
+    if backed_up != stored_version {
+        let _ = std::fs::remove_file(&backup);
+        let _ = std::fs::remove_dir(&backup_dir);
+        bail!(
+            "LEDGER_IN_USE: the ledger changed from schema {stored_version} while it was being backed up, most likely because another `foremerge ledger migrate` ran at the same time. This run migrated nothing and kept no backup; run `foremerge ledger migrate` to see where the ledger stands"
+        );
     }
     let store = Store::open_and_migrate(database)?;
     drop(store);
@@ -1154,7 +1214,7 @@ mod tests {
     fn a_retried_backup_in_the_same_second_gets_its_own_directory() {
         let temp = tempfile::tempdir().expect("temp dir");
         let database = temp.path().join("state.sqlite3");
-        let first = backup_directory(&database, Some(8), "-before-migration").expect("first");
+        let first = reserve_backup_dir(&database, Some(8), "-before-migration").expect("first");
         assert!(
             first
                 .file_name()
@@ -1163,12 +1223,41 @@ mod tests {
             "{}",
             first.display()
         );
-        std::fs::create_dir_all(&first).expect("first attempt's directory");
-        let second = backup_directory(&database, Some(8), "-before-migration").expect("second");
+        let second = reserve_backup_dir(&database, Some(8), "-before-migration").expect("second");
         assert_ne!(
             first, second,
             "a retry must not reuse the first backup's directory"
         );
-        assert!(!second.exists());
+        assert!(first.is_dir() && second.is_dir());
+    }
+
+    /// Checking for a free name and then creating it handed one directory to
+    /// two concurrent migrations, and the one that failed deleted the other's
+    /// backup. Every caller racing for a name in the same second must get its
+    /// own directory.
+    #[test]
+    fn concurrent_backups_never_share_a_directory() {
+        const CALLERS: usize = 16;
+        for _ in 0..20 {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let database = temp.path().join("state.sqlite3");
+            let start = std::sync::Arc::new(std::sync::Barrier::new(CALLERS));
+            let reserved: Vec<PathBuf> = (0..CALLERS)
+                .map(|_| {
+                    let database = database.clone();
+                    let start = start.clone();
+                    std::thread::spawn(move || {
+                        start.wait();
+                        reserve_backup_dir(&database, Some(8), "-before-migration")
+                            .expect("reserve")
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| handle.join().expect("caller"))
+                .collect();
+            let distinct: std::collections::BTreeSet<_> = reserved.iter().collect();
+            assert_eq!(distinct.len(), CALLERS, "{reserved:?}");
+        }
     }
 }

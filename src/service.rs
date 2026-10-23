@@ -3609,6 +3609,18 @@ fn ensure_validation_root(requested: &std::path::Path, root: &std::path::Path) -
     Ok(())
 }
 
+/// Refuse a ledger bound to another repository, reading it without writing to
+/// it. Unlike opening it, this also works on a ledger this build would first
+/// have to migrate, which is what `setup` meets during an upgrade.
+pub(crate) fn ensure_ledger_repository(
+    database: &std::path::Path,
+    common_dir: &std::path::Path,
+) -> Result<()> {
+    let store = Store::open_existing_read_only(database)?;
+    let conn = store.lock()?;
+    ensure_repository_matches(&conn, common_dir)
+}
+
 fn ensure_repository_matches(conn: &Connection, common_dir: &std::path::Path) -> Result<()> {
     let expected: Option<String> = conn
         .query_row(

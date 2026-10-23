@@ -624,9 +624,10 @@ foremerge ledger reset --yes --from BACKUP    # set it aside, restore BACKUP
   available the command warns instead, so close the sessions yourself.
 - `--from` copies the backup rather than moving it, checks its integrity, and
   refuses a backup whose schema is newer than the running build.
-- A development build refuses both `ledger reset` and `ledger migrate` unless
-  given `--allow-development-build`: its schema can be ahead of every release,
-  and a ledger it writes may then open with nothing you can install.
+- A build whose schema is newer than the latest published release refuses
+  both `ledger reset` and `ledger migrate` unless given
+  `--allow-development-build`: a ledger it writes would open with nothing you
+  can install. A build at the published schema needs no flag.
 - The repository's trusted checks (`checks.json`) and API token are separate
   files and are not touched.
 

@@ -735,10 +735,16 @@ async fn execute(cli: Cli) -> Result<Completion> {
             // existing ledger, so it leaves one alone. That lets an upgrade
             // repoint every client at the new binary before `ledger migrate`,
             // as the upgrade guide orders it, instead of refusing with
-            // MIGRATION_REQUIRED. A repository with no ledger yet still gets one.
+            // MIGRATION_REQUIRED. It still refuses a ledger bound to another
+            // repository, as opening it did, read without writing so the check
+            // works before the migration. A repository with no ledger yet still
+            // gets one.
             let existing = Store::peek_schema_version(&database)?;
-            if existing.is_none() {
-                open_service(&database, &cwd)?;
+            match existing {
+                None => {
+                    open_service(&database, &cwd)?;
+                }
+                Some(_) => crate::service::ensure_ledger_repository(&database, &repo.common_dir)?,
             }
             let token_path = ensure_token(&cwd)?;
             let executable = std::env::current_exe().context("resolve Foremerge executable")?;
