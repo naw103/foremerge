@@ -17,15 +17,19 @@ changes when they are called out here with a migration note.
   `foremerge ledger migrate` performs the migration: it refuses while any other
   process has the ledger open, copies the ledger with its WAL contents into
   `backups/<timestamp>-schema<N>-before-migration/`, checks the copy's
-  integrity, then migrates, and prints how to roll back. Without `--yes` it
+  integrity, then migrates, and prints how to roll back. Each run gets a
+  backup directory of its own, even when several run at once, and a run whose
+  ledger changes while it is being backed up migrates nothing and keeps no
+  backup. Without `--yes` it
   only reports what it would do. A migration is one way, and any command
   reached it, including ones that only read: a `status` run by a newer binary
   from the wrong directory locked every older client out of a real repository.
   The check runs on the connection that opens the ledger, inside the
   transaction that would migrate it, so it waits for a locked ledger as long as
-  any other open does. `foremerge setup` leaves an existing ledger alone, so
+  any other open does, and a refused ledger's file, journal mode included, is
+  left exactly as it was. `foremerge setup` leaves an existing ledger alone, so
   clients can be repointed at the new binary before the migration, and warns
-  when one is needed.
+  when one is needed. It still refuses a ledger bound to another repository.
 
   For library users, `foremerge::Store::open` no longer migrates either: it
   refuses an older ledger with `MIGRATION_REQUIRED`. Migrating is available only

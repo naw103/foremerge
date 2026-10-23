@@ -60,6 +60,11 @@ jobs:
       - name: Test portable library and binaries
         run: cargo test --workspace --lib --bins --all-features
 
+      # Ignored in ordinary runs, since the schema may run ahead between
+      # releases. A release must name its own schema as the latest published.
+      - name: Check the release names its own ledger schema
+        run: cargo test --lib --all-features db::tests::a_release_publishes_its_own_schema -- --ignored --exact
+
       - name: Execute benchmark corpus
         run: cargo test --test benchmark_scenarios -- --nocapture
 

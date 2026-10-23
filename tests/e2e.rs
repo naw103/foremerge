@@ -1,5 +1,5 @@
 use foremerge::{Foremerge, Store, checks, mcp};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OpenFlags, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashSet};
@@ -8534,6 +8534,140 @@ fn the_upgrade_sequence_sets_up_clients_before_migrating() {
     );
     let status = cli_success(&repo.root, None, ["status"]);
     assert_eq!(status["data"]["agents"][0]["name"], "kept", "{status}");
+}
+
+/// A copied ledger is bound to the repository it came from. Opening it refused
+/// the copy, and setup used to open it. Setup now leaves an existing ledger
+/// unopened so an upgrade can set clients up before migrating, and must still
+/// refuse another repository's ledger, older schema or not, before it writes
+/// anything.
+#[test]
+fn setup_refuses_a_ledger_bound_to_another_repository() {
+    let origin = create_repo();
+    let origin_database = database_from_doctor(&origin.root);
+    let copy = create_repo();
+    let copy_database = copy.root.join(".git/foremerge/state.sqlite3");
+    for stamp_older in [false, true] {
+        if stamp_older {
+            stamp_older_schema(&origin_database);
+        }
+        fs::create_dir_all(copy_database.parent().expect("ledger directory"))
+            .expect("ledger directory");
+        fs::copy(&origin_database, &copy_database).expect("copy the ledger");
+
+        let refused = cli_failure(&copy.root, None, ["setup", "codex", "--skip-mcp"]);
+        assert_eq!(refused["error"]["code"], "INVALID_INPUT", "{refused}");
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("different Git repository")),
+            "{refused}"
+        );
+        assert!(
+            !copy.root.join(".codex").exists() && !copy.root.join(".agents").exists(),
+            "setup must refuse before it installs anything"
+        );
+    }
+}
+
+/// A refused open must leave the ledger as it found it. The journal mode is
+/// stored in the file, and the open once switched it to WAL before checking the
+/// schema, so a ledger the command refused to touch came back changed.
+#[test]
+fn a_refused_ledger_is_left_byte_for_byte_as_it_was() {
+    let repo = create_repo();
+    let database = database_from_doctor(&repo.root);
+    {
+        let conn = Connection::open(&database).expect("open ledger");
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode = DELETE", [], |row| row.get(0))
+            .expect("leave WAL");
+        assert_eq!(mode, "delete");
+    }
+    stamp_older_schema(&database);
+    let sidecars = |database: &Path| {
+        ["-wal", "-shm", "-journal"]
+            .into_iter()
+            .filter(|suffix| PathBuf::from(format!("{}{suffix}", database.display())).exists())
+            .collect::<Vec<_>>()
+    };
+    let before = fs::read(&database).expect("read ledger");
+    assert_eq!(sidecars(&database), Vec::<&str>::new());
+
+    let refused = cli_failure(&repo.root, None, ["status"]);
+    assert_eq!(refused["error"]["code"], "MIGRATION_REQUIRED", "{refused}");
+    Store::open(&database)
+        .err()
+        .expect("the library open refuses it too");
+
+    assert!(
+        fs::read(&database).expect("read ledger") == before,
+        "a refused open changed the ledger file"
+    );
+    assert_eq!(sidecars(&database), Vec::<&str>::new());
+}
+
+/// Concurrent migrations of one ledger once shared a backup directory, and the
+/// one that failed deleted a backup another had reported. Every backup a
+/// migration reports must exist, be intact, and hold the schema it migrated
+/// from. Whether processes collide depends on timing, so this catches the old
+/// race most runs rather than every run; the unit test
+/// `concurrent_backups_never_share_a_directory` is the deterministic check.
+#[test]
+fn concurrent_migrations_keep_every_backup_they_report() {
+    let repo = create_repo();
+    let database = database_from_doctor(&repo.root);
+    Connection::open(&database)
+        .expect("open ledger")
+        .execute_batch(
+            "CREATE TABLE filler(b BLOB);
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 16)
+             INSERT INTO filler SELECT randomblob(1048576) FROM n;",
+        )
+        .expect("make the backup slow enough to overlap");
+    for _ in 0..6 {
+        let (_, older) = stamp_older_schema(&database);
+        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let outputs: Vec<Value> = (0..8)
+            .map(|_| {
+                let root = repo.root.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    parse_cli_json(&cli_output(&root, None, ["ledger", "migrate", "--yes"]))
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().expect("migration"))
+            .collect();
+        let mut reported = 0;
+        for output in &outputs {
+            if output["ok"] != true || output["data"]["applied"] != true {
+                continue;
+            }
+            reported += 1;
+            let backup = PathBuf::from(data_string(output, "backup"));
+            assert!(backup.is_file(), "a reported backup is gone: {output}");
+            let conn = Connection::open_with_flags(&backup, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .expect("open backup");
+            let integrity: String = conn
+                .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+                .expect("integrity check");
+            assert_eq!(integrity, "ok", "{output}");
+            assert_eq!(schema_stamp_read_only(&conn), older.to_string(), "{output}");
+        }
+        assert!(reported >= 1, "no migration succeeded: {outputs:?}");
+    }
+}
+
+fn schema_stamp_read_only(conn: &Connection) -> String {
+    conn.query_row(
+        "SELECT value FROM meta WHERE key = 'schema_version'",
+        [],
+        |row| row.get(0),
+    )
+    .expect("read schema stamp")
 }
 
 /// A library caller is held to the same rule as a command. This test is a

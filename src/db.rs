@@ -214,6 +214,10 @@ impl Store {
         .with_context(|| format!("open SQLite database {}", path.display()))?;
         Self::configure(&conn)?;
         Self::migrate(&conn, migration)?;
+        // Only after the schema check: unlike the settings in `configure`, the
+        // journal mode is stored in the file, so switching it before a refusal
+        // would change a ledger this open was refusing to touch.
+        Self::use_write_ahead_log(&conn)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -274,6 +278,7 @@ impl Store {
         let conn = Connection::open_in_memory()?;
         Self::configure(&conn)?;
         Self::migrate(&conn, Migration::Apply)?;
+        Self::use_write_ahead_log(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             path: Arc::new(PathBuf::from(":memory:")),
@@ -282,6 +287,8 @@ impl Store {
         })
     }
 
+    /// Settings that last only as long as this connection. Nothing here
+    /// writes to the database file.
     fn configure(conn: &Connection) -> Result<()> {
         conn.busy_timeout(Duration::from_secs(10))?;
         conn.execute_batch(
@@ -290,8 +297,16 @@ impl Store {
             // silently bypasses the immutability guards on validation_attempts,
             // conflict_detections, and events.
             "PRAGMA foreign_keys = ON;
-             PRAGMA recursive_triggers = ON;
-             PRAGMA journal_mode = WAL;
+             PRAGMA recursive_triggers = ON;",
+        )?;
+        Ok(())
+    }
+
+    /// Switch the ledger to write-ahead logging. The journal mode is stored in
+    /// the file, so this runs only once the ledger has been accepted.
+    fn use_write_ahead_log(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;",
         )?;
         Ok(())
@@ -1948,6 +1963,20 @@ fn parse_json_column(value: String, index: usize) -> rusqlite::Result<Value> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// Run by the release workflow on a tag, not by `cargo test`: between
+    /// releases the schema is allowed to run ahead of the last published one.
+    /// A release that ships a schema without advancing `LATEST_RELEASED_SCHEMA`
+    /// would refuse `ledger migrate` without `--allow-development-build` and
+    /// stamp every ledger it migrated as a development build.
+    #[test]
+    #[ignore = "release check, run by .github/workflows/release.yml on a tag"]
+    fn a_release_publishes_its_own_schema() {
+        assert!(
+            !writes_unreleased_schema(),
+            "DATABASE_SCHEMA_VERSION is {DATABASE_SCHEMA_VERSION} but LATEST_RELEASED_SCHEMA is {LATEST_RELEASED_SCHEMA}; advance LATEST_RELEASED_SCHEMA in the release commit (docs/RELEASING.md)"
+        );
+    }
 
     #[test]
     fn graph_snapshot_fails_closed_on_corrupt_projection_json() {
