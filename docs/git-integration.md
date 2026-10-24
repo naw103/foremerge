@@ -266,9 +266,13 @@ contains the accepted candidate. It checks in two steps.
      unchanged. That allows other edits to the same file, such as changelog
      entries that reached the target branch first, while refusing a file that
      lacks or contradicts any of the candidate's lines;
-   - a path the candidate deleted must be absent, a file mode the candidate
-     set must match, and symbolic links, submodules and binary files must
-     match exactly.
+   - a path the candidate deleted must be absent;
+   - the kind of entry must match, a regular file, a symbolic link or a
+     submodule, checked before contents are compared, because a link's blob
+     is its target text and can equal a file's blob while reading as
+     something else;
+   - a file mode the candidate set must match, and symbolic links,
+     submodules and binary files must match exactly.
 
    The merge is `git merge-file`, which reads no attributes, so a custom merge
    driver configured in the repository cannot make a missing change look

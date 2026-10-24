@@ -120,9 +120,9 @@ changes when they are called out here with a migration note.
   candidate changed since its merge base with that commit holds the
   candidate's change there: an identical file, or a file whose three-way line
   merge with the candidate's version is clean and changes nothing, so edits
-  that reached the target branch first are allowed. Deletions and file modes
-  must match, and binary files, symbolic links and submodules must be
-  identical. A commit from before the candidate, a commit missing any part of
+  that reached the target branch first are allowed. Deletions, the kind of
+  entry (regular file, symbolic link or submodule) and file modes must match,
+  and binary files, symbolic links and submodules must be identical. A commit from before the candidate, a commit missing any part of
   the candidate, and a candidate that changes nothing are refused, and the
   refusal names each missing path, why, and what to do next. A squash that
   also carries other work is accepted, as a merge commit that brings in other
