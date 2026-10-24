@@ -9110,3 +9110,642 @@ fn a_ledger_locked_briefly_by_another_process_is_waited_for() {
     release.join().expect("lock holder");
     assert_eq!(status["ok"], true, "{status}");
 }
+
+// Recording a landing that rewrote the accepted commits (#38).
+//
+// A squash merge and GitHub's "rebase and merge" both land the accepted work
+// under new commit ids, so the accepted commit is not in the landed commit's
+// history. These pin what `record_commit` and the dependency gate then accept:
+// a landing that provably holds every change the candidate made, and nothing
+// that does not.
+
+/// Twelve numbered lines, so a change near the top and one near the bottom are
+/// far enough apart for a three-way merge to keep both without a conflict.
+fn numbered_notes(edits: &[(usize, &str)]) -> String {
+    (1..=12)
+        .map(|line| {
+            edits
+                .iter()
+                .find(|(number, _)| *number == line)
+                .map(|(_, text)| format!("{text}\n"))
+                .unwrap_or_else(|| format!("line {line}\n"))
+        })
+        .collect()
+}
+
+struct LandingFixture {
+    repo: RepoFixture,
+    intent: String,
+    changeset: String,
+    /// The commit the candidate branched from on `trunk`.
+    fork_point: String,
+    /// The candidate's first commit, which edits only `notes.txt`.
+    first: String,
+    /// The candidate's second and accepted commit, which edits `engine.txt`.
+    accepted: String,
+}
+
+/// An accepted two-commit candidate on `feature`, branched from `trunk`, with
+/// the shared worktree switched back to `trunk` ready for a landing.
+fn accepted_two_commit_candidate() -> LandingFixture {
+    let repo = create_repo();
+    let root = repo.root.clone();
+    git(&root, ["switch", "--quiet", "-c", "trunk"]);
+    fs::write(root.join("notes.txt"), numbered_notes(&[])).expect("write notes");
+    fs::write(root.join("engine.txt"), "engine v1\n").expect("write engine");
+    git(&root, ["add", "notes.txt", "engine.txt"]);
+    git(&root, ["commit", "--quiet", "-m", "trunk base"]);
+    let fork_point = git(&root, ["rev-parse", "HEAD"]);
+
+    git(&root, ["switch", "--quiet", "-c", "feature"]);
+    fs::write(
+        root.join("notes.txt"),
+        numbered_notes(&[(2, "line 2 changed by the candidate")]),
+    )
+    .expect("edit notes");
+    git(&root, ["commit", "--quiet", "-am", "candidate: notes"]);
+    let first = git(&root, ["rev-parse", "HEAD"]);
+    fs::write(root.join("engine.txt"), "engine v2\n").expect("edit engine");
+    git(&root, ["commit", "--quiet", "-am", "candidate: engine"]);
+    let accepted = git(&root, ["rev-parse", "HEAD"]);
+
+    let (agent, intent) = create_active_test_work(&root, "landing-owner", "landing");
+    let changeset = publish_test_revision(&root, &agent, &intent, "Two-commit candidate");
+    cli_success(
+        &root,
+        None,
+        ["changeset", "validate", changeset.as_str(), "--", "true"],
+    );
+    let accepted_changeset = cli_success(&root, None, ["changeset", "accept", changeset.as_str()]);
+    assert_eq!(accepted_changeset["data"]["accepted_commit"], accepted);
+    git(&root, ["switch", "--quiet", "trunk"]);
+    LandingFixture {
+        repo,
+        intent,
+        changeset,
+        fork_point,
+        first,
+        accepted,
+    }
+}
+
+/// Unrelated work landing on `trunk` while the candidate waited for review: it
+/// edits the far end of `notes.txt` and adds a file of its own.
+fn advance_trunk(root: &Path) -> String {
+    fs::write(
+        root.join("notes.txt"),
+        numbered_notes(&[(11, "line 11 changed on trunk")]),
+    )
+    .expect("edit notes on trunk");
+    fs::write(root.join("other.txt"), "other work\n").expect("write other work");
+    git(root, ["add", "notes.txt", "other.txt"]);
+    git(root, ["commit", "--quiet", "-m", "unrelated trunk work"]);
+    git(root, ["rev-parse", "HEAD"])
+}
+
+fn record_landing(root: &Path, changeset: &str, commit: &str) -> Output {
+    cli_output(
+        root,
+        None,
+        ["changeset", "commit", changeset, "--git-ref", commit],
+    )
+}
+
+fn assert_landing_refused(root: &Path, changeset: &str, commit: &str) -> String {
+    let output = record_landing(root, changeset, commit);
+    assert!(
+        !output.status.success(),
+        "recording {commit} should have been refused: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let refused = parse_cli_json(&output);
+    assert_eq!(refused["error"]["code"], "TARGET_DIVERGED", "{refused}");
+    let unchanged = cli_success(root, None, ["changeset", "show", changeset]);
+    assert_eq!(unchanged["data"]["status"], "ACCEPTED", "{unchanged}");
+    assert!(unchanged["data"]["integration_commit"].is_null());
+    refused["error"]["message"]
+        .as_str()
+        .expect("refusal message")
+        .to_string()
+}
+
+fn committed_event(root: &Path, changeset: &str) -> Value {
+    let events = cli_success(root, None, ["events", "list", "--limit", "500"]);
+    events["data"]
+        .as_array()
+        .expect("event list")
+        .iter()
+        .find(|event| {
+            event["event_type"] == "changeset.committed" && event["entity_id"] == changeset
+        })
+        .cloned()
+        .expect("a changeset.committed event")
+}
+
+#[test]
+fn a_squash_merge_of_a_multi_commit_candidate_is_recorded_by_content() {
+    let fixture = accepted_two_commit_candidate();
+    let root = &fixture.repo.root;
+    advance_trunk(root);
+    git(root, ["merge", "--quiet", "--squash", "feature"]);
+    git(root, ["commit", "--quiet", "-m", "Squashed candidate (#1)"]);
+    let squash = git(root, ["rev-parse", "HEAD"]);
+    let ancestry = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["merge-base", "--is-ancestor", &fixture.accepted, &squash])
+        .status()
+        .expect("run git merge-base");
+    assert!(
+        !ancestry.success(),
+        "a squash must not contain the accepted commit"
+    );
+
+    let output = record_landing(root, &fixture.changeset, &squash);
+    assert!(
+        output.status.success(),
+        "squash landing was refused: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let committed = parse_cli_json(&output);
+    assert_eq!(committed["data"]["status"], "COMMITTED");
+    assert_eq!(committed["data"]["integration_commit"], squash);
+    assert_eq!(committed["data"]["accepted_commit"], fixture.accepted);
+    assert_eq!(
+        committed["data"]["provenance"]["integration"]["method"],
+        "content"
+    );
+    assert_eq!(
+        committed["data"]["provenance"]["integration"]["merge_bases"],
+        json!([fixture.fork_point])
+    );
+    assert_eq!(
+        committed["data"]["provenance"]["integration"]["paths_checked"],
+        2
+    );
+    assert_eq!(
+        committed["data"]["provenance"]["integration"]["paths_with_other_changes"],
+        json!(["notes.txt"]),
+        "notes.txt also carries trunk's own edit"
+    );
+    let intent = cli_success(root, None, ["intent", "show", fixture.intent.as_str()]);
+    assert_eq!(intent["data"]["intent"]["status"], "COMMITTED", "{intent}");
+
+    // Later reads show the same evidence, kept beside the original provenance.
+    let shown = cli_success(
+        root,
+        None,
+        ["changeset", "show", fixture.changeset.as_str()],
+    );
+    assert_eq!(
+        shown["data"]["provenance"]["integration"],
+        committed["data"]["provenance"]["integration"]
+    );
+    assert_eq!(
+        shown["data"]["provenance"]["git"]["candidate"], fixture.accepted,
+        "recording must not disturb the published provenance"
+    );
+
+    // The immutable record states how containment was established.
+    let event = committed_event(root, &fixture.changeset);
+    assert_eq!(event["payload"]["integration_commit"], squash);
+    assert_eq!(event["payload"]["integration"]["method"], "content");
+}
+
+#[test]
+fn a_rebase_merge_that_rewrites_every_commit_is_recorded_by_content() {
+    let fixture = accepted_two_commit_candidate();
+    let root = &fixture.repo.root;
+    advance_trunk(root);
+    git(
+        root,
+        [
+            "cherry-pick",
+            "--allow-empty",
+            &fixture.first,
+            &fixture.accepted,
+        ],
+    );
+    let rebased_tip = git(root, ["rev-parse", "HEAD"]);
+    let rebased_first = git(root, ["rev-parse", "HEAD~1"]);
+    assert_ne!(rebased_tip, fixture.accepted);
+
+    // Only the first rewritten commit holds half the candidate: refused.
+    let message = assert_landing_refused(root, &fixture.changeset, &rebased_first);
+    assert!(message.contains("engine.txt"), "{message}");
+
+    let output = record_landing(root, &fixture.changeset, &rebased_tip);
+    assert!(
+        output.status.success(),
+        "rebase landing was refused: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let committed = parse_cli_json(&output);
+    assert_eq!(committed["data"]["status"], "COMMITTED");
+    assert_eq!(committed["data"]["integration_commit"], rebased_tip);
+    assert_eq!(
+        committed["data"]["provenance"]["integration"]["method"],
+        "content"
+    );
+}
+
+#[test]
+fn a_squash_that_drops_part_of_the_candidate_is_refused_until_the_rest_lands() {
+    let fixture = accepted_two_commit_candidate();
+    let root = &fixture.repo.root;
+    advance_trunk(root);
+    git(root, ["merge", "--quiet", "--squash", "feature"]);
+    // The squash loses the engine change, as a bad conflict resolution would.
+    git(root, ["checkout", "trunk", "--", "engine.txt"]);
+    git(
+        root,
+        [
+            "commit",
+            "--quiet",
+            "-m",
+            "Squash missing the engine change",
+        ],
+    );
+    let partial = git(root, ["rev-parse", "HEAD"]);
+
+    let message = assert_landing_refused(root, &fixture.changeset, &partial);
+    assert!(message.contains("engine.txt"), "{message}");
+    assert!(
+        message.contains("publish and validate a revision"),
+        "the refusal should name the next step: {message}"
+    );
+    assert!(
+        !message.contains("notes.txt"),
+        "only the missing path should be named: {message}"
+    );
+
+    // Once the missing change lands as well, the same ChangeSet records.
+    fs::write(root.join("engine.txt"), "engine v2\n").expect("land the rest");
+    git(root, ["commit", "--quiet", "-am", "Land the engine change"]);
+    let complete = git(root, ["rev-parse", "HEAD"]);
+    let committed = cli_success(
+        root,
+        None,
+        [
+            "changeset",
+            "commit",
+            fixture.changeset.as_str(),
+            "--git-ref",
+            complete.as_str(),
+        ],
+    );
+    assert_eq!(committed["data"]["status"], "COMMITTED");
+    assert_eq!(
+        committed["data"]["provenance"]["integration"]["method"],
+        "content"
+    );
+}
+
+#[test]
+fn an_unrelated_commit_touching_the_same_files_is_refused() {
+    let fixture = accepted_two_commit_candidate();
+    let root = &fixture.repo.root;
+
+    // Same files, compatible lines, but none of the candidate's changes.
+    let unrelated = advance_trunk(root);
+    let message = assert_landing_refused(root, &fixture.changeset, &unrelated);
+    assert!(
+        message.contains("notes.txt") && message.contains("engine.txt"),
+        "{message}"
+    );
+
+    // Same files and the same lines, changed differently.
+    fs::write(
+        root.join("notes.txt"),
+        numbered_notes(&[
+            (2, "line 2 changed some other way"),
+            (11, "line 11 changed on trunk"),
+        ]),
+    )
+    .expect("edit notes differently");
+    fs::write(root.join("engine.txt"), "engine v3\n").expect("edit engine differently");
+    git(root, ["commit", "--quiet", "-am", "a different change"]);
+    let different = git(root, ["rev-parse", "HEAD"]);
+    let message = assert_landing_refused(root, &fixture.changeset, &different);
+    assert!(
+        message.contains("notes.txt") && message.contains("engine.txt"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_commit_from_before_the_candidate_is_refused() {
+    let fixture = accepted_two_commit_candidate();
+    let root = &fixture.repo.root;
+    for earlier in [&fixture.fork_point, &fixture.first] {
+        let message = assert_landing_refused(root, &fixture.changeset, earlier);
+        assert!(message.contains("predates"), "{message}");
+        assert!(
+            message.contains("comes after the accepted candidate"),
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn an_empty_candidate_is_recorded_only_through_ancestry() {
+    let repo = create_repo();
+    let root = repo.root.clone();
+    git(&root, ["switch", "--quiet", "-c", "trunk"]);
+    git(&root, ["switch", "--quiet", "-c", "empty-candidate"]);
+    git(
+        &root,
+        [
+            "commit",
+            "--allow-empty",
+            "--quiet",
+            "-m",
+            "changes nothing",
+        ],
+    );
+    let (agent, intent) = create_active_test_work(&root, "empty-owner", "empty-candidate");
+    let changeset = publish_test_revision(&root, &agent, &intent, "Empty candidate");
+    cli_success(
+        &root,
+        None,
+        ["changeset", "validate", changeset.as_str(), "--", "true"],
+    );
+    cli_success(&root, None, ["changeset", "accept", changeset.as_str()]);
+    git(&root, ["switch", "--quiet", "trunk"]);
+    let unrelated = advance_trunk(&root);
+
+    // Every commit "contains" no change, so content proves nothing here.
+    let message = assert_landing_refused(&root, &changeset, &unrelated);
+    assert!(message.contains("no change"), "{message}");
+}
+
+#[test]
+fn ancestry_is_still_checked_first_and_named_as_the_method() {
+    let fixture = accepted_two_commit_candidate();
+    let root = &fixture.repo.root;
+    advance_trunk(root);
+    git(
+        root,
+        [
+            "merge",
+            "--quiet",
+            "--no-ff",
+            "-m",
+            "Merge feature",
+            "feature",
+        ],
+    );
+    let merge = git(root, ["rev-parse", "HEAD"]);
+    let committed = cli_success(
+        root,
+        None,
+        [
+            "changeset",
+            "commit",
+            fixture.changeset.as_str(),
+            "--git-ref",
+            merge.as_str(),
+        ],
+    );
+    assert_eq!(committed["data"]["status"], "COMMITTED");
+    assert_eq!(
+        committed["data"]["provenance"]["integration"]["method"],
+        "ancestor"
+    );
+    let event = committed_event(root, &fixture.changeset);
+    assert_eq!(event["payload"]["integration"]["method"], "ancestor");
+    let shown = cli_success(
+        root,
+        None,
+        ["changeset", "show", fixture.changeset.as_str()],
+    );
+    assert_eq!(
+        shown["data"]["provenance"]["integration"],
+        json!({ "method": "ancestor" })
+    );
+}
+
+/// Publish, validate and try to accept a consumer that depends on the
+/// fixture's intent, from a new worktree at `start`. Returns the consumer's
+/// ChangeSet id and worktree, and the acceptance output.
+fn accept_dependent_consumer(
+    fixture: &LandingFixture,
+    start: &str,
+    name: &str,
+) -> (String, PathBuf, Output) {
+    let worktree = fixture.repo.temp.path().join(name);
+    git(
+        &fixture.repo.root,
+        vec![
+            "worktree".into(),
+            "add".into(),
+            "--quiet".into(),
+            "-b".into(),
+            name.into(),
+            worktree.as_os_str().to_owned(),
+            start.into(),
+        ],
+    );
+    fs::write(worktree.join("consumer.txt"), "builds on the dependency\n").expect("write consumer");
+    git(&worktree, ["add", "consumer.txt"]);
+    git(&worktree, ["commit", "--quiet", "-m", "consumer"]);
+    let agent = register_test_agent(&worktree, name);
+    let intent = cli_success(
+        &worktree,
+        None,
+        [
+            "intent",
+            "publish",
+            "--agent",
+            agent.as_str(),
+            "--task",
+            name,
+            "--summary",
+            "Build on the landed dependency",
+            "--scope",
+            "component:LandingConsumer=extend",
+            "--depends-on",
+            fixture.intent.as_str(),
+        ],
+    );
+    let intent = intent["data"]["intent"]["id"]
+        .as_str()
+        .expect("consumer intent id")
+        .to_string();
+    claim_test_scope(&worktree, &agent, &intent, "component:LandingConsumer");
+    start_test_work(&worktree, &agent, &intent);
+    let published = cli_success(
+        &worktree,
+        None,
+        [
+            "changeset",
+            "publish",
+            "--agent",
+            agent.as_str(),
+            "--intent",
+            intent.as_str(),
+            "--summary",
+            "Consumer of the landed dependency",
+            "--dependency",
+            fixture.intent.as_str(),
+            "--symbol",
+            "LandingConsumer",
+        ],
+    );
+    let changeset = data_string(&published, "id").to_string();
+    cli_success(
+        &worktree,
+        None,
+        ["changeset", "validate", changeset.as_str(), "--", "true"],
+    );
+    let output = cli_output(&worktree, None, ["changeset", "accept", changeset.as_str()]);
+    (changeset, worktree, output)
+}
+
+#[test]
+fn a_squash_landed_dependency_is_satisfied_through_its_recorded_integration_commit() {
+    let fixture = accepted_two_commit_candidate();
+    let root = &fixture.repo.root;
+    advance_trunk(root);
+    git(root, ["merge", "--quiet", "--squash", "feature"]);
+    git(
+        root,
+        ["commit", "--quiet", "-m", "Squashed dependency (#1)"],
+    );
+    let squash = git(root, ["rev-parse", "HEAD"]);
+
+    // Work started after the squash does not contain the accepted commit, and
+    // until the landing is recorded nothing ties the squash to the dependency.
+    let (consumer, worktree, refused) =
+        accept_dependent_consumer(&fixture, &squash, "consumer-after-squash");
+    assert!(!refused.status.success());
+    let refused = parse_cli_json(&refused);
+    assert_eq!(
+        refused["error"]["code"], "UNSATISFIED_DEPENDENCY",
+        "{refused}"
+    );
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("record_commit"),
+        "{refused}"
+    );
+
+    cli_success(
+        root,
+        None,
+        [
+            "changeset",
+            "commit",
+            fixture.changeset.as_str(),
+            "--git-ref",
+            squash.as_str(),
+        ],
+    );
+    let accepted = cli_success(&worktree, None, ["changeset", "accept", consumer.as_str()]);
+    assert_eq!(accepted["data"]["status"], "ACCEPTED");
+    let events = cli_success(&worktree, None, ["events", "list", "--limit", "500"]);
+    let accepted_event = events["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["event_type"] == "changeset.accepted" && event["entity_id"] == consumer)
+        .cloned()
+        .expect("consumer acceptance event");
+    assert_eq!(
+        accepted_event["payload"]["dependencies"],
+        json!([{
+            "intent_id": fixture.intent,
+            "changeset_id": fixture.changeset,
+            "satisfied_by": "integration_commit",
+            "commit": squash,
+        }])
+    );
+}
+
+#[test]
+fn a_committed_dependency_whose_landing_is_not_in_history_is_still_unsatisfied() {
+    let fixture = accepted_two_commit_candidate();
+    let root = &fixture.repo.root;
+    advance_trunk(root);
+    git(root, ["merge", "--quiet", "--squash", "feature"]);
+    git(
+        root,
+        ["commit", "--quiet", "-m", "Squashed dependency (#1)"],
+    );
+    let squash = git(root, ["rev-parse", "HEAD"]);
+    cli_success(
+        root,
+        None,
+        [
+            "changeset",
+            "commit",
+            fixture.changeset.as_str(),
+            "--git-ref",
+            squash.as_str(),
+        ],
+    );
+
+    // Started from trunk before the squash landed: neither the accepted commit
+    // nor the integration commit is in its history.
+    let (_, _, refused) =
+        accept_dependent_consumer(&fixture, &fixture.fork_point, "consumer-before-squash");
+    assert!(!refused.status.success());
+    let refused = parse_cli_json(&refused);
+    assert_eq!(
+        refused["error"]["code"], "UNSATISFIED_DEPENDENCY",
+        "{refused}"
+    );
+}
+
+/// A recorded integration commit counts for the dependency gate only while
+/// both the dependency's ChangeSet and its intent are COMMITTED. The intent
+/// is moved back by hand here, in a throwaway ledger, because no command
+/// produces that state; the gate must not rely on one record alone.
+#[test]
+fn a_recorded_integration_counts_only_while_the_dependency_intent_is_committed() {
+    let fixture = accepted_two_commit_candidate();
+    let root = &fixture.repo.root;
+    advance_trunk(root);
+    git(root, ["merge", "--quiet", "--squash", "feature"]);
+    git(
+        root,
+        ["commit", "--quiet", "-m", "Squashed dependency (#1)"],
+    );
+    let squash = git(root, ["rev-parse", "HEAD"]);
+    cli_success(
+        root,
+        None,
+        [
+            "changeset",
+            "commit",
+            fixture.changeset.as_str(),
+            "--git-ref",
+            squash.as_str(),
+        ],
+    );
+    let common_dir = git(
+        root,
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    );
+    let ledger = Path::new(&common_dir)
+        .join("foremerge")
+        .join("state.sqlite3");
+    Connection::open(&ledger)
+        .expect("open the throwaway ledger")
+        .execute(
+            "UPDATE intents SET status = 'ACCEPTED' WHERE id = ?1",
+            [&fixture.intent],
+        )
+        .expect("move the dependency intent back");
+
+    let (_, _, refused) =
+        accept_dependent_consumer(&fixture, &squash, "consumer-of-uncommitted-intent");
+    assert!(!refused.status.success());
+    let refused = parse_cli_json(&refused);
+    assert_eq!(
+        refused["error"]["code"], "UNSATISFIED_DEPENDENCY",
+        "{refused}"
+    );
+}

@@ -201,7 +201,8 @@ Acceptance requires:
 - the current worktree to be clean and retain that fingerprint;
 - the selected ref to resolve to the validated worktree `HEAD`;
 - every ChangeSet dependency to name an `ACCEPTED` or `COMMITTED` intent whose
-  stored `accepted_commit` is in the candidate's Git ancestry, with its
+  stored `accepted_commit` (or, for `COMMITTED`, recorded
+  `integration_commit`) is in the candidate's Git ancestry, with its
   namespaced accepted ref still matching that pin; and
 - no open or coordinating high-severity conflict, unless the caller supplies
   both the explicit override and a non-empty reason. Foremerge records that
@@ -212,10 +213,14 @@ moving a branch, and stores the same hash as `accepted_commit`.
 
 ### Accepted to committed
 
-`COMMITTED` means the caller recorded a Git ref that resolves to a commit and
-Git proves the immutable `accepted_commit` is its ancestor. Foremerge stores
-that later hash as `integration_commit`; recording it never replaces the
-accepted pin. The MVP does not prove that the commit landed on a particular
+`COMMITTED` means the caller recorded a Git ref that resolves to a commit that
+contains the immutable `accepted_commit`: Git proves it is an ancestor, or,
+after a squash or rebase merge, every path the candidate changed holds its
+change at that commit (see
+[Git integration](git-integration.md#recording-the-landing-commit)). A commit
+that proves neither is refused with `TARGET_DIVERGED` and the ChangeSet stays
+`ACCEPTED`. Foremerge stores that later hash as `integration_commit`; recording
+it never replaces the accepted pin. The MVP does not prove that the commit landed on a particular
 target branch. Automatic landing is outside its scope.
 
 ## Auxiliary states

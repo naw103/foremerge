@@ -322,7 +322,11 @@ learns about conflicts that later publishes created against it.
 
 On acceptance, the exact validated hash is stored as `accepted_commit` and
 mirrored by `refs/foremerge/accepted/<changeset-id>`. Recording a later landing
-stores `integration_commit`; it does not overwrite the accepted pin.
+stores `integration_commit`; it does not overwrite the accepted pin. The landing
+must have `accepted_commit` in its history or, after a squash or rebase merge,
+hold every change the candidate made; the ChangeSet's `provenance.integration`
+and the `changeset.committed` event say which in `method` (`ancestor` or
+`content`). See [Git integration](git-integration.md#recording-the-landing-commit).
 
 Publishing again after `PROVISIONAL` or `VALIDATED` creates a new ChangeSet with
 `supersedes_changeset_id`, marks the previous record `SUPERSEDED`, and returns
