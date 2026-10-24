@@ -1509,7 +1509,16 @@ mod containment_tests {
             input.push(0);
         }
         git_stdin(root, &["update-index", "-z", "--index-info"], &input);
-        git_output(root, &["write-tree"]).unwrap()
+        let tree = git_output(root, &["write-tree"]).unwrap();
+        // `--index-info` can skip a path it refuses and still succeed, so a
+        // dropped entry would silently change what the test compares.
+        let listed = git_output(root, &["ls-tree", "-r", "-z", "--name-only", &tree]).unwrap();
+        assert_eq!(
+            listed.split('\0').filter(|name| !name.is_empty()).count(),
+            entries.len(),
+            "the tree must hold every entry: {listed:?}"
+        );
+        tree
     }
 
     #[test]
@@ -1519,6 +1528,10 @@ mod containment_tests {
         git(root, &["init", "-q"]);
         git(root, &["config", "user.email", "test@example.com"]);
         git(root, &["config", "user.name", "Test"]);
+        // Git for Windows refuses control characters in paths unless this is
+        // off. Such a path can still arrive in history made elsewhere, and the
+        // check must handle it there too.
+        git(root, &["config", "core.protectNTFS", "false"]);
         let blob = |content: &[u8]| git_stdin(root, &["hash-object", "-w", "--stdin"], content);
         let base_entries = vec![
             ("100644", blob(b"echo\n"), b"tool.sh".to_vec()),
