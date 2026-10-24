@@ -4013,6 +4013,172 @@ fn landed_work_closes_into_a_squash_by_content() {
     }
 }
 
+fn close_as_landed(intent_id: &str, agent_id: &str, landed: &str) -> Vec<String> {
+    vec![
+        "work".to_string(),
+        "discard".to_string(),
+        intent_id.to_string(),
+        "--agent".to_string(),
+        agent_id.to_string(),
+        "--reason".to_string(),
+        "Landed outside acceptance".to_string(),
+        "--landed".to_string(),
+        landed.to_string(),
+    ]
+}
+
+/// A ChangeSet can be published with a symbolic ref such as `HEAD` or a
+/// branch name. What was published is the commit that ref named then, so a
+/// landing is checked against that commit, not against wherever the ref has
+/// moved since. Found in the review of the stopped-work change.
+#[test]
+fn landed_work_is_checked_against_the_published_commit_not_a_moved_ref() {
+    for published_ref in ["HEAD", "feature"] {
+        let repo = create_repo();
+        let trunk = git(&repo.root, ["rev-parse", "--abbrev-ref", "HEAD"]);
+        let (agent_id, intent_id) =
+            create_active_test_work(&repo.root, "moved-ref-agent", "moved-ref");
+        git(&repo.root, ["checkout", "--quiet", "-b", "feature"]);
+        fs::write(repo.root.join("feature.txt"), "feature\n").expect("write feature");
+        git(&repo.root, ["add", "feature.txt"]);
+        git(&repo.root, ["commit", "--quiet", "-m", "feature work"]);
+        let candidate = git(&repo.root, ["rev-parse", "HEAD"]);
+        cli_success(
+            &repo.root,
+            None,
+            [
+                "changeset",
+                "publish",
+                "--agent",
+                agent_id.as_str(),
+                "--intent",
+                intent_id.as_str(),
+                "--summary",
+                "Feature published by a symbolic ref",
+                "--symbol",
+                "RaceTarget",
+                "--git-ref",
+                published_ref,
+            ],
+        );
+        // Move the ref the ChangeSet was published by onto the trunk, which
+        // does not have the feature.
+        git(&repo.root, ["checkout", "--quiet", &trunk]);
+        if published_ref == "feature" {
+            git(&repo.root, ["branch", "--quiet", "-f", "feature", &trunk]);
+        }
+        let refused = cli_failure(
+            &repo.root,
+            None,
+            close_as_landed(&intent_id, &agent_id, &trunk),
+        );
+        assert_eq!(
+            refused["error"]["code"], "TARGET_DIVERGED",
+            "{published_ref}: {refused}"
+        );
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(&candidate)),
+            "{published_ref}: the refusal names the published commit: {refused}"
+        );
+    }
+}
+
+/// A ChangeSet published from a worktree with uncommitted changes describes
+/// more than its commit holds, so no commit can show that the work landed.
+/// Closing it as landed is refused until the work is committed and published
+/// again. Found in the review of the stopped-work change.
+#[test]
+fn landed_work_published_with_uncommitted_changes_is_refused() {
+    let repo = create_repo();
+    let trunk = git(&repo.root, ["rev-parse", "--abbrev-ref", "HEAD"]);
+    let (agent_id, intent_id) = create_active_test_work(&repo.root, "dirty-agent", "dirty");
+    fs::write(
+        repo.root.join("README.md"),
+        "# fixture, edited but not committed\n",
+    )
+    .expect("edit a tracked file");
+    publish_test_revision(&repo.root, &agent_id, &intent_id, "Published with an edit");
+    let refused = cli_failure(
+        &repo.root,
+        None,
+        close_as_landed(&intent_id, &agent_id, &trunk),
+    );
+    assert_eq!(refused["error"]["code"], "STALE_CHANGESET", "{refused}");
+    let status = cli_success(&repo.root, None, ["intent", "show", intent_id.as_str()]);
+    assert_eq!(
+        status["data"]["intent"]["status"], "PROVISIONAL",
+        "{status}"
+    );
+}
+
+/// Findings skipped while an intent's owner had stopped are recorded once the
+/// intent is live again. Verification is one way back: it moves the intent to
+/// VALIDATED without its owner calling anything, and a validated intent is no
+/// longer stopped, so the skipped findings must be recorded then or never.
+/// Found in the review of the stopped-work change.
+#[test]
+fn verification_records_findings_skipped_while_the_owner_was_stopped() {
+    let repo = create_repo();
+    let database = database_from_doctor(&repo.root);
+    let (owner, stopped) = create_active_test_work(&repo.root, "stopped-owner", "stopped");
+    let changeset = publish_test_revision(&repo.root, &owner, &stopped, "Stopped work");
+    {
+        let long_ago = "2020-01-01T00:00:00+00:00";
+        let conn = Connection::open(&database).expect("open ledger");
+        conn.execute(
+            "UPDATE agents SET last_seen_at = ?1 WHERE id = ?2",
+            params![long_ago, owner],
+        )
+        .expect("silence the owner");
+        conn.execute(
+            "UPDATE claims SET lease_expires_at = ?1 WHERE intent_id = ?2",
+            params![long_ago, stopped],
+        )
+        .expect("lapse its claims");
+    }
+    let between = |a: &str, b: &str| -> i64 {
+        Connection::open(&database)
+            .expect("open ledger")
+            .query_row(
+                "SELECT COUNT(*) FROM conflicts
+                 WHERE (source_intent_id = ?1 AND target_intent_id = ?2)
+                    OR (source_intent_id = ?2 AND target_intent_id = ?1)",
+                params![a, b],
+                |row| row.get(0),
+            )
+            .expect("count conflicts")
+    };
+
+    let newcomer = register_test_agent(&repo.root, "newcomer");
+    let overlapping = publish_test_intent(
+        &repo.root,
+        &newcomer,
+        "newcomer-task",
+        "Also extend the race target",
+        "symbol:RaceTarget=extend",
+    );
+    assert_eq!(
+        between(&stopped, &overlapping),
+        0,
+        "an advisory finding against stopped work is not recorded"
+    );
+
+    cli_success(
+        &repo.root,
+        None,
+        ["changeset", "validate", changeset.as_str(), "--", "true"],
+    );
+    let shown = cli_success(&repo.root, None, ["intent", "show", stopped.as_str()]);
+    assert_eq!(shown["data"]["intent"]["status"], "VALIDATED", "{shown}");
+    assert_eq!(
+        between(&stopped, &overlapping),
+        1,
+        "verification brought the intent back, so the skipped finding is recorded"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn validation_timeout_kills_descendants_in_the_validation_process_group() {

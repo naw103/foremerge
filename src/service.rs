@@ -2039,6 +2039,10 @@ impl Foremerge {
                     "PROVISIONAL",
                     "VALIDATED",
                 )?;
+                // A validated intent is no longer stopped work, whoever ran
+                // the check, so findings skipped while its owner was gone are
+                // recorded now or never.
+                record_missed_findings(&tx, &fresh_intent.id, &changeset.agent_id)?;
             }
         } else {
             let changed = tx.execute(
@@ -2544,6 +2548,10 @@ impl Foremerge {
         // work that landed through a squash or rebase merge can be closed too.
         let integration = match candidate.as_ref() {
             None => None,
+            Some(candidate) if candidate.dirty => bail!(
+                "STALE_CHANGESET: ChangeSet {} was published with uncommitted changes, so no commit holds what it describes and none can show that it landed. Commit the work, publish a ChangeSet revision, then close it as landed.",
+                candidate.changeset_id
+            ),
             Some(candidate) => {
                 let candidate_commit = git::verify_ref(&git_dir, &candidate.git_ref)?;
                 if git::is_ancestor(&git_dir, &candidate_commit, &landed_commit)? {
@@ -4099,7 +4107,7 @@ fn touch_agent_closing(tx: &Transaction<'_>, agent_id: &str, closing: Option<&st
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(statement);
         for (intent_id, status) in owned {
-            if ADOPTABLE_INTENT_STATES.contains(&status.as_str())
+            if BACKFILL_INTENT_STATES.contains(&status.as_str())
                 && closing != Some(intent_id.as_str())
             {
                 record_missed_findings(tx, &intent_id, agent_id)?;
@@ -4114,8 +4122,14 @@ fn touch_agent_closing(tx: &Transaction<'_>, agent_id: &str, closing: Option<&st
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CurrentCandidate {
     changeset_id: String,
+    /// The commit the ChangeSet named when it was published. A ChangeSet may
+    /// be published by a symbolic ref such as `HEAD` or a branch, which can
+    /// move afterwards, so this is the commit resolved at publication.
     git_ref: String,
     worktree: Option<String>,
+    /// Whether the published snapshot held uncommitted changes, in which case
+    /// no commit represents what was published.
+    dirty: bool,
 }
 
 /// Where closed work went, verified before the closing transaction opens.
@@ -4132,14 +4146,24 @@ struct LandedWork {
 fn current_candidate(conn: &Connection, intent_id: &str) -> Result<Option<CurrentCandidate>> {
     Ok(conn
         .query_row(
-            "SELECT id, git_ref, worktree FROM changesets
+            "SELECT id, git_ref, worktree, provenance_json FROM changesets
              WHERE intent_id = ?1 AND status <> 'SUPERSEDED' AND git_ref IS NOT NULL",
             [intent_id],
             |row| {
+                let stored_ref: String = row.get(1)?;
+                let provenance: String = row.get(3)?;
+                let git = serde_json::from_str::<Value>(&provenance)
+                    .ok()
+                    .and_then(|value| value.get("git").cloned())
+                    .unwrap_or(Value::Null);
                 Ok(CurrentCandidate {
                     changeset_id: row.get(0)?,
-                    git_ref: row.get(1)?,
+                    git_ref: git["candidate"]
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or(stored_ref),
                     worktree: row.get(2)?,
+                    dirty: git["dirty"].as_bool().unwrap_or(false),
                 })
             },
         )
@@ -4149,6 +4173,18 @@ fn current_candidate(conn: &Connection, intent_id: &str) -> Result<Option<Curren
 /// The states an intent can be left in by an owner that stopped without
 /// closing it: the ones `work adopt` accepts.
 const ADOPTABLE_INTENT_STATES: &[&str] = &["INTENT", "CLAIMED", "IN_PROGRESS", "PROVISIONAL"];
+
+/// The states whose skipped findings are recorded when the owner returns: every
+/// state still compared against new work. Wider than the adoptable states,
+/// because an intent can leave stopped work for VALIDATED without its owner
+/// calling anything.
+const BACKFILL_INTENT_STATES: &[&str] = &[
+    "INTENT",
+    "CLAIMED",
+    "IN_PROGRESS",
+    "PROVISIONAL",
+    "VALIDATED",
+];
 
 /// The owner's last Foremerge call, when the owner of an open intent has
 /// stopped; `None` while the intent is live.

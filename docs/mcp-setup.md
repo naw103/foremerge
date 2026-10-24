@@ -441,7 +441,9 @@ branch it landed in:
 The ref must resolve to a commit, and when the intent has published a
 ChangeSet that commit must hold the candidate, by ancestry or by content as
 `record_commit` checks it, or the call fails with `TARGET_DIVERGED` and changes
-nothing. The intent ends `DISCARDED` in both
+nothing. The candidate is the commit resolved when the ChangeSet was published,
+whatever its ref points at now. A ChangeSet published with uncommitted changes
+is refused with `STALE_CHANGESET`: commit the work and publish a revision first. The intent ends `DISCARDED` in both
 forms. `landed_ref` records where the work went. It does not say the work was
 verified, and it never moves a ChangeSet to `ACCEPTED` or `COMMITTED`.
 

@@ -63,7 +63,11 @@ changes when they are called out here with a migration note.
   and when the intent has published a ChangeSet that commit must hold the
   candidate, by ancestry or by content as `record_commit` checks it, so work
   that landed through a squash or rebase merge closes too; otherwise the call
-  is refused with `TARGET_DIVERGED`. The event records how it was shown. The intent ends
+  is refused with `TARGET_DIVERGED`. The candidate is the commit resolved when
+  the ChangeSet was published, not wherever a ref such as `HEAD` points later,
+  and a ChangeSet published with uncommitted changes is refused with
+  `STALE_CHANGESET` until the work is committed and published again. The event
+  records how the landing was shown. The intent ends
   `DISCARDED` and its ChangeSet keeps its status: this records where the work
   went on the `work.discarded` event and never marks anything `ACCEPTED` or
   `COMMITTED`.
@@ -124,9 +128,9 @@ changes when they are called out here with a migration note.
   `check_conflicts` applies the same rule and names what it left out under
   `stopped_work`. Conflicts already on record are not touched: close the
   stopped intents to clear them.
-- An agent that returns after falling silent, and an agent that adopts stopped
-  work, now has the findings that were skipped in the meantime recorded on that
-  call. Pairs already on record are left alone, settled or not.
+- An agent that returns after falling silent, an agent that adopts stopped
+  work, and a check that validates it now have the findings that were skipped
+  in the meantime recorded on that call. Pairs already on record are left alone, settled or not.
 - The skill and the `discard_work` description now tell an agent to close its
   intent before it stops.
 - The skill now names the assessment step: record what you concluded about each
