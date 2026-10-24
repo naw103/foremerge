@@ -18,8 +18,8 @@ The repository is public. Everything tracked here is published.
 2. **Never run a development build against a real repository.** A development
    build can leave a ledger at a schema no released binary reads: it creates a
    new ledger at its own schema, `ledger migrate` and `ledger reset` move an
-   existing one to it, and builds before 0.6.0 migrated any ledger they opened,
-   one way. Every released binary then refuses that ledger. That covers
+   existing one to it, and releases up to 0.5.1 migrated any ledger they
+   opened, one way. Every released binary then refuses that ledger. That covers
    `target/debug/foremerge`, `target/release/foremerge`, the `fmg` twins and
    `cargo run`. `--cwd` defaults to the current directory, so a run from inside
    another repository acts on that repository's ledger. Use the test suite,
