@@ -69,7 +69,7 @@ test('a missing platform package is named with its pinned version and every like
   assert.ok(message.startsWith(`${pinned}, the package that carries`), message);
   assert.match(message, /Likely causes:/);
   assert.match(message, /optional dependencies were omitted/);
-  assert.match(message, new RegExp(`${pinned.replace(/\./g, '\\.')} is not published on npm`));
+  assert.ok(message.includes(`${pinned} is not published on npm`), message);
   assert.match(message, /unsupported on this system/);
   assert.match(message, /releases/);
   assert.match(message, /install\.sh/);
