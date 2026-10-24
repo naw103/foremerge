@@ -773,6 +773,30 @@ pub struct ChangeSet {
     pub open_conflicts: Option<OpenConflicts>,
 }
 
+/// How a recorded integration commit was shown to contain an accepted
+/// candidate. `record_commit` stores it in the ChangeSet's
+/// `provenance.integration`, so every later read returns it, and in the
+/// `changeset.committed` event, which is the immutable copy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IntegrationEvidence {
+    /// `ancestor` when the accepted commit is in the integration commit's
+    /// history. `content` when it is not, because a squash or rebase merge
+    /// rewrote it, and every path the candidate changed since its merge base
+    /// with the integration commit was found holding the candidate's change.
+    pub method: String,
+    /// For `content`: the merge bases the candidate's changes were measured
+    /// against.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merge_bases: Vec<String>,
+    /// For `content`: how many paths the candidate changed, all found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paths_checked: Option<usize>,
+    /// For `content`: paths that hold the candidate's change together with
+    /// other changes, such as edits that reached the target branch first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths_with_other_changes: Vec<String>,
+}
+
 /// A snapshot of the OPEN or COORDINATING conflicts touching one intent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenConflicts {

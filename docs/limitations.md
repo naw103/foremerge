@@ -51,9 +51,11 @@ merging, cherry-picking, pushing, or satisfying a hosting provider's protection
 rules. Operators must use normal Git review and integration workflows.
 
 The integration commit recorded by `record_commit` is caller-attested. Foremerge
-verifies that the recorded commit contains the pinned accepted commit in its
-ancestry; it does not verify that integration actually reached any particular
-branch or remote. Because ancestry is reflexive, a fast-forward integration
+verifies that the recorded commit contains the pinned accepted commit, in its
+ancestry or, after a squash or rebase merge, by content; it does not verify that
+integration actually reached any particular branch or remote. Content cannot
+tell where a change came from, so a commit that makes exactly the candidate's
+changes by another route is accepted as its landing. Because ancestry is reflexive, a fast-forward integration
 legitimately records `integration_commit == accepted_commit`, and a dishonest or
 confused caller can record a commit that never landed anywhere. Treat the
 recorded integration commit as provenance to audit against Git hosting state,
