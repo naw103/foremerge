@@ -9550,6 +9550,79 @@ fn an_unrelated_commit_touching_the_same_files_is_refused() {
     );
 }
 
+/// The same edit made to a different function is not the accepted change.
+/// Patch IDs ignore line numbers, so a patch-identity match accepted it; the
+/// content check compares each file in place. Found in the review of #47.
+#[test]
+fn the_same_edit_to_a_different_function_is_refused() {
+    let repo = create_repo();
+    let root = repo.root.clone();
+    git(&root, ["switch", "--quiet", "-c", "trunk"]);
+    let functions = |first: u8, second: u8| {
+        format!("def first():\n    return {first}\n\n\ndef second():\n    return {second}\n")
+    };
+    fs::write(root.join("functions.py"), functions(0, 0)).expect("write functions");
+    git(&root, ["add", "functions.py"]);
+    git(&root, ["commit", "--quiet", "-m", "trunk base"]);
+
+    git(&root, ["switch", "--quiet", "-c", "feature"]);
+    fs::write(root.join("functions.py"), functions(1, 0)).expect("change first");
+    git(
+        &root,
+        ["commit", "--quiet", "-am", "candidate: change first"],
+    );
+    let (agent, intent) = create_active_test_work(&root, "function-owner", "function");
+    let changeset = publish_test_revision(&root, &agent, &intent, "Change first()");
+    cli_success(
+        &root,
+        None,
+        ["changeset", "validate", changeset.as_str(), "--", "true"],
+    );
+    cli_success(&root, None, ["changeset", "accept", changeset.as_str()]);
+
+    git(&root, ["switch", "--quiet", "trunk"]);
+    fs::write(root.join("functions.py"), functions(0, 1)).expect("change second");
+    git(
+        &root,
+        ["commit", "--quiet", "-am", "the same edit to second()"],
+    );
+    let wrong = git(&root, ["rev-parse", "HEAD"]);
+    let message = assert_landing_refused(&root, &changeset, &wrong);
+    assert!(message.contains("functions.py"), "{message}");
+
+    // The real change, squashed on top, is recorded.
+    git(&root, ["merge", "--squash", "--quiet", "feature"]);
+    git(&root, ["commit", "--quiet", "-m", "squash the candidate"]);
+    let landed = git(&root, ["rev-parse", "HEAD"]);
+    let output = record_landing(&root, &changeset, &landed);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+/// Replaying only a candidate's last commit drops what its earlier commits
+/// did. With the default base, the candidate's first parent, comparing just
+/// that last diff accepted a landing without the work it was built on. Found
+/// in the review of #47.
+#[test]
+fn a_landing_of_only_the_candidates_last_commit_is_refused() {
+    let fixture = accepted_two_commit_candidate();
+    let root = &fixture.repo.root;
+    git(
+        root,
+        ["checkout", fixture.accepted.as_str(), "--", "engine.txt"],
+    );
+    git(root, ["commit", "--quiet", "-m", "only the engine change"]);
+    let partial = git(root, ["rev-parse", "HEAD"]);
+    let message = assert_landing_refused(root, &fixture.changeset, &partial);
+    assert!(
+        message.contains("notes.txt") && !message.contains("engine.txt"),
+        "only the dropped notes edit is missing: {message}"
+    );
+}
+
 #[test]
 fn a_commit_from_before_the_candidate_is_refused() {
     let fixture = accepted_two_commit_candidate();
