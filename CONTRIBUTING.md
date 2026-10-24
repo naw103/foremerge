@@ -83,6 +83,14 @@ that dogfoods its integration should carry the layout its users will have. If a
 client ever resolves two copies to *different* instructions, that is the parity
 test failing, not a client bug.
 
+### Guidance for coding agents
+
+[`AGENTS.md`](AGENTS.md) is the short guide an agent reads before it works
+here: the rules, the commands, and the conventions agents most often get wrong.
+`CLAUDE.md` imports it, so Claude Code, Codex and Cursor read the same text.
+Changes to either, like changes to `.github/`, need the maintainer's review;
+[`.github/CODEOWNERS`](.github/CODEOWNERS) lists the paths.
+
 ### The plugin is catalogued separately from the plugin directory
 
 `plugins/foremerge/` is the plugin; `.claude-plugin/marketplace.json` at the

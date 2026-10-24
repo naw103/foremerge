@@ -1,0 +1,47 @@
+# Code owners for Foremerge.
+#
+# The last matching pattern wins. The maintainer owns everything by default;
+# the entries below name the paths where a change needs the maintainer's review
+# whoever else may come to own the rest. Keep them when the default changes.
+
+*                               @naw103
+
+# Agent guides, and the client integration this repository ships and
+# dogfoods: these decide what a contributor's agent session reads and runs.
+/AGENTS.md                      @naw103
+/CLAUDE.md                      @naw103
+/.claude/                       @naw103
+/.claude-plugin/                @naw103
+/.codex/                        @naw103
+/.cursor/                       @naw103
+/.agents/                       @naw103
+/.mcp.json                      @naw103
+/plugins/                       @naw103
+/src/integrations.rs            @naw103
+
+# CI, the release workflow and this file.
+/.github/                       @naw103
+
+# Release and distribution: what users download and run.
+/docs/RELEASING.md              @naw103
+/npm/                           @naw103
+/Cargo.toml                     @naw103
+/Cargo.lock                     @naw103
+/server.json                    @naw103
+/glama.json                     @naw103
+
+# Ledger schema, migrations and recovery, the append-only event chain and the
+# acceptance gate.
+/src/db.rs                      @naw103
+/src/ledger.rs                  @naw103
+/src/service.rs                 @naw103
+
+# Authentication: the repository token and the JSON API's bearer check.
+# Named verification checks execute commands.
+/src/api.rs                     @naw103
+/src/cli.rs                     @naw103
+/src/checks.rs                  @naw103
+
+# Policy.
+/SECURITY.md                    @naw103
+/LICENSE                        @naw103
