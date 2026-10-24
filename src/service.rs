@@ -10,7 +10,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -41,6 +41,7 @@ const CHANGESET_STATUS_ORDER: &[&str] = &[
 /// ChangeSet statuses that still expect further action; the status screen
 /// lists individual ids for these.
 const NONTERMINAL_CHANGESET_STATES: &[&str] = &["PROVISIONAL", "VALIDATED", "ACCEPTED"];
+type DependencyCommitRecord = (String, Option<String>, Option<String>, Option<String>);
 
 #[derive(Clone)]
 pub struct Foremerge {
@@ -138,6 +139,24 @@ fn verification_state(
             Some("no verification check was run against this ChangeSet"),
         ),
     })
+}
+
+fn dependency_commit_is_in_history(
+    worktree: &Path,
+    state: &str,
+    accepted_commit: &str,
+    integration_commit: Option<&str>,
+    candidate_commit: &str,
+) -> Result<bool> {
+    if git::is_ancestor(worktree, accepted_commit, candidate_commit)? {
+        return Ok(true);
+    }
+    if state == "COMMITTED" {
+        if let Some(integration_commit) = integration_commit {
+            return git::is_ancestor(worktree, integration_commit, candidate_commit);
+        }
+    }
+    Ok(false)
 }
 
 impl Foremerge {
@@ -2028,18 +2047,19 @@ impl Foremerge {
             }
             let mut resolved_dependencies = Vec::new();
             for dependency in &changeset.dependencies {
-                let dependency_record: Option<(String, Option<String>, Option<String>)> = conn
+                let dependency_record: Option<DependencyCommitRecord> = conn
                     .query_row(
-                        "SELECT i.status, c.id, c.accepted_commit FROM intents i
+                        "SELECT i.status, c.id, c.accepted_commit, c.integration_commit FROM intents i
                          LEFT JOIN changesets c ON c.id = (
                            SELECT id FROM changesets WHERE intent_id = i.id
                            AND status IN ('ACCEPTED', 'COMMITTED') ORDER BY created_at DESC LIMIT 1
                          ) WHERE i.id = ?1",
                         [dependency],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                     )
                     .optional()?;
-                let Some((state, dependency_changeset_id, accepted_commit)) = dependency_record
+                let Some((state, dependency_changeset_id, accepted_commit, integration_commit)) =
+                    dependency_record
                 else {
                     bail!("UNSATISFIED_DEPENDENCY: intent {dependency} does not exist");
                 };
@@ -2071,7 +2091,12 @@ impl Foremerge {
                         "UNSATISFIED_DEPENDENCY: accepted ref for {dependency} no longer matches its pinned commit"
                     );
                 }
-                resolved_dependencies.push((dependency.clone(), accepted_commit));
+                resolved_dependencies.push((
+                    dependency.clone(),
+                    state,
+                    accepted_commit,
+                    integration_commit,
+                ));
             }
             dependency_refs = resolved_dependencies;
         }
@@ -2092,10 +2117,16 @@ impl Foremerge {
                 "STALE_CHANGESET: accepted git_ref must resolve to the currently validated worktree HEAD"
             );
         }
-        for (dependency, accepted_commit) in &dependency_refs {
-            if !git::is_ancestor(&worktree, accepted_commit, &commit)? {
+        for (dependency, state, accepted_commit, integration_commit) in &dependency_refs {
+            if !dependency_commit_is_in_history(
+                &worktree,
+                state,
+                accepted_commit,
+                integration_commit.as_deref(),
+                &commit,
+            )? {
                 bail!(
-                    "UNSATISFIED_DEPENDENCY: accepted ref for {dependency} is not in the candidate ancestry"
+                    "UNSATISFIED_DEPENDENCY: accepted or integrated commit for {dependency} is not in the candidate ancestry"
                 );
             }
         }
@@ -2144,19 +2175,21 @@ impl Foremerge {
             );
         }
         for dependency in &fresh.dependencies {
-            let dependency_record: Option<(String, Option<String>, Option<String>)> = tx
+            let dependency_record: Option<DependencyCommitRecord> = tx
                 .query_row(
-                    "SELECT i.status, c.id, c.accepted_commit FROM intents i
+                    "SELECT i.status, c.id, c.accepted_commit, c.integration_commit FROM intents i
                      LEFT JOIN changesets c ON c.id = (
                        SELECT id FROM changesets WHERE intent_id = i.id
                        AND status IN ('ACCEPTED', 'COMMITTED')
                        ORDER BY created_at DESC, id DESC LIMIT 1
                      ) WHERE i.id = ?1",
                     [dependency],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )
                 .optional()?;
-            let Some((state, dependency_changeset_id, accepted_commit)) = dependency_record else {
+            let Some((state, dependency_changeset_id, accepted_commit, integration_commit)) =
+                dependency_record
+            else {
                 bail!("UNSATISFIED_DEPENDENCY: intent {dependency} does not exist");
             };
             if !matches!(state.as_str(), "ACCEPTED" | "COMMITTED") {
@@ -2184,9 +2217,15 @@ impl Foremerge {
                     "UNSATISFIED_DEPENDENCY: accepted ref for {dependency} no longer matches its pinned commit"
                 );
             }
-            if !git::is_ancestor(&worktree, &accepted_commit, &commit)? {
+            if !dependency_commit_is_in_history(
+                &worktree,
+                &state,
+                &accepted_commit,
+                integration_commit.as_deref(),
+                &commit,
+            )? {
                 bail!(
-                    "UNSATISFIED_DEPENDENCY: accepted ref for {dependency} is not in the candidate ancestry"
+                    "UNSATISFIED_DEPENDENCY: accepted or integrated commit for {dependency} is not in the candidate ancestry"
                 );
             }
         }
@@ -2313,9 +2352,27 @@ impl Foremerge {
         if accepted_ref != accepted_commit {
             bail!("CHECK_FAILED: accepted ref no longer matches the pinned ChangeSet commit");
         }
-        if !git::is_ancestor(&worktree, accepted_commit, &commit)? {
+        let accepted_is_ancestor = git::is_ancestor(&worktree, accepted_commit, &commit)?;
+        let patch_matches = if accepted_is_ancestor {
+            false
+        } else if let (Some(base_ref), Some(integration_parent)) = (
+            changeset.base_ref.as_deref(),
+            git::first_parent(&worktree, &commit)?,
+        ) {
+            matches!(
+                (
+                    git::diff_patch_id(&worktree, base_ref, accepted_commit)?,
+                    git::diff_patch_id(&worktree, &integration_parent, &commit)?,
+                ),
+                (Some(accepted_patch), Some(integration_patch))
+                    if accepted_patch == integration_patch
+            )
+        } else {
+            false
+        };
+        if !accepted_is_ancestor && !patch_matches {
             bail!(
-                "TARGET_DIVERGED: recorded integration commit does not contain the accepted candidate"
+                "TARGET_DIVERGED: recorded integration commit neither contains the accepted candidate nor matches its patch"
             );
         }
         let mut conn = self.store.lock()?;

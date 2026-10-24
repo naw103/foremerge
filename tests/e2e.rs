@@ -3148,21 +3148,20 @@ fn default_store_rejects_changeset_worktrees_from_another_repository() {
 }
 
 #[test]
-fn committed_dependency_keeps_its_original_accepted_ref_for_ancestry_checks() {
+fn committed_squash_dependency_keeps_accepted_ref_and_allows_integrated_history() {
     let repo = create_repo();
+    let base_commit = git(&repo.root, ["rev-parse", "HEAD"]);
+    let base_branch = git(&repo.root, ["branch", "--show-current"]);
     git(
         &repo.root,
         ["switch", "--quiet", "-c", "accepted-dependency"],
     );
+    fs::write(repo.root.join("dependency.txt"), "dependency payload\n")
+        .expect("write dependency change");
+    git(&repo.root, ["add", "dependency.txt"]);
     git(
         &repo.root,
-        [
-            "commit",
-            "--allow-empty",
-            "--quiet",
-            "-m",
-            "accepted dependency candidate",
-        ],
+        ["commit", "--quiet", "-m", "accepted dependency candidate"],
     );
     let accepted_commit = git(&repo.root, ["rev-parse", "HEAD"]);
 
@@ -3199,22 +3198,31 @@ fn committed_dependency_keeps_its_original_accepted_ref_for_ancestry_checks() {
     );
     assert_eq!(accepted["data"]["git_ref"], accepted_commit);
 
+    git(&repo.root, ["switch", "--quiet", base_branch.as_str()]);
+    git(&repo.root, ["merge", "--squash", "accepted-dependency"]);
     git(
         &repo.root,
-        ["switch", "--quiet", "-c", "dependency-integration"],
-    );
-    git(
-        &repo.root,
-        [
-            "commit",
-            "--allow-empty",
-            "--quiet",
-            "-m",
-            "integrate accepted dependency",
-        ],
+        ["commit", "--quiet", "-m", "integrate accepted dependency"],
     );
     let integration_commit = git(&repo.root, ["rev-parse", "HEAD"]);
     assert_ne!(integration_commit, accepted_commit);
+    assert_eq!(
+        git(&repo.root, ["rev-parse", "HEAD^"]),
+        base_commit,
+        "squash integration should have the original target as its parent"
+    );
+    let rejected = cli_failure(
+        &repo.root,
+        None,
+        vec![
+            "changeset".to_string(),
+            "commit".to_string(),
+            dependency_changeset.clone(),
+            "--git-ref".to_string(),
+            base_commit.clone(),
+        ],
+    );
+    assert_eq!(rejected["error"]["code"], "TARGET_DIVERGED");
     let committed = cli_success(
         &repo.root,
         None,
@@ -3235,7 +3243,7 @@ fn committed_dependency_keeps_its_original_accepted_ref_for_ancestry_checks() {
         "recording integration must not move the immutable accepted ref"
     );
 
-    let candidate_worktree = repo.temp.path().join("candidate-from-accepted-ref");
+    let candidate_worktree = repo.temp.path().join("candidate-from-integration-ref");
     git(
         &repo.root,
         vec![
@@ -3243,9 +3251,9 @@ fn committed_dependency_keeps_its_original_accepted_ref_for_ancestry_checks() {
             "add".into(),
             "--quiet".into(),
             "-b".into(),
-            "candidate-from-accepted-ref".into(),
+            "candidate-from-integration-ref".into(),
             candidate_worktree.as_os_str().to_owned(),
-            accepted_commit.clone().into(),
+            integration_commit.clone().into(),
         ],
     );
     let candidate_agent = register_test_agent(&candidate_worktree, "accepted-ref-consumer");
@@ -3258,9 +3266,9 @@ fn committed_dependency_keeps_its_original_accepted_ref_for_ancestry_checks() {
             "--agent".to_string(),
             candidate_agent.clone(),
             "--task".to_string(),
-            "consume-original-accepted-ref".to_string(),
+            "consume-integrated-dependency".to_string(),
             "--summary".to_string(),
-            "Build on the dependency candidate without its later integration commit".to_string(),
+            "Build on the squash-integrated dependency commit".to_string(),
             "--scope".to_string(),
             "component:AcceptedRefConsumer=extend".to_string(),
             "--depends-on".to_string(),
@@ -3318,7 +3326,7 @@ fn committed_dependency_keeps_its_original_accepted_ref_for_ancestry_checks() {
         ],
     );
     assert_eq!(candidate_accepted["data"]["status"], "ACCEPTED");
-    assert_eq!(candidate_accepted["data"]["git_ref"], accepted_commit);
+    assert_eq!(candidate_accepted["data"]["git_ref"], integration_commit);
 }
 
 #[test]

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::LazyLock;
@@ -305,6 +305,105 @@ pub fn diff_patch_hash(worktree: impl AsRef<Path>, base: &str, commit: &str) -> 
         "if the candidate is a merge commit, its default first-parent diff spans the entire merged-in branch, so pass --base-ref (HTTP/MCP: base_ref) with the true fork point; otherwise reduce or split the ChangeSet",
     )?;
     Ok(format!("{:x}", digest.finalize()))
+}
+
+/// Stable Git patch ID for the changes between `base` and `commit`.
+///
+/// Unlike commit ancestry or object IDs, this remains the same when an
+/// equivalent patch is replayed or squash-merged onto another commit.
+pub fn diff_patch_id(
+    worktree: impl AsRef<Path>,
+    base: &str,
+    commit: &str,
+) -> Result<Option<String>> {
+    let worktree = worktree.as_ref();
+    let mut patch_id = Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["patch-id", "--verbatim"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("run git patch-id --verbatim")?;
+    let mut diff = Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args([
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--binary",
+            "--unified=0",
+            base,
+            commit,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("run git diff for patch identity")?;
+    let mut diff_stdout = diff
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("capture git diff stdout"))?;
+    let mut patch_stdin = patch_id
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("capture git patch-id stdin"))?;
+    let mut bytes = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = match diff_stdout.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error) => {
+                let _ = diff.kill();
+                let _ = patch_id.kill();
+                let _ = diff.wait();
+                let _ = patch_id.wait();
+                return Err(error).context("read git diff for patch identity");
+            }
+        };
+        if read == 0 {
+            break;
+        }
+        bytes = bytes.saturating_add(read as u64);
+        if bytes > MAX_HASH_BYTES {
+            let _ = diff.kill();
+            let _ = patch_id.kill();
+            let _ = diff.wait();
+            let _ = patch_id.wait();
+            bail!(
+                "RESOURCE_LIMIT: git diff exceeds {MAX_HASH_BYTES} bytes; reduce or split the ChangeSet"
+            );
+        }
+        if let Err(error) = patch_stdin.write_all(&buffer[..read]) {
+            let _ = diff.kill();
+            let _ = patch_id.kill();
+            let _ = diff.wait();
+            let _ = patch_id.wait();
+            return Err(error).context("stream diff to git patch-id");
+        }
+    }
+    drop(patch_stdin);
+    let diff_status = diff.wait().context("wait for git diff")?;
+    if !diff_status.success() {
+        let _ = patch_id.kill();
+        let _ = patch_id.wait();
+        bail!("git diff failed with status {diff_status}");
+    }
+    let output = patch_id
+        .wait_with_output()
+        .context("wait for git patch-id --verbatim")?;
+    if !output.status.success() {
+        bail!(
+            "git patch-id --verbatim failed with status {}",
+            output.status
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .map(str::to_string))
 }
 
 #[cfg(unix)]
@@ -778,6 +877,121 @@ mod tests {
         assert!(report.truncated);
         assert!(report.total_bytes > report.captured_bytes as u64);
         assert!(report.symbols.contains(&"CapturedSymbol".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod patch_identity_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn git(cwd: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn init_repo() -> TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init", "-q"]);
+        git(repo.path(), &["config", "user.email", "test@example.com"]);
+        git(repo.path(), &["config", "user.name", "Test"]);
+        git(repo.path(), &["config", "commit.gpgsign", "false"]);
+        repo
+    }
+
+    #[test]
+    fn patch_identity_ignores_target_only_context_near_the_accepted_change() {
+        let repo = init_repo();
+        fs::write(
+            repo.path().join("nearby.txt"),
+            "one\ntwo\nthree\nfour\nfive\n",
+        )
+        .unwrap();
+        git(repo.path(), &["add", "nearby.txt"]);
+        git(repo.path(), &["commit", "-qm", "base"]);
+        let base = git(repo.path(), &["rev-parse", "HEAD"]);
+
+        git(repo.path(), &["switch", "-q", "-c", "accepted"]);
+        fs::write(
+            repo.path().join("nearby.txt"),
+            "one\naccepted\nthree\nfour\nfive\n",
+        )
+        .unwrap();
+        git(repo.path(), &["commit", "-qam", "accepted change"]);
+        let accepted = git(repo.path(), &["rev-parse", "HEAD"]);
+
+        git(repo.path(), &["switch", "-q", "-c", "target", &base]);
+        fs::write(
+            repo.path().join("nearby.txt"),
+            "one\ntwo\nthree\ntarget\nfive\n",
+        )
+        .unwrap();
+        git(repo.path(), &["commit", "-qam", "target-only change"]);
+        let target = git(repo.path(), &["rev-parse", "HEAD"]);
+        git(repo.path(), &["merge", "--squash", "accepted"]);
+        git(repo.path(), &["commit", "-qm", "squash accepted change"]);
+        let integrated = git(repo.path(), &["rev-parse", "HEAD"]);
+
+        assert_eq!(
+            diff_patch_id(repo.path(), &base, &accepted).unwrap(),
+            diff_patch_id(repo.path(), &target, &integrated).unwrap()
+        );
+    }
+
+    #[test]
+    fn patch_identity_preserves_whitespace_changes() {
+        let repo = init_repo();
+        fs::write(repo.path().join("indent.txt"), "    value = 1\n").unwrap();
+        git(repo.path(), &["add", "indent.txt"]);
+        git(repo.path(), &["commit", "-qm", "base"]);
+        let base = git(repo.path(), &["rev-parse", "HEAD"]);
+
+        fs::write(repo.path().join("indent.txt"), "        value = 2\n").unwrap();
+        git(repo.path(), &["commit", "-qam", "accepted"]);
+        let accepted = git(repo.path(), &["rev-parse", "HEAD"]);
+
+        git(repo.path(), &["switch", "-q", "--detach", &base]);
+        fs::write(repo.path().join("indent.txt"), "  value = 2\n").unwrap();
+        git(repo.path(), &["commit", "-qam", "different indentation"]);
+        let integrated = git(repo.path(), &["rev-parse", "HEAD"]);
+
+        assert_ne!(
+            diff_patch_id(repo.path(), &base, &accepted).unwrap(),
+            diff_patch_id(repo.path(), &base, &integrated).unwrap()
+        );
+    }
+
+    #[test]
+    fn patch_identity_streams_diffs_larger_than_the_status_output_limit() {
+        let repo = init_repo();
+        let mut content = vec![b'a'; 17 * 1024 * 1024];
+        fs::write(repo.path().join("large.txt"), &content).unwrap();
+        git(repo.path(), &["add", "large.txt"]);
+        git(repo.path(), &["commit", "-qm", "base"]);
+        let base = git(repo.path(), &["rev-parse", "HEAD"]);
+
+        let last = content.len() - 1;
+        content[last] = b'b';
+        fs::write(repo.path().join("large.txt"), &content).unwrap();
+        git(repo.path(), &["commit", "-qam", "large accepted change"]);
+        let accepted = git(repo.path(), &["rev-parse", "HEAD"]);
+
+        assert!(
+            diff_patch_id(repo.path(), &base, &accepted)
+                .unwrap()
+                .is_some()
+        );
     }
 }
 
