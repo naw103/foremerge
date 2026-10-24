@@ -53,6 +53,16 @@ interfaces, two independent processes must share state from different worktrees,
 the PaymentService conflict must be detected before a code diff, and failed
 validation must leave the target Git ref unchanged.
 
+### Merged for 0.6.0 (unreleased)
+
+These are on `main` and not yet in a release:
+
+- MCP protocol revision 2026-07-28 alongside 2025-11-25, decided per request
+  ([#23](https://github.com/naw103/foremerge/issues/23));
+- ledger migration only when the operator runs `foremerge ledger migrate`,
+  which backs the ledger up first; every other command refuses an older ledger
+  and leaves it untouched.
+
 ## Next: protocol fidelity and integrations
 
 - Publish versioned JSON Schemas for events, entities, and all 18 MCP
@@ -65,8 +75,6 @@ validation must leave the target Git ref unchanged.
   and negative-control coverage.
 - Add explicit claim release and stale-agent handling. Claim renewal, intent
   adoption, and recovery diagnostics shipped across 0.4.x.
-- Support the 2026-07-28 MCP protocol revision alongside 2025-11-25, rather than
-  declining it ([#23](https://github.com/naw103/foremerge/issues/23)).
 - Community-raised during launch week (August 2026), in design order:
   - `scope_drift`: derive touched paths and symbols from the candidate diff at
     ChangeSet publish and compare them against declared scopes, raising a

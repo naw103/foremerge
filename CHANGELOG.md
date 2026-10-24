@@ -65,6 +65,27 @@ changes when they are called out here with a migration note.
   open with nothing the operator can install. The test is the schema, not how
   the binary was compiled: a release-profile build of unreleased schema work is
   refused too, and a debug build at the released schema is not.
+- When the npm launcher cannot find its platform package, the error names the
+  package with the version the launcher pins, such as
+  `foremerge-darwin-arm64@0.5.1`, and lists the likely causes: optional
+  dependencies omitted, that version not published on npm, npm judging the
+  package unsupported on this system, or an unfinished install. It previously
+  blamed `--omit=optional` every time. It still points at the install script,
+  `cargo install` and the releases page.
+
+### Fixed
+
+- The README lists Windows x64 as an npm platform again, now that
+  `foremerge-win32-x64` is published, and drops the note sending Windows users
+  to the releases page.
+- `docs/conflict-detection.md` said `App\Services\Report::render` and
+  `Report::render` were one scope that could assert HIGH. Since 0.4.0 a match
+  on the namespace-free alias alone, whether one side omitted the namespace or
+  the two namespaces differ, is a candidate capped below HIGH; only the same
+  full name on both sides asserts. The worked example's `score` and `overlap`
+  values now match what the detector emits.
+- `docs/protocol.md` now says how the work query scope filter matches: on the
+  canonical alias, against declared scopes and any claim the intent has held.
 
 ## [0.5.1] - 2026-10-03
 
