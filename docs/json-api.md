@@ -520,7 +520,8 @@ holding it can act on either surface. See [`SECURITY.md`](../SECURITY.md) and
 Declared
 ChangeSet dependencies must already be accepted or committed; each dependency's
 stored `accepted_commit` must remain matched by its namespaced ref and be present
-in the candidate's Git ancestry. The selected ref must resolve to the validated
+in the candidate's Git ancestry, or, for a `COMMITTED` dependency, its recorded
+`integration_commit` must be. The selected ref must resolve to the validated
 worktree `HEAD`. Successful acceptance records both that immutable hash and the
 accepted namespaced Git ref; it does not merge a branch.
 
@@ -538,9 +539,24 @@ fm_curl \
 
 This stores the supplied hash as `integration_commit` without replacing
 `accepted_commit`, updates protocol provenance, and releases active claims.
-Foremerge verifies that the supplied ref resolves to a commit containing the
-accepted candidate as an ancestor. The caller remains responsible for supplying
-the intended target ref; the MVP does not perform the merge.
+Foremerge verifies that the supplied ref resolves to a commit that contains the
+accepted candidate: either as an ancestor, or, after a squash or rebase merge,
+by holding every change the candidate made (see
+[Git integration](git-integration.md#recording-the-landing-commit)). Otherwise
+it fails with `TARGET_DIVERGED`, names what is missing and says what to do
+next. The committed ChangeSet records how containment was shown in
+`provenance.integration`:
+
+```json
+{"method":"content","merge_bases":["<sha>"],"paths_checked":2,"paths_with_other_changes":["CHANGELOG.md"]}
+```
+
+`method` is `ancestor` or `content`; the other fields appear only for
+`content`. Every later read of the ChangeSet returns it, and the
+`changeset.committed` event stores the same object as the immutable copy. The
+caller
+remains responsible for supplying the intended target ref; the MVP does not
+perform the merge.
 
 ## Coordinate and read the inbox
 

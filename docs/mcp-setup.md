@@ -407,7 +407,11 @@ on the HTTP API, so ask a human operator instead of overriding.
 {"changeset_id":"chg_...","git_ref":"main"}
 ```
 
-Call this only after ordinary Git or pull-request integration.
+Call this only after ordinary Git or pull-request integration. A merge commit,
+a fast-forward, a squash merge, and a rebase merge can all be recorded: the
+commit must have the accepted commit in its history or hold every change the
+candidate made. The result's `provenance.integration.method` says which
+(`ancestor` or `content`).
 
 ### `discard_work`
 
