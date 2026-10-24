@@ -111,20 +111,6 @@ changes when they are called out here with a migration note.
   the conflict inside the write that resolves it. The check used to be a
   separate read, so an agent whose intent was adopted between the two could
   still resolve a conflict it no longer had a part in.
-- The README lists Windows x64 as an npm platform again, now that
-  `foremerge-win32-x64` is published, and drops the note sending Windows users
-  to the releases page.
-- `docs/conflict-detection.md` said `App\Services\Report::render` and
-  `Report::render` were one scope that could assert HIGH. Since 0.4.0 a match
-  on the namespace-free alias alone, whether one side omitted the namespace or
-  the two namespaces differ, is a candidate capped below HIGH; only the same
-  full name on both sides asserts. The worked example's `score` and `overlap`
-  values now match what the detector emits.
-- `docs/protocol.md` now says how the work query scope filter matches: on the
-  canonical alias, against declared scopes and any claim the intent has held.
-
-### Fixed
-
 - `record_commit` (CLI `foremerge changeset commit`) can now record a pull
   request that landed as a squash merge or a GitHub "rebase and merge". Both
   write new commits, so the accepted commit was never in the landed commit's
@@ -144,7 +130,10 @@ changes when they are called out here with a migration note.
   method (`ancestor` or `content`) and its evidence, so every later read shows
   it, and the `changeset.committed` event stores the same object. The ledger
   schema is unchanged
-  ([#38](https://github.com/naw103/foremerge/issues/38)).
+  ([#38](https://github.com/naw103/foremerge/issues/38)). Thanks to
+  [@sean0407](https://github.com/sean0407), whose independent fix in
+  [#47](https://github.com/naw103/foremerge/pull/47) helped test this
+  approach.
 - The acceptance gate's dependency check now also accepts a `COMMITTED`
   dependency whose recorded `integration_commit` is in the candidate's history,
   so work started after a squash-merged dependency landed can be accepted. A
@@ -152,6 +141,17 @@ changes when they are called out here with a migration note.
   with a message saying to record its landing commit first. The
   `changeset.accepted` event lists how each dependency was satisfied
   ([#38](https://github.com/naw103/foremerge/issues/38)).
+- The README lists Windows x64 as an npm platform again, now that
+  `foremerge-win32-x64` is published, and drops the note sending Windows users
+  to the releases page.
+- `docs/conflict-detection.md` said `App\Services\Report::render` and
+  `Report::render` were one scope that could assert HIGH. Since 0.4.0 a match
+  on the namespace-free alias alone, whether one side omitted the namespace or
+  the two namespaces differ, is a candidate capped below HIGH; only the same
+  full name on both sides asserts. The worked example's `score` and `overlap`
+  values now match what the detector emits.
+- `docs/protocol.md` now says how the work query scope filter matches: on the
+  canonical alias, against declared scopes and any claim the intent has held.
 
 ## [0.5.1] - 2026-10-03
 
