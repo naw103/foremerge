@@ -172,13 +172,15 @@ operations and how they interact.
 The response also carries `warnings`, advisory notes about the intent
 itself, when there is something to say. Two are always checked:
 
-- No scopes declared. Such an intent can be matched to other work only by
-  summary similarity, which never raises a HIGH finding, so nothing collides
-  with it and its ChangeSet passes the conflict gate with nothing to compare.
+- No scopes declared. No scope-based conflict can be detected for such an
+  intent: it can be matched to other work only by summary similarity, which
+  can raise a duplicate-work warning but never a HIGH finding, so its
+  ChangeSet passes the conflict gate with nothing to compare.
   It is still published, because it may be a planning placeholder.
-- A `symbol:` key such as `CheckoutController.checkout`, whose class the stored
-  form drops (see [Conflict detection](conflict-detection.md#scope-matching)).
-  The warning names the stored form and suggests `CheckoutController::checkout`.
+- A `symbol:` key such as `CheckoutController.checkout`, whose class the
+  matching alias drops (see [Conflict detection](conflict-detection.md#scope-matching)).
+  The warning names the alias and, if the key names a class method, suggests
+  `CheckoutController::checkout`.
 
 A repository can opt in to a third, for a symbol that appears nowhere in the
 agent's worktree. None of them refuses the publish.
@@ -231,7 +233,7 @@ reason, and lease duration:
 
 The result includes created claims, overlap warnings, and
 `"advisory_only": true`. Overlap never means ownership was acquired exclusively.
-A claimed `symbol:` key whose class the stored form drops adds a
+A claimed `symbol:` key whose class the matching alias drops adds a
 `scope_warnings` entry, the same text `publish_intent` returns; `warnings`
 holds conflicts, so these live in their own field.
 
