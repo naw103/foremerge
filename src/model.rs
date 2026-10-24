@@ -111,9 +111,10 @@ impl Scope {
     ///
     /// Canonicalization reads every `.` as a namespace separator, which is
     /// right for `app.services.Report` and wrong for
-    /// `CheckoutController.checkout`: the second is stored as `checkout`,
-    /// which matches every `checkout` and never exactly matches
-    /// `CheckoutController::checkout`. The two are told apart only by naming
+    /// `CheckoutController.checkout`: the second gets the alias `checkout`,
+    /// so its claims and work queries never meet
+    /// `CheckoutController::checkout`, and an intent declaring it is never an
+    /// asserted match for that spelling. The key itself is stored as written. The two are told apart only by naming
     /// convention, so this answers only for the unambiguous shape, a member
     /// starting with a lowercase letter or `_` directly after a name starting
     /// with an uppercase letter. A namespace path (`App.Services.Report`,
@@ -545,7 +546,7 @@ pub struct PublishIntentOutcome {
     pub next: Option<String>,
     /// Advisory notes about the intent itself, as opposed to conflicts with
     /// other agents: no scopes declared, a `symbol:` key whose class the
-    /// stored form drops, and, when a repository opts in, a symbol that
+    /// matching alias drops, and, when a repository opts in, a symbol that
     /// appears nowhere in the worktree. Never a refusal.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
@@ -585,7 +586,7 @@ pub struct ClaimOutcome {
     pub advisory_only: bool,
     /// Advisory notes about the claimed scopes themselves, as opposed to
     /// overlaps with other claims, such as a `symbol:` key whose class the
-    /// stored form drops. `warnings` holds conflicts, so these live apart.
+    /// matching alias drops. `warnings` holds conflicts, so these live apart.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scope_warnings: Vec<String>,
 }

@@ -171,9 +171,9 @@ At the start of a coding session:
    again.
 2. Call `query_work` for the task or scopes you expect to touch.
 3. Call `publish_intent` before editing files. Read any `warnings`: an intent
-   with no scopes collides with nothing, and a key such as
-   `symbol:CheckoutController.checkout` is stored as `symbol:checkout`; write
-   `symbol:CheckoutController::checkout` to keep the class.
+   with no scopes can be matched only by its summary, and a key such as
+   `symbol:CheckoutController.checkout` matches only as `symbol:checkout`; if
+   it names a class method, write `symbol:CheckoutController::checkout`.
 4. Inspect the returned conflicts or call `check_conflicts` for a provisional
    preflight.
 5. Call `claim_work` with semantic scopes.

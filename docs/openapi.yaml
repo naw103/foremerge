@@ -226,7 +226,7 @@ paths:
       description: >-
         The response data may carry warnings, advisory strings about the
         intent itself: no scopes declared, or a symbol key such as
-        CheckoutController.checkout whose class the stored form drops. They
+        CheckoutController.checkout whose class the matching alias drops. They
         never refuse the publish.
       requestBody:
         required: true

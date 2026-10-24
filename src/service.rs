@@ -108,22 +108,21 @@ fn missing_symbol_warnings(worktree: &Option<String>, scopes: &[Scope]) -> Vec<S
 }
 
 /// The publish warning for an intent that declares no scopes.
-const NO_SCOPES_WARNING: &str = "this intent declares no scopes, so other work can match it only by summary similarity, which never raises a HIGH finding: nothing will collide with it and its ChangeSet will pass the conflict gate with nothing to compare; unless it is only a planning placeholder, publish the work with the scopes it will change";
+const NO_SCOPES_WARNING: &str = "this intent declares no scopes, so no scope-based conflict can be detected for it: other work can match it only by summary similarity, which can raise a duplicate-work warning but never a HIGH finding, so its ChangeSet will pass the conflict gate with nothing to compare; unless it is only a planning placeholder, publish the work with the scopes it will change";
 
-/// Advisory notes for `symbol:` keys whose class the stored form drops, such
-/// as `CheckoutController.checkout`, which canonicalization reduces to
-/// `checkout`. Always on, because the cost is visible in the key itself and
+/// Advisory notes for `symbol:` keys whose class the matching alias drops,
+/// such as `CheckoutController.checkout`, whose alias is `checkout`. The key
+/// itself is stored as written. Always on, because the cost is visible in the key itself and
 /// needs no worktree to see. A warning, never a rejection or a rewrite.
 fn dropped_class_warnings<'a>(scopes: impl IntoIterator<Item = &'a Scope>) -> Vec<String> {
     scopes
         .into_iter()
         .filter_map(|scope| {
             let suggested = scope.class_preserving_key()?;
-            let stored = scope.canonical();
-            let member = stored.split_once(':').map_or(stored.as_str(), |(_, key)| key);
             Some(format!(
-                "scope `symbol:{key}` is stored as `{stored}`, which matches every `{member}` and never exactly matches `symbol:{suggested}`; write `symbol:{suggested}` to keep the class",
+                "scope `symbol:{key}` has the matching alias `{alias}`, which drops the class: its claims and work queries meet any other key with that alias but never `symbol:{suggested}`, and against that spelling an intent is at most an unasserted candidate; if it names a class method, write `symbol:{suggested}`",
                 key = scope.key,
+                alias = scope.canonical(),
             ))
         })
         .collect()
@@ -5204,6 +5203,22 @@ mod tests {
             )],
         );
         assert!(scoped.warnings.is_empty(), "{:?}", scoped.warnings);
+
+        // The warning says summary matching still applies, and it does: the
+        // same summary published again by another agent is a duplicate.
+        let other = quickwin_agent(&service, "second-planner");
+        let again = quickwin_publish(&service, &other, "Plan the checkout rework", vec![]);
+        assert_eq!(again.warnings, vec![NO_SCOPES_WARNING.to_string()]);
+        let links_the_first = |conflict: &Conflict| {
+            conflict.kind == "duplicate_work"
+                && (conflict.target_intent_id == scopeless.intent.id
+                    || conflict.source_intent_id.as_deref() == Some(scopeless.intent.id.as_str()))
+        };
+        assert!(
+            again.conflicts.iter().any(links_the_first),
+            "{:?}",
+            again.conflicts
+        );
     }
 
     /// I-066. Which keys lose a class to canonicalization, and which only lose
@@ -5262,7 +5277,7 @@ mod tests {
     fn a_dotted_member_key_warns_on_publish_and_claim_without_being_rewritten() {
         let service = Foremerge::new(Store::in_memory().unwrap());
         let agent = quickwin_agent(&service, "checkout-agent");
-        let expected = "scope `symbol:CheckoutController.checkout` is stored as `symbol:checkout`, which matches every `checkout` and never exactly matches `symbol:CheckoutController::checkout`; write `symbol:CheckoutController::checkout` to keep the class";
+        let expected = "scope `symbol:CheckoutController.checkout` has the matching alias `symbol:checkout`, which drops the class: its claims and work queries meet any other key with that alias but never `symbol:CheckoutController::checkout`, and against that spelling an intent is at most an unasserted candidate; if it names a class method, write `symbol:CheckoutController::checkout`";
 
         let published = quickwin_publish(
             &service,

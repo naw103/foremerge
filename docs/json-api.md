@@ -197,9 +197,10 @@ request to learn about existing incompatible work.
 
 When there is something to say about the intent itself, `data` also carries
 `warnings`, a list of strings. An intent with no scopes is published with a
-warning that nothing can collide with it, and a `symbol:` key such as
-`CheckoutController.checkout`, which is stored as `symbol:checkout`, is
-published with a warning suggesting `CheckoutController::checkout`. Neither
+warning that no scope-based conflict can be detected for it, and a `symbol:`
+key such as `CheckoutController.checkout`, whose matching alias
+`symbol:checkout` drops the class, is published with a warning suggesting
+`CheckoutController::checkout`. Neither
 refuses the publish. See [Protocol](protocol.md#intent-publication).
 
 `related_work` states what overlaps. Deciding what the overlap means is the

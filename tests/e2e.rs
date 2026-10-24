@@ -1673,7 +1673,7 @@ async fn mcp_reports_scope_warnings_and_conflict_report_markers() {
     assert_eq!(
         dotted["warnings"],
         json!([
-            "scope `symbol:CheckoutController.checkout` is stored as `symbol:checkout`, which matches every `checkout` and never exactly matches `symbol:CheckoutController::checkout`; write `symbol:CheckoutController::checkout` to keep the class"
+            "scope `symbol:CheckoutController.checkout` has the matching alias `symbol:checkout`, which drops the class: its claims and work queries meet any other key with that alias but never `symbol:CheckoutController::checkout`, and against that spelling an intent is at most an unasserted candidate; if it names a class method, write `symbol:CheckoutController::checkout`"
         ])
     );
     let other = mcp_tool_call(

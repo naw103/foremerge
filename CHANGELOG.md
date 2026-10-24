@@ -28,16 +28,19 @@ changes when they are called out here with a migration note.
   `versionNegotiation` mode `'auto'` now connects on `2026-07-28` instead of
   falling back, and a client pinned to `2026-07-28` now connects at all
   ([#23](https://github.com/naw103/foremerge/issues/23)).
-- `publish_intent` warns when an intent declares no scopes. Such an intent
-  can be matched to other work only by summary similarity, which never raises
-  a HIGH finding, so nothing collides with it and its ChangeSet passes the
-  conflict gate with nothing to compare. It is still published, because it may
+- `publish_intent` warns when an intent declares no scopes. No scope-based
+  conflict can be detected for such an intent: it can be matched to other work
+  only by summary similarity, which can raise a duplicate-work warning but
+  never a HIGH finding, so its ChangeSet passes the conflict gate with nothing
+  to compare. It is still published, because it may
   be a planning placeholder.
 - `publish_intent` and `claim_work` warn when a `symbol:` key reads as
   `Class.member`, such as `CheckoutController.checkout`. Canonicalization treats
-  the dot as a namespace separator and stores `symbol:checkout`, which matches
-  every `checkout` and never exactly matches `CheckoutController::checkout`. The
-  warning names the stored form and suggests the `Class::method` spelling. Keys
+  the dot as a namespace separator, so its matching alias is `symbol:checkout`:
+  its claims and work queries never meet `CheckoutController::checkout`, and
+  against that spelling an intent is at most an unasserted candidate. The
+  warning names the alias and, if the key names a class method, suggests the
+  `Class::method` spelling. Keys
   are neither refused nor rewritten, and namespace paths such as
   `App.Services.Report` do not warn. `claim_work` returns it in a new
   `scope_warnings` field, because its `warnings` field holds conflicts.
