@@ -648,7 +648,14 @@ pub fn content_containment(
                         .old
                         .as_ref()
                         .is_none_or(|(base_mode, _)| base_mode != candidate_mode);
-                    if landed_mode != candidate_mode && mode_set_by_candidate {
+                    // First, before any blob comparison: a symbolic link's
+                    // blob is its target text, so a link and a regular file
+                    // can share an object id while reading as different
+                    // things. Only the executable bit of a regular file may
+                    // differ, and only when the candidate did not set it.
+                    if entry_type(landed_mode) != entry_type(candidate_mode) {
+                        Err("a different kind of entry (regular file, symbolic link or submodule)")
+                    } else if landed_mode != candidate_mode && mode_set_by_candidate {
                         Err("different file mode")
                     } else if landed_blob == candidate_blob {
                         Ok(())
@@ -709,6 +716,17 @@ fn display_path(path: &[u8]) -> String {
 
 fn is_regular_file(mode: &str) -> bool {
     matches!(mode, "100644" | "100755")
+}
+
+/// What kind of tree entry a mode names. Two modes of one kind differ only in
+/// the executable bit of a regular file.
+fn entry_type(mode: &str) -> &str {
+    match mode {
+        "100644" | "100755" => "regular file",
+        "120000" => "symbolic link",
+        "160000" => "submodule",
+        other => other,
+    }
 }
 
 /// Whether the landed version of a regular file already holds the
@@ -1519,6 +1537,57 @@ mod containment_tests {
             "the tree must hold every entry: {listed:?}"
         );
         tree
+    }
+
+    /// A symbolic link's blob is its target text, so a link to `payload` has
+    /// the same object id as a regular file containing `payload`. Equal blobs
+    /// therefore prove nothing when the entry type differs: reading the link
+    /// follows it somewhere else entirely.
+    #[test]
+    fn an_entry_type_substitution_with_an_equal_blob_is_refused() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        git(root, &["init", "-q"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        git(root, &["config", "user.name", "Test"]);
+        let blob = |content: &[u8]| git_stdin(root, &["hash-object", "-w", "--stdin"], content);
+        let commit = |mode: &str, object: &str, parent: Option<&str>| {
+            let tree = tree_of(root, &[(mode, object.to_string(), b"config.txt".to_vec())]);
+            let mut args = vec!["commit-tree", tree.as_str(), "-m", "commit"];
+            if let Some(parent) = parent {
+                args.extend(["-p", parent]);
+            }
+            git_output(root, &args).unwrap()
+        };
+        let original = blob(b"original");
+        let payload = blob(b"payload");
+
+        // A regular file whose content the candidate changed, landed as a
+        // symbolic link with the same blob.
+        let base = commit("100644", &original, None);
+        let candidate = commit("100644", &payload, Some(&base));
+        let landed = commit("120000", &payload, Some(&base));
+        let refused = content_containment(root, &candidate, &landed)
+            .unwrap()
+            .expect_err("a symbolic link is not the accepted regular file");
+        assert!(refused.to_string().contains("config.txt"), "{refused}");
+
+        // The other way round: a link the candidate retargeted, landed as a
+        // regular file holding the target text.
+        let base = commit("120000", &original, None);
+        let candidate = commit("120000", &payload, Some(&base));
+        let landed = commit("100644", &payload, Some(&base));
+        content_containment(root, &candidate, &landed)
+            .unwrap()
+            .expect_err("a regular file is not the accepted symbolic link");
+
+        // An executable bit set only on the target side is still allowed.
+        let base = commit("100644", &original, None);
+        let candidate = commit("100644", &payload, Some(&base));
+        let landed = commit("100755", &payload, Some(&base));
+        content_containment(root, &candidate, &landed)
+            .unwrap()
+            .expect("a mode the candidate did not set may differ within regular files");
     }
 
     #[test]

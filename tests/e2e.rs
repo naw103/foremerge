@@ -9792,6 +9792,79 @@ fn accept_dependent_consumer(
     (changeset, worktree, output)
 }
 
+/// A symbolic link's blob is its target text, so a squash can replace an
+/// accepted file with a link whose blob is identical and read as something
+/// else entirely. That landing is refused, and work built on it does not
+/// satisfy the dependency. Found in the review of this fix.
+#[test]
+fn a_landing_that_swaps_an_accepted_file_for_a_symlink_is_refused() {
+    let fixture = accepted_two_commit_candidate();
+    let root = &fixture.repo.root;
+    git(root, ["merge", "--quiet", "--squash", "feature"]);
+    git(root, ["commit", "--quiet", "-m", "honest squash"]);
+    let honest = git(root, ["rev-parse", "HEAD"]);
+    let parent = git(root, ["rev-parse", "HEAD^"]);
+    git(root, ["reset", "--quiet", "--hard", parent.as_str()]);
+
+    // The same tree, with engine.txt turned into a link holding the same blob.
+    let listing = git(root, ["ls-tree", honest.as_str()]);
+    let swapped: String = listing
+        .lines()
+        .map(|line| {
+            let entry = if line.ends_with("\tengine.txt") {
+                line.replacen("100644 blob", "120000 blob", 1)
+            } else {
+                line.to_string()
+            };
+            entry + "\n"
+        })
+        .collect();
+    assert!(swapped.contains("120000 blob"), "{swapped}");
+    let mut mktree = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("mktree")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("run git mktree");
+    mktree
+        .stdin
+        .take()
+        .expect("mktree stdin")
+        .write_all(swapped.as_bytes())
+        .expect("write tree listing");
+    let tree = String::from_utf8(mktree.wait_with_output().expect("mktree").stdout)
+        .expect("tree id")
+        .trim()
+        .to_string();
+    let landing = git(
+        root,
+        [
+            "commit-tree",
+            tree.as_str(),
+            "-p",
+            parent.as_str(),
+            "-m",
+            "squash with a link",
+        ],
+    );
+
+    let message = assert_landing_refused(root, &fixture.changeset, &landing);
+    assert!(
+        message.contains("engine.txt") && !message.contains("notes.txt"),
+        "only the swapped entry is wrong: {message}"
+    );
+
+    let (_, _, refused) = accept_dependent_consumer(&fixture, &landing, "consumer-on-swap");
+    assert!(!refused.status.success());
+    let refused = parse_cli_json(&refused);
+    assert_eq!(
+        refused["error"]["code"], "UNSATISFIED_DEPENDENCY",
+        "{refused}"
+    );
+}
+
 #[test]
 fn a_squash_landed_dependency_is_satisfied_through_its_recorded_integration_commit() {
     let fixture = accepted_two_commit_candidate();
