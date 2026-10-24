@@ -379,6 +379,13 @@ fm_curl -H 'content-type: application/json' \
   -d '{"agent_id":"agt_REPLACE_ME","reason":"superseded by shared provider work"}' | jq .
 ```
 
+Add `"landed_ref":"main"` to the discard body for work that reached Git
+without going through acceptance. The ref must resolve to a commit that holds
+the intent's published ChangeSet commit, if it has one, by ancestry or by
+content as `record_commit` checks it, so a squash or rebase landing qualifies.
+The intent still ends `DISCARDED`; the commit and how it was shown are recorded
+on the `work.discarded` event.
+
 The start response is the updated intent and includes an `open_conflicts`
 snapshot (count and ids of OPEN or COORDINATING conflicts touching it, and the
 `as_of_event` they were read at, which includes the start itself),

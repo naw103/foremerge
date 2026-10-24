@@ -471,7 +471,7 @@ adapters over the same database.
 | `run_verification` | Run a trusted repository check by name, never raw MCP argv |
 | `accept_changeset` | Apply final conflict, dependency, validation, and Git gates |
 | `record_commit` | Record the actual Git integration commit |
-| `discard_work` | Preserve abandoned work while releasing claims and blockers |
+| `discard_work` | Close abandoned work, or work that landed without acceptance, releasing claims and blockers |
 | `list_agents` | Read registered agent provenance |
 | `get_intent` | Read one intent and current conflict snapshot |
 | `get_changeset` | Read one ChangeSet and Git/provenance state |

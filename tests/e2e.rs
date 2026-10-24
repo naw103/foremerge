@@ -3794,6 +3794,225 @@ fn discarding_one_side_of_a_high_conflict_unblocks_the_survivor() {
     assert_eq!(accepted["data"]["status"], "ACCEPTED");
 }
 
+/// Work that reaches Git without a passing check cannot be accepted, and used
+/// to have no way to finish except a discard that reads as abandonment, so it
+/// was left open. `--landed` closes it and records where it went.
+///
+/// It must never do more than that. The intent ends DISCARDED, the ChangeSet
+/// is not moved toward ACCEPTED or COMMITTED, and a ref that does not contain
+/// the published candidate is refused with nothing changed.
+#[test]
+fn landed_work_closes_without_acceptance_and_only_into_a_commit_that_contains_it() {
+    let repo = create_repo();
+    let trunk = git(&repo.root, ["rev-parse", "--abbrev-ref", "HEAD"]);
+    let (agent_id, intent_id) = create_active_test_work(&repo.root, "landing-agent", "landing");
+    let bystander = register_test_agent(&repo.root, "landing-bystander");
+
+    git(&repo.root, ["checkout", "--quiet", "-b", "feature"]);
+    fs::write(repo.root.join("feature.txt"), "feature\n").expect("write feature file");
+    git(&repo.root, ["add", "feature.txt"]);
+    git(&repo.root, ["commit", "--quiet", "-m", "feature work"]);
+    let candidate = git(&repo.root, ["rev-parse", "HEAD"]);
+    let changeset_id =
+        publish_test_revision(&repo.root, &agent_id, &intent_id, "The feature candidate");
+
+    let database = database_from_doctor(&repo.root);
+    let states = || {
+        let connection = Connection::open(&database).expect("open landing database");
+        let intent: String = connection
+            .query_row(
+                "SELECT status FROM intents WHERE id = ?1",
+                [&intent_id],
+                |row| row.get(0),
+            )
+            .expect("read intent status");
+        let (changeset, accepted_commit, integration_commit): (
+            String,
+            Option<String>,
+            Option<String>,
+        ) = connection
+            .query_row(
+                "SELECT status, accepted_commit, integration_commit FROM changesets WHERE id = ?1",
+                [&changeset_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read changeset status");
+        (intent, changeset, accepted_commit, integration_commit)
+    };
+    let untouched = (
+        "PROVISIONAL".to_string(),
+        "PROVISIONAL".to_string(),
+        None,
+        None,
+    );
+    let close = |agent: &str, landed: &str| {
+        vec![
+            "work".to_string(),
+            "discard".to_string(),
+            intent_id.clone(),
+            "--agent".to_string(),
+            agent.to_string(),
+            "--reason".to_string(),
+            "Committed by the maintainer in a batch".to_string(),
+            "--landed".to_string(),
+            landed.to_string(),
+        ]
+    };
+
+    // A ref that does not exist.
+    let missing = cli_failure(&repo.root, None, close(&agent_id, "no-such-branch"));
+    assert_eq!(missing["error"]["code"], "INVALID_INPUT", "{missing}");
+    assert_eq!(states(), untouched);
+
+    // A real commit that does not contain the candidate: the trunk has not
+    // received the feature yet.
+    let diverged = cli_failure(&repo.root, None, close(&agent_id, &trunk));
+    assert_eq!(diverged["error"]["code"], "TARGET_DIVERGED", "{diverged}");
+    assert_eq!(states(), untouched);
+
+    // The feature lands on the trunk.
+    git(&repo.root, ["checkout", "--quiet", &trunk]);
+    git(&repo.root, ["merge", "--quiet", "--ff-only", "feature"]);
+
+    // Somebody else's claim that it landed.
+    let stranger = cli_failure(&repo.root, None, close(&bystander, &trunk));
+    assert_eq!(stranger["error"]["code"], "FORBIDDEN", "{stranger}");
+    assert_eq!(states(), untouched);
+
+    let closed = cli_success(&repo.root, None, close(&agent_id, &trunk));
+    assert_eq!(closed["data"]["status"], "DISCARDED");
+    assert_eq!(
+        states(),
+        (
+            "DISCARDED".to_string(),
+            "PROVISIONAL".to_string(),
+            None,
+            None
+        ),
+        "closing landed work must not move the ChangeSet toward ACCEPTED or COMMITTED"
+    );
+    let closing_event = |intent: &str| -> Value {
+        let connection = Connection::open(&database).expect("open landing database");
+        let payload: String = connection
+            .query_row(
+                "SELECT payload_json FROM events
+                 WHERE event_type = 'work.discarded' AND entity_id = ?1",
+                [intent],
+                |row| row.get(0),
+            )
+            .expect("read the closing event");
+        serde_json::from_str(&payload).expect("closing event is JSON")
+    };
+    let payload = closing_event(&intent_id);
+    assert_eq!(payload["disposition"], "landed");
+    assert_eq!(payload["landed_commit"], candidate);
+    assert_eq!(payload["candidate_commit"], candidate);
+    assert_eq!(payload["changeset_id"], changeset_id);
+    assert_eq!(payload["to"], "DISCARDED");
+    assert_eq!(payload["integration"]["method"], "ancestor", "{payload}");
+    let accepted_refs = git(
+        &repo.root,
+        ["for-each-ref", "--format=%(refname)", "refs/foremerge/"],
+    );
+    assert_eq!(accepted_refs, "", "no accepted ref may be written");
+
+    // Closed is closed: it cannot be landed twice.
+    let again = cli_failure(&repo.root, None, close(&agent_id, &trunk));
+    assert_eq!(again["error"]["code"], "INVALID_TRANSITION", "{again}");
+
+    // Work that never published a ChangeSet has no candidate to check, so the
+    // commit is recorded as the agent's statement once it resolves.
+    let unpublished = publish_test_intent(
+        &repo.root,
+        &agent_id,
+        "landing-unpublished",
+        "Fix a typo in the fixture",
+        "file:README.md=modify",
+    );
+    let closed = cli_success(
+        &repo.root,
+        None,
+        vec![
+            "work".to_string(),
+            "discard".to_string(),
+            unpublished.clone(),
+            "--agent".to_string(),
+            agent_id.clone(),
+            "--reason".to_string(),
+            "Committed directly".to_string(),
+            "--landed".to_string(),
+            "HEAD".to_string(),
+        ],
+    );
+    assert_eq!(closed["data"]["status"], "DISCARDED");
+    let payload = closing_event(&unpublished);
+    assert_eq!(payload["disposition"], "landed");
+    assert_eq!(payload["landed_commit"], candidate);
+    assert!(payload.get("candidate_commit").is_none());
+}
+
+/// Work that landed through a squash or rebase merge never shares a commit with
+/// its candidate, so closing it as landed applies `record_commit`'s rule:
+/// ancestry, then content. A squash holding the whole candidate closes, and
+/// one missing part of it is refused with the missing path named.
+#[test]
+fn landed_work_closes_into_a_squash_by_content() {
+    for complete in [true, false] {
+        let repo = create_repo();
+        let trunk = git(&repo.root, ["rev-parse", "--abbrev-ref", "HEAD"]);
+        let (agent_id, intent_id) =
+            create_active_test_work(&repo.root, "squash-landing-agent", "squash-landing");
+        git(&repo.root, ["checkout", "--quiet", "-b", "feature"]);
+        fs::write(repo.root.join("first.txt"), "first\n").expect("write first file");
+        git(&repo.root, ["add", "first.txt"]);
+        git(&repo.root, ["commit", "--quiet", "-m", "first part"]);
+        fs::write(repo.root.join("second.txt"), "second\n").expect("write second file");
+        git(&repo.root, ["add", "second.txt"]);
+        git(&repo.root, ["commit", "--quiet", "-m", "second part"]);
+        publish_test_revision(&repo.root, &agent_id, &intent_id, "Two-part candidate");
+
+        git(&repo.root, ["checkout", "--quiet", &trunk]);
+        if complete {
+            git(&repo.root, ["merge", "--squash", "--quiet", "feature"]);
+        } else {
+            git(&repo.root, ["checkout", "feature", "--", "second.txt"]);
+        }
+        git(&repo.root, ["commit", "--quiet", "-m", "squash"]);
+        let close = vec![
+            "work".to_string(),
+            "discard".to_string(),
+            intent_id.clone(),
+            "--agent".to_string(),
+            agent_id.clone(),
+            "--reason".to_string(),
+            "Squash-merged by the maintainer".to_string(),
+            "--landed".to_string(),
+            "HEAD".to_string(),
+        ];
+        if complete {
+            let closed = cli_success(&repo.root, None, close);
+            assert_eq!(closed["data"]["status"], "DISCARDED");
+            let events = cli_success(&repo.root, None, ["events", "list", "--limit", "500"]);
+            let payload = events["data"]
+                .as_array()
+                .expect("events")
+                .iter()
+                .find(|event| event["event_type"] == "work.discarded")
+                .expect("closing event")["payload"]
+                .clone();
+            assert_eq!(payload["integration"]["method"], "content", "{payload}");
+        } else {
+            let refused = cli_failure(&repo.root, None, close);
+            assert_eq!(refused["error"]["code"], "TARGET_DIVERGED", "{refused}");
+            let message = refused["error"]["message"].as_str().expect("message");
+            assert!(
+                message.contains("first.txt") && !message.contains("second.txt"),
+                "{message}"
+            );
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn validation_timeout_kills_descendants_in_the_validation_process_group() {

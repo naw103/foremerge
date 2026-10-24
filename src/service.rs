@@ -471,22 +471,46 @@ impl Foremerge {
         let candidates = active_candidates(&tx, Some(&intent.id))?;
         let mut conflicts = Vec::new();
         let mut related_work = Vec::new();
+        // Stopped work with nothing recorded against it: listed, but asking
+        // nothing of the caller. Stopped work with a HIGH finding is not in
+        // here, because that conflict is real until someone settles it.
+        let mut set_aside = HashSet::new();
         for candidate in candidates {
             let detected = conflict::detect_pair(&source, &candidate);
             let overlap = conflict::overlap_views(&source.scopes, &candidate.scopes);
-            if !detected.is_empty() || !overlap.is_empty() {
-                related_work.push(related_work_view(&tx, &candidate, overlap, &detected)?);
+            if detected.is_empty() && overlap.is_empty() {
+                continue;
             }
+            let stopped_since = owner_stopped_since(&tx, &candidate.id)?;
+            let owner_stopped = stopped_since.is_some();
+            related_work.push(related_work_view(
+                &tx,
+                &candidate,
+                overlap,
+                &detected,
+                stopped_since,
+            )?);
+            let mut recorded = false;
             for mut detected in detected {
+                if owner_stopped && !records_against_stopped_work(&detected) {
+                    continue;
+                }
                 detected.source_intent_id = Some(intent.id.clone());
                 conflicts.push(persist_conflict(&tx, &detected, Some(&agent.id))?);
+                recorded = true;
+            }
+            if owner_stopped && !recorded {
+                set_aside.insert(candidate.id.clone());
             }
         }
-        // Strongest first, so an agent reading top-down sees asserted
-        // collisions before candidates it merely ought to look at.
+        // Live work first, then strongest first, so an agent reading top-down
+        // sees asserted collisions before candidates it merely ought to look
+        // at, and both before work nobody is doing any more.
         related_work.sort_by(|a, b| {
-            b.asserted
-                .cmp(&a.asserted)
+            set_aside
+                .contains(&a.intent_id)
+                .cmp(&set_aside.contains(&b.intent_id))
+                .then_with(|| b.asserted.cmp(&a.asserted))
                 .then_with(|| b.overlap.len().cmp(&a.overlap.len()))
                 .then_with(|| a.intent_id.cmp(&b.intent_id))
         });
@@ -514,11 +538,20 @@ impl Foremerge {
             ));
         }
         tx.commit()?;
-        let assessment_required = !related_work.is_empty();
-        let next = assessment_required.then(|| {
-            "Assess each entry in related_work against your own plan and call record_assessment for each before you write code. Foremerge states what overlaps; deciding what it means is yours."
-                .to_string()
-        });
+        let stopped = set_aside.len();
+        let assessment_required = related_work.len() > stopped;
+        let mut steps = Vec::new();
+        if assessment_required {
+            steps.push(
+                "Assess each entry in related_work against your own plan and call record_assessment for each before you write code. Foremerge states what overlaps; deciding what it means is yours.",
+            );
+        }
+        if stopped > 0 {
+            steps.push(
+                "Entries with owner_stopped_since belong to an agent that has stopped calling Foremerge. Unless a conflict against one is listed in conflicts, it needs no assessment. If you are continuing that work, take it over with the CLI command `foremerge work adopt` instead of duplicating it.",
+            );
+        }
+        let next = (!steps.is_empty()).then(|| steps.join(" "));
         Ok(PublishIntentOutcome {
             intent,
             conflicts,
@@ -612,6 +645,9 @@ impl Foremerge {
         // released claims as still held.
         refresh_intent_node(&tx, intent_id)?;
         refresh_claim_nodes_for_intent(&tx, intent_id)?;
+        // While its owner was gone, advisory findings against this intent went
+        // unrecorded. The adopter is taking on live work and needs them.
+        record_missed_findings(&tx, intent_id, &agent.id)?;
         Store::append_event(
             &tx,
             "intent.adopted",
@@ -1132,6 +1168,7 @@ impl Foremerge {
                         .to_string(),
                     ephemeral: false,
                     as_of_event,
+                    stopped_work: Vec::new(),
                 });
             }
         }
@@ -1160,17 +1197,32 @@ impl Foremerge {
         let candidates = active_candidates(conn, Some(&source.id))?;
         let as_of_event = latest_event_seq(conn)?;
         let checked_intents = candidates.len();
-        let conflicts = candidates
-            .into_iter()
-            .flat_map(|candidate| conflict::detect_pair(&source, &candidate))
-            .map(|mut finding| {
+        let mut conflicts = Vec::new();
+        let mut stopped_work = Vec::new();
+        for candidate in candidates {
+            let detected = conflict::detect_pair(&source, &candidate);
+            if detected.is_empty() {
+                continue;
+            }
+            // The same rule publish_intent applies, so a what-if check
+            // predicts what publishing would record.
+            let owner_stopped = owner_stopped_since(conn, &candidate.id)?.is_some();
+            let before = conflicts.len();
+            let found = detected.len();
+            for mut finding in detected {
+                if owner_stopped && !records_against_stopped_work(&finding) {
+                    continue;
+                }
                 finding.id = id("eph");
                 if let Some(evidence) = finding.evidence.as_object_mut() {
                     evidence.insert("ephemeral".to_string(), Value::Bool(true));
                 }
-                finding
-            })
-            .collect::<Vec<_>>();
+                conflicts.push(finding);
+            }
+            if conflicts.len() - before < found {
+                stopped_work.push(candidate.id);
+            }
+        }
         let blocking = conflicts.iter().any(|value| value.severity == "HIGH");
         Ok(ConflictReport {
             conflicts,
@@ -1180,6 +1232,7 @@ impl Foremerge {
                 .to_string(),
             ephemeral: true,
             as_of_event,
+            stopped_work,
         })
     }
 
@@ -2419,6 +2472,123 @@ impl Foremerge {
     }
 
     pub fn discard_work(&self, agent_id: &str, intent_id: &str, reason: &str) -> Result<Intent> {
+        self.close_work(agent_id, intent_id, reason, None)
+    }
+
+    /// Close an intent whose work reached Git without going through
+    /// acceptance.
+    ///
+    /// Acceptance needs a passing named check, and plenty of real work lands
+    /// without one: a repository with no checks registered, a suite too slow
+    /// to run per change, a human who commits the agents' work in a batch.
+    /// Such an intent had no honest way to finish. Discarding it reads as
+    /// abandonment, so agents left it open, and open intents are compared
+    /// against every later one for good.
+    ///
+    /// This closes the intent exactly as [`Foremerge::discard_work`] does and
+    /// records where the work went. It asserts nothing about verification: the
+    /// intent ends `DISCARDED`, never `ACCEPTED` or `COMMITTED`, and its
+    /// ChangeSet keeps whatever status it had. What is checked is the claim
+    /// itself. `landed_ref` must resolve to a commit in this repository, and
+    /// when the intent has published a ChangeSet that commit must contain the
+    /// candidate, the same ancestry rule `record_commit` applies.
+    pub fn close_landed_work(
+        &self,
+        agent_id: &str,
+        intent_id: &str,
+        reason: &str,
+        landed_ref: &str,
+    ) -> Result<Intent> {
+        if landed_ref.trim().is_empty() {
+            bail!("INVALID_INPUT: the landed ref cannot be empty");
+        }
+        let candidate;
+        let git_dir;
+        {
+            let conn = self.store.lock()?;
+            let intent = intent_by_id(&conn, intent_id)?;
+            if intent.agent_id != agent_id {
+                bail!("FORBIDDEN: an agent may only discard its own work");
+            }
+            if TERMINAL_INTENT_STATES.contains(&intent.status.as_str()) {
+                bail!(
+                    "INVALID_TRANSITION: cannot discard work in state {}",
+                    intent.status
+                );
+            }
+            let agent = agent_by_id(&conn, agent_id)?;
+            candidate = current_candidate(&conn, intent_id)?;
+            let bound: Option<String> = conn
+                .query_row(
+                    "SELECT value FROM meta WHERE key = 'repository_common_dir'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            git_dir = candidate
+                .as_ref()
+                .and_then(|candidate| candidate.worktree.clone())
+                .or(agent.worktree)
+                .or(bound)
+                .map(PathBuf::from)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "INVALID_INPUT: this coordination store is not bound to a Git repository, so a landed commit cannot be checked; discard with a reason instead"
+                    )
+                })?;
+            let repo = git::discover(&git_dir)?;
+            ensure_repository_matches(&conn, &repo.common_dir)?;
+        }
+        let landed_commit = git::verify_ref(&git_dir, landed_ref)?;
+        // The rule `record_commit` applies: ancestry first, then content, so
+        // work that landed through a squash or rebase merge can be closed too.
+        let integration = match candidate.as_ref() {
+            None => None,
+            Some(candidate) => {
+                let candidate_commit = git::verify_ref(&git_dir, &candidate.git_ref)?;
+                if git::is_ancestor(&git_dir, &candidate_commit, &landed_commit)? {
+                    Some(IntegrationEvidence {
+                        method: "ancestor".to_string(),
+                        merge_bases: Vec::new(),
+                        paths_checked: None,
+                        paths_with_other_changes: Vec::new(),
+                    })
+                } else {
+                    match git::content_containment(&git_dir, &candidate_commit, &landed_commit)? {
+                        Ok(contained) => Some(IntegrationEvidence {
+                            method: "content".to_string(),
+                            merge_bases: contained.merge_bases,
+                            paths_checked: Some(contained.paths_checked),
+                            paths_with_other_changes: contained.paths_with_other_changes,
+                        }),
+                        Err(refusal) => bail!(
+                            "TARGET_DIVERGED: {landed_ref} ({landed_commit}) does not contain this intent's published candidate {candidate_commit} (ChangeSet {}). It is not a descendant of it, and it does not hold the candidate's changes by content: {refusal}. {remedy}",
+                            candidate.changeset_id,
+                            remedy = refusal.remedy()
+                        ),
+                    }
+                }
+            }
+        };
+        self.close_work(
+            agent_id,
+            intent_id,
+            reason,
+            Some(LandedWork {
+                commit: landed_commit,
+                candidate,
+                integration,
+            }),
+        )
+    }
+
+    fn close_work(
+        &self,
+        agent_id: &str,
+        intent_id: &str,
+        reason: &str,
+        landed: Option<LandedWork>,
+    ) -> Result<Intent> {
         if reason.trim().is_empty() {
             bail!("INVALID_INPUT: a non-empty --reason is now required to discard work");
         }
@@ -2434,7 +2604,17 @@ impl Foremerge {
                 intent.status
             );
         }
-        touch_agent(&tx, agent_id)?;
+        if let Some(landed) = landed.as_ref() {
+            // The ancestry check ran outside this transaction, against the
+            // ChangeSet that was current then. A revision published since
+            // names a different candidate, which nothing has checked.
+            if current_candidate(&tx, intent_id)? != landed.candidate {
+                bail!(
+                    "STATE_RACE: the intent's ChangeSet changed while its landed commit was being checked; retry"
+                );
+            }
+        }
+        touch_agent_closing(&tx, agent_id, Some(intent_id))?;
         let now = Utc::now().to_rfc3339();
         tx.execute(
             "UPDATE intents SET status = 'DISCARDED', version = version + 1, updated_at = ?2 WHERE id = ?1",
@@ -2470,13 +2650,25 @@ impl Foremerge {
                 &json!({ "reason": "linked work was discarded", "intent_id": intent_id }),
             )?;
         }
+        let mut payload = json!({ "from": intent.status, "to": "DISCARDED", "reason": reason });
+        if let Some(landed) = landed.as_ref() {
+            payload["disposition"] = json!("landed");
+            payload["landed_commit"] = json!(landed.commit);
+            if let Some(candidate) = landed.candidate.as_ref() {
+                payload["changeset_id"] = json!(candidate.changeset_id);
+                payload["candidate_commit"] = json!(candidate.git_ref);
+            }
+            if let Some(integration) = landed.integration.as_ref() {
+                payload["integration"] = serde_json::to_value(integration)?;
+            }
+        }
         Store::append_event(
             &tx,
             "work.discarded",
             "Intent",
             intent_id,
             Some(agent_id),
-            &json!({ "from": intent.status, "to": "DISCARDED", "reason": reason }),
+            &payload,
         )?;
         tx.commit()?;
         drop(conn);
@@ -3767,6 +3959,7 @@ fn related_work_view(
     candidate: &IntentCandidate,
     overlap: Vec<ScopeOverlapView>,
     detected: &[Conflict],
+    owner_stopped_since: Option<String>,
 ) -> Result<RelatedWork> {
     let intent = intent_by_id(conn, &candidate.id)?;
     let agent = agent_by_id(conn, &intent.agent_id)?;
@@ -3796,6 +3989,7 @@ fn related_work_view(
         overlap,
         why_surfaced,
         asserted,
+        owner_stopped_since,
     })
 }
 
@@ -3870,12 +4064,202 @@ fn bind_repository(tx: &Transaction<'_>, common_dir: &std::path::Path) -> Result
 /// [`AGENT_STALE_AFTER_SECONDS`] would otherwise read as abandoned while it was
 /// busy. Only operations the agent itself performs touch this; being named as
 /// the recipient of someone else's message is not evidence of life.
-fn touch_agent(conn: &Connection, agent_id: &str) -> Result<()> {
-    conn.execute(
+fn touch_agent(tx: &Transaction<'_>, agent_id: &str) -> Result<()> {
+    touch_agent_closing(tx, agent_id, None)
+}
+
+/// [`touch_agent`], for a call that is about to close `closing`.
+///
+/// An agent that had fallen silent may have had findings against its open
+/// intents left unrecorded (see [`owner_stopped_since`]). Its first call back
+/// is the moment those pairs become real again, so they are recorded here,
+/// once: later calls find the agent already live and do nothing. The intent
+/// being closed is left out, because recording findings against it only to
+/// dismiss them in the same transaction would be noise in the audit trail.
+fn touch_agent_closing(tx: &Transaction<'_>, agent_id: &str, closing: Option<&str>) -> Result<()> {
+    let previously_seen: Option<String> = tx
+        .query_row(
+            "SELECT last_seen_at FROM agents WHERE id = ?1",
+            [agent_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    tx.execute(
         "UPDATE agents SET last_seen_at = ?2 WHERE id = ?1",
         params![agent_id, Utc::now().to_rfc3339()],
     )?;
+    if previously_seen.as_deref().is_some_and(is_stale) {
+        let mut statement = tx.prepare(
+            "SELECT id, status FROM intents WHERE agent_id = ?1 ORDER BY created_at, id",
+        )?;
+        let owned = statement
+            .query_map([agent_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        for (intent_id, status) in owned {
+            if ADOPTABLE_INTENT_STATES.contains(&status.as_str())
+                && closing != Some(intent_id.as_str())
+            {
+                record_missed_findings(tx, &intent_id, agent_id)?;
+            }
+        }
+    }
     Ok(())
+}
+
+/// An intent's current ChangeSet, as far as closing landed work cares: which
+/// commit it offered and where that commit can be looked up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CurrentCandidate {
+    changeset_id: String,
+    git_ref: String,
+    worktree: Option<String>,
+}
+
+/// Where closed work went, verified before the closing transaction opens.
+struct LandedWork {
+    commit: String,
+    candidate: Option<CurrentCandidate>,
+    /// How the landed commit was shown to hold the candidate, when there is
+    /// one: the same evidence `record_commit` keeps.
+    integration: Option<IntegrationEvidence>,
+}
+
+/// The one ChangeSet of an intent that has not been superseded, if it names a
+/// commit.
+fn current_candidate(conn: &Connection, intent_id: &str) -> Result<Option<CurrentCandidate>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, git_ref, worktree FROM changesets
+             WHERE intent_id = ?1 AND status <> 'SUPERSEDED' AND git_ref IS NOT NULL",
+            [intent_id],
+            |row| {
+                Ok(CurrentCandidate {
+                    changeset_id: row.get(0)?,
+                    git_ref: row.get(1)?,
+                    worktree: row.get(2)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// The states an intent can be left in by an owner that stopped without
+/// closing it: the ones `work adopt` accepts.
+const ADOPTABLE_INTENT_STATES: &[&str] = &["INTENT", "CLAIMED", "IN_PROGRESS", "PROVISIONAL"];
+
+/// The owner's last Foremerge call, when the owner of an open intent has
+/// stopped; `None` while the intent is live.
+///
+/// This is the test [`Foremerge::adopt_intent`] applies before it hands work
+/// over: an adoptable state, no live claim, and an owner that has fallen
+/// silent. A session that ends without closing its intent leaves it in exactly
+/// this condition for good, and comparing every later intent against it is how
+/// a ledger fills with conflicts between agents that finished long ago.
+fn owner_stopped_since(conn: &Connection, intent_id: &str) -> Result<Option<String>> {
+    let (status, owner_status, owner_last_seen): (String, String, String) = conn.query_row(
+        "SELECT i.status, a.status, a.last_seen_at
+         FROM intents i JOIN agents a ON a.id = i.agent_id WHERE i.id = ?1",
+        [intent_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    if !ADOPTABLE_INTENT_STATES.contains(&status.as_str()) {
+        return Ok(None);
+    }
+    if owner_status == "ACTIVE" && !is_stale(&owner_last_seen) {
+        return Ok(None);
+    }
+    let live: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM claims
+         WHERE intent_id = ?1 AND status = 'ACTIVE' AND lease_expires_at > ?2",
+        params![intent_id, Utc::now().to_rfc3339()],
+        |row| row.get(0),
+    )?;
+    Ok((live == 0).then_some(owner_last_seen))
+}
+
+/// Whether a finding is recorded although the other intent's owner has
+/// stopped.
+///
+/// HIGH findings gate acceptance, so they are always recorded: an owner that
+/// was merely heads-down must not find that another agent landed over its work
+/// because a lease lapsed. Everything below HIGH is advisory, and an advisory
+/// against work nobody is doing is the noise that buries a real one. Those are
+/// recorded if the work comes back, by [`record_missed_findings`].
+fn records_against_stopped_work(finding: &Conflict) -> bool {
+    finding.severity == "HIGH"
+}
+
+/// Record the findings between one intent and the live work around it that are
+/// not on record yet.
+///
+/// Called when stopped work becomes live again, through its owner's return or
+/// an adoption. Each pair is compared in the direction publication would have
+/// used, later intent against earlier, so a finding lands on the same conflict
+/// identity either way. Pairs already on record are left alone, settled or
+/// not: this fills gaps and never reopens a decision or appends a redetection.
+fn record_missed_findings(tx: &Transaction<'_>, intent_id: &str, agent_id: &str) -> Result<()> {
+    let intent = intent_by_id(tx, intent_id)?;
+    let returning = IntentCandidate {
+        id: intent.id.clone(),
+        summary: intent.summary.clone(),
+        scopes: intent.scopes.clone(),
+    };
+    for candidate in active_candidates(tx, Some(intent_id))? {
+        let candidate_created_at: String = tx.query_row(
+            "SELECT created_at FROM intents WHERE id = ?1",
+            [&candidate.id],
+            |row| row.get(0),
+        )?;
+        let candidate_is_later = (candidate_created_at.as_str(), candidate.id.as_str())
+            > (intent.created_at.as_str(), intent.id.as_str());
+        let (source, target) = if candidate_is_later {
+            (&candidate, &returning)
+        } else {
+            (&returning, &candidate)
+        };
+        let detected = conflict::detect_pair(source, target);
+        if detected.is_empty() {
+            continue;
+        }
+        let other_stopped = owner_stopped_since(tx, &candidate.id)?.is_some();
+        for mut finding in detected {
+            if other_stopped && !records_against_stopped_work(&finding) {
+                continue;
+            }
+            finding.source_intent_id = Some(source.id.clone());
+            if conflict_is_recorded(tx, &finding)? {
+                continue;
+            }
+            persist_conflict(tx, &finding, Some(agent_id))?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether a conflict with this finding's identity exists, in either
+/// direction and in any status.
+fn conflict_is_recorded(conn: &Connection, finding: &Conflict) -> Result<bool> {
+    let scope_identity = finding
+        .scope
+        .as_ref()
+        .map(Scope::precise)
+        .unwrap_or_else(|| "<none>".to_string());
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM conflicts
+         WHERE kind = ?3 AND scope_identity = ?4
+         AND ((source_intent_id = ?1 AND target_intent_id = ?2)
+           OR (source_intent_id = ?2 AND target_intent_id = ?1)))",
+        params![
+            finding.source_intent_id,
+            finding.target_intent_id,
+            finding.kind,
+            scope_identity
+        ],
+        |row| row.get(0),
+    )?)
 }
 
 /// Whether an agent has been silent long enough to be treated as gone.
@@ -5495,5 +5879,309 @@ mod tests {
             })
             .unwrap();
         assert_eq!(after.as_of_event, snapshot.as_of_event);
+    }
+
+    fn stopped_work_agent(service: &Foremerge, name: &str) -> Agent {
+        service
+            .register_agent(RegisterAgentRequest {
+                name: name.into(),
+                model: None,
+                capabilities: vec![],
+                worktree: None,
+            })
+            .unwrap()
+            .agent
+    }
+
+    fn stopped_work_publish(
+        service: &Foremerge,
+        agent: &Agent,
+        summary: &str,
+        scope: Scope,
+        operation: Operation,
+    ) -> PublishIntentOutcome {
+        service
+            .publish_intent(PublishIntentRequest {
+                agent_id: agent.id.clone(),
+                task: summary.into(),
+                summary: summary.into(),
+                rationale: None,
+                scopes: vec![ScopeClaim::new(scope, operation)],
+                depends_on: vec![],
+                metadata: json!({}),
+            })
+            .unwrap()
+    }
+
+    /// Backdate one agent's heartbeat past the stale window: it stopped
+    /// calling Foremerge without closing anything, as a finished session does.
+    fn stopped_work_silence(service: &Foremerge, agent: &Agent) {
+        let long_ago =
+            (Utc::now() - chrono::Duration::seconds(AGENT_STALE_AFTER_SECONDS * 2)).to_rfc3339();
+        let conn = service.store.lock().unwrap();
+        conn.execute(
+            "UPDATE agents SET last_seen_at = ?1 WHERE id = ?2",
+            params![long_ago, agent.id],
+        )
+        .unwrap();
+    }
+
+    fn stopped_work_conflicts_between(service: &Foremerge, a: &str, b: &str) -> i64 {
+        let conn = service.store.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM conflicts
+             WHERE (source_intent_id = ?1 AND target_intent_id = ?2)
+                OR (source_intent_id = ?2 AND target_intent_id = ?1)",
+            params![a, b],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    fn stopped_work_detections_between(service: &Foremerge, a: &str, b: &str) -> i64 {
+        let conn = service.store.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM conflict_detections d JOIN conflicts c ON c.id = d.conflict_id
+             WHERE (c.source_intent_id = ?1 AND c.target_intent_id = ?2)
+                OR (c.source_intent_id = ?2 AND c.target_intent_id = ?1)",
+            params![a, b],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// A session that finishes without closing its intent leaves it reading as
+    /// in progress forever. Every later intent on the same file then recorded a
+    /// conflict against work nobody was doing, until one repository held 3,896
+    /// open conflicts of which 98% had no live agent on either side.
+    ///
+    /// The positive fixture is the live overlapping intent, which must still
+    /// conflict. The negative control is the independent intent, which must
+    /// not appear at all.
+    #[test]
+    fn an_advisory_finding_against_stopped_work_waits_for_its_owner_to_return() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let finished = stopped_work_agent(&service, "finished-session");
+        let busy = stopped_work_agent(&service, "busy-session");
+        let newcomer = stopped_work_agent(&service, "newcomer");
+        let voice = || Scope::new("file", "src/voice.rs");
+
+        let abandoned = stopped_work_publish(
+            &service,
+            &finished,
+            "Tune the voice loop",
+            voice(),
+            Operation::Modify,
+        )
+        .intent;
+        let independent = stopped_work_publish(
+            &service,
+            &finished,
+            "Reword the billing email",
+            Scope::new("file", "src/billing_email.rs"),
+            Operation::Modify,
+        )
+        .intent;
+        stopped_work_silence(&service, &finished);
+        let live = stopped_work_publish(
+            &service,
+            &busy,
+            "Add a voice timeout",
+            voice(),
+            Operation::Modify,
+        )
+        .intent;
+
+        let published = stopped_work_publish(
+            &service,
+            &newcomer,
+            "Log voice errors",
+            voice(),
+            Operation::Modify,
+        );
+        let mine = published.intent.id.clone();
+
+        assert!(
+            stopped_work_conflicts_between(&service, &mine, &live.id) > 0,
+            "overlapping live work must still be recorded as a conflict"
+        );
+        assert!(
+            published
+                .conflicts
+                .iter()
+                .all(|conflict| conflict.severity != "HIGH"),
+            "this fixture is the advisory case; HIGH has its own test"
+        );
+        assert_eq!(
+            stopped_work_conflicts_between(&service, &mine, &abandoned.id),
+            0,
+            "an advisory finding against work whose owner has stopped must not be recorded"
+        );
+        assert_eq!(
+            stopped_work_conflicts_between(&service, &mine, &independent.id),
+            0,
+            "independent work never conflicts"
+        );
+        assert!(
+            published
+                .related_work
+                .iter()
+                .all(|related| related.intent_id != independent.id),
+            "independent work is not related work"
+        );
+        // Stopped work is still listed, last, so that an agent continuing it
+        // adopts it instead of duplicating it. It asks for no assessment.
+        let entry = |intent_id: &str| {
+            published
+                .related_work
+                .iter()
+                .find(|related| related.intent_id == intent_id)
+                .expect("overlapping work is listed")
+        };
+        assert!(entry(&live.id).owner_stopped_since.is_none());
+        assert!(entry(&abandoned.id).owner_stopped_since.is_some());
+        assert_eq!(
+            published.related_work.last().unwrap().intent_id,
+            abandoned.id,
+            "stopped work sorts after live work"
+        );
+        assert!(published.assessment_required, "the live entry needs one");
+
+        // A what-if check predicts what publishing would record.
+        let what_if = service
+            .check_conflicts(ConflictCheckRequest {
+                agent_id: None,
+                intent_id: None,
+                intent: Some("Rework voice retries".into()),
+                scopes: vec![ScopeClaim::new(voice(), Operation::Modify)],
+            })
+            .unwrap();
+        assert!(
+            what_if
+                .conflicts
+                .iter()
+                .all(|conflict| conflict.target_intent_id != abandoned.id),
+            "{:?}",
+            what_if.conflicts
+        );
+        assert!(
+            what_if
+                .conflicts
+                .iter()
+                .any(|conflict| conflict.target_intent_id == live.id)
+        );
+        assert_eq!(what_if.stopped_work, vec![abandoned.id.clone()]);
+
+        // The owner was only heads-down. Its next call brings the pair back.
+        service
+            .claim_work(ClaimWorkRequest {
+                agent_id: finished.id.clone(),
+                intent_id: abandoned.id.clone(),
+                scopes: vec![voice()],
+                reason: None,
+                lease_seconds: 3600,
+            })
+            .unwrap();
+        assert!(
+            stopped_work_conflicts_between(&service, &mine, &abandoned.id) > 0,
+            "a returning owner must learn of the work published while it was silent"
+        );
+        assert_eq!(
+            stopped_work_conflicts_between(&service, &mine, &independent.id),
+            0,
+            "the return must not invent a conflict for independent work"
+        );
+        let observed = stopped_work_detections_between(&service, &mine, &abandoned.id);
+        service.start_work(&finished.id, &abandoned.id).unwrap();
+        assert_eq!(
+            stopped_work_detections_between(&service, &mine, &abandoned.id),
+            observed,
+            "an agent that is already back must not re-detect on every call"
+        );
+    }
+
+    /// HIGH findings gate acceptance, so they are recorded whoever owns the
+    /// other side. Skipping one because its owner fell silent would let the
+    /// first agent to finish land over work that was only paused.
+    #[test]
+    fn a_blocking_finding_against_stopped_work_is_still_recorded() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let finished = stopped_work_agent(&service, "finished-session");
+        let newcomer = stopped_work_agent(&service, "newcomer");
+        let payments = || Scope::new("symbol", "PaymentService");
+
+        let abandoned = stopped_work_publish(
+            &service,
+            &finished,
+            "Replace PaymentService with StripePaymentService",
+            payments(),
+            Operation::Replace,
+        )
+        .intent;
+        stopped_work_silence(&service, &finished);
+
+        let published = stopped_work_publish(
+            &service,
+            &newcomer,
+            "Add PayPal support to PaymentService",
+            payments(),
+            Operation::Extend,
+        );
+        assert!(
+            published
+                .conflicts
+                .iter()
+                .any(|conflict| conflict.severity == "HIGH"
+                    && conflict.status == "OPEN"
+                    && (conflict.target_intent_id == abandoned.id
+                        || conflict.source_intent_id.as_deref() == Some(abandoned.id.as_str()))),
+            "a HIGH finding must be recorded even against stopped work: {:?}",
+            published.conflicts
+        );
+        assert!(
+            published.assessment_required,
+            "a recorded HIGH conflict is real until someone settles it, stopped owner or not"
+        );
+    }
+
+    /// Adoption is the other way stopped work comes back, and the adopter needs
+    /// the same picture a returning owner gets.
+    #[test]
+    fn adopting_stopped_work_records_the_findings_it_missed() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let finished = stopped_work_agent(&service, "finished-session");
+        let newcomer = stopped_work_agent(&service, "newcomer");
+        let rescuer = stopped_work_agent(&service, "rescuer");
+        let voice = || Scope::new("file", "src/voice.rs");
+
+        let abandoned = stopped_work_publish(
+            &service,
+            &finished,
+            "Tune the voice loop",
+            voice(),
+            Operation::Modify,
+        )
+        .intent;
+        stopped_work_silence(&service, &finished);
+        let mine = stopped_work_publish(
+            &service,
+            &newcomer,
+            "Log voice errors",
+            voice(),
+            Operation::Modify,
+        )
+        .intent;
+        assert_eq!(
+            stopped_work_conflicts_between(&service, &mine.id, &abandoned.id),
+            0
+        );
+
+        service
+            .adopt_intent(&rescuer.id, &abandoned.id, "owner finished without closing")
+            .unwrap();
+        assert!(
+            stopped_work_conflicts_between(&service, &mine.id, &abandoned.id) > 0,
+            "the adopter must see the overlap recorded against the work it took on"
+        );
     }
 }

@@ -126,7 +126,7 @@ The complete MVP MCP tool surface is:
 | `run_verification` | Execute a trusted repository check by name |
 | `accept_changeset` | Apply the final conflict, dependency, validation, and Git gates |
 | `record_commit` | Record the actual post-integration Git commit |
-| `discard_work` | Preserve abandoned work while releasing claims and linked blockers |
+| `discard_work` | Close abandoned work, or work that landed without acceptance, releasing claims and linked blockers |
 | `list_agents` | Read registered agent provenance |
 | `get_intent` | Read one intent, its agent, and current conflicts |
 | `get_changeset` | Read one ChangeSet and its commit/provenance state |
@@ -198,7 +198,10 @@ At a useful implementation boundary:
    that actually landed.
 
 If the work should not land, call `discard_work` instead of deleting its
-coordination record.
+coordination record. If it reached Git without a passing check, so that it
+cannot be accepted, call `discard_work` with `landed_ref`. Either way, close
+the intent before the session ends: an open intent is compared against every
+later one.
 
 Do not call tools for every keystroke. Foremerge events are semantic boundaries.
 
@@ -422,6 +425,25 @@ candidate made. The result's `provenance.integration.method` says which
   "reason": "The experiment will not land"
 }
 ```
+
+For work that reached Git without going through acceptance, add the commit or
+branch it landed in:
+
+```json
+{
+  "agent_id": "agt_...",
+  "intent_id": "int_...",
+  "reason": "Committed by the maintainer with the weekly batch",
+  "landed_ref": "main"
+}
+```
+
+The ref must resolve to a commit, and when the intent has published a
+ChangeSet that commit must hold the candidate, by ancestry or by content as
+`record_commit` checks it, or the call fails with `TARGET_DIVERGED` and changes
+nothing. The intent ends `DISCARDED` in both
+forms. `landed_ref` records where the work went. It does not say the work was
+verified, and it never moves a ChangeSet to `ACCEPTED` or `COMMITTED`.
 
 ## Transport smoke test
 
