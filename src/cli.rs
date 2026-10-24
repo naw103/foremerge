@@ -536,7 +536,9 @@ enum ChangeSetCommand {
         #[arg(long)]
         override_reason: Option<String>,
     },
-    /// Record the durable Git commit after integration.
+    /// Record the durable Git commit after integration. The commit must have
+    /// the accepted commit in its history or, after a squash or rebase merge,
+    /// hold every change the candidate made.
     Commit {
         changeset_id: String,
         #[arg(long = "git-ref")]

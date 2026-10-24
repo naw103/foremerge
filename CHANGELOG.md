@@ -66,6 +66,36 @@ changes when they are called out here with a migration note.
   the binary was compiled: a release-profile build of unreleased schema work is
   refused too, and a debug build at the released schema is not.
 
+### Fixed
+
+- `record_commit` (CLI `foremerge changeset commit`) can now record a pull
+  request that landed as a squash merge or a GitHub "rebase and merge". Both
+  write new commits, so the accepted commit was never in the landed commit's
+  history, every call failed with `TARGET_DIVERGED`, and on a repository that
+  squashes no ChangeSet could reach `COMMITTED`. Ancestry is still checked
+  first. When it fails, the commit is accepted only if every path the
+  candidate changed since its merge base with that commit holds the
+  candidate's change there: an identical file, or a file whose three-way line
+  merge with the candidate's version is clean and changes nothing, so edits
+  that reached the target branch first are allowed. Deletions and file modes
+  must match, and binary files, symbolic links and submodules must be
+  identical. A commit from before the candidate, a commit missing any part of
+  the candidate, and a candidate that changes nothing are refused, and the
+  refusal names each missing path, why, and what to do next. A squash that
+  also carries other work is accepted, as a merge commit that brings in other
+  commits always was. The ChangeSet's `provenance.integration` records the
+  method (`ancestor` or `content`) and its evidence, so every later read shows
+  it, and the `changeset.committed` event stores the same object. The ledger
+  schema is unchanged
+  ([#38](https://github.com/naw103/foremerge/issues/38)).
+- The acceptance gate's dependency check now also accepts a `COMMITTED`
+  dependency whose recorded `integration_commit` is in the candidate's history,
+  so work started after a squash-merged dependency landed can be accepted. A
+  dependency that landed that way but has not been recorded is still refused,
+  with a message saying to record its landing commit first. The
+  `changeset.accepted` event lists how each dependency was satisfied
+  ([#38](https://github.com/naw103/foremerge/issues/38)).
+
 ## [0.5.1] - 2026-10-03
 
 A patch release, compatible with 0.5.0. The ledger schema is unchanged, so the

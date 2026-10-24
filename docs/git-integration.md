@@ -180,7 +180,14 @@ ChangeSet dependency IDs are checked at acceptance. Every dependency must name
 an accepted or committed intent with an immutable stored `accepted_commit`.
 Its namespaced accepted ref must still resolve to that exact hash, and the hash
 must be an ancestor of the candidate according to `git merge-base
---is-ancestor`.
+--is-ancestor`. A dependency that is `COMMITTED` is also satisfied when its
+recorded `integration_commit` is an ancestor of the candidate. That covers a
+dependency that landed through a squash or rebase merge: its accepted commit is
+on no branch later work starts from, but the landing commit `record_commit`
+verified is. A dependency that landed that way and has not been recorded yet
+is refused until its landing commit is recorded. The `changeset.accepted` event
+lists each dependency with `satisfied_by` (`accepted_commit` or
+`integration_commit`) and the commit that was found.
 
 Validation commands are trusted local code. They inherit the user's environment
 and operating-system permissions.
@@ -229,11 +236,80 @@ The honest MVP workflow is:
 3. Run validation through Foremerge.
 4. Accept the clean `HEAD`, creating an accepted ref.
 5. Merge, rebase, cherry-pick, or open a pull request using ordinary Git tooling.
-6. Record the integration ref. Foremerge requires the accepted candidate to be
-   an ancestor of that commit, then releases the intent's active claims.
+6. Record the integration ref. Foremerge requires that commit to contain the
+   accepted candidate, by ancestry or, after a squash or rebase merge, by
+   content (see below), then releases the intent's active claims.
 
 Foremerge does not currently implement automatic fast-forward integration,
 rebasing, conflict resolution, target-branch updates, or GitHub operations.
+
+## Recording the landing commit
+
+`record_commit` (CLI `foremerge changeset commit`) accepts a commit only when it
+contains the accepted candidate. It checks in two steps.
+
+1. **Ancestry.** If `accepted_commit` is an ancestor of the recorded commit
+   (`git merge-base --is-ancestor`), the commit contains it. A merge commit, a
+   fast-forward, and the accepted commit itself all pass here. The ChangeSet's
+   `provenance.integration` and the `changeset.committed` event record
+   `method: "ancestor"`.
+2. **Content.** A squash merge and a rebase merge write new commits, so the
+   accepted commit is not in the landed commit's history. Foremerge then
+   accepts the commit only if it holds every change the candidate made. For
+   each merge base of the accepted commit and the recorded commit, it lists
+   the paths the candidate changed relative to that base, without rename
+   detection, and requires each one to have landed:
+   - a path identical to the candidate's version has landed;
+   - a regular file that differs has landed only if a three-way line merge of
+     the candidate's version into the recorded version, with the merge base's
+     version as the ancestor, is clean and leaves the recorded version
+     unchanged. That allows other edits to the same file, such as changelog
+     entries that reached the target branch first, while refusing a file that
+     lacks or contradicts any of the candidate's lines;
+   - a path the candidate deleted must be absent, a file mode the candidate
+     set must match, and symbolic links, submodules and binary files must
+     match exactly.
+
+   The merge is `git merge-file`, which reads no attributes, so a custom merge
+   driver configured in the repository cannot make a missing change look
+   present. Every diff option that configuration could change is pinned
+   (`diff.renames`, `diff.relative`, `diff.ignoreSubmodules`, `core.abbrev`,
+   external diff and text conversion), paths are compared as exact bytes, and
+   the result does not depend on the directory the command runs from. On
+   success the method is `content`, and the evidence also carries
+   `merge_bases`, `paths_checked`, and `paths_with_other_changes`.
+
+Content containment refuses, with `TARGET_DIVERGED` and the reason:
+
+- a commit already in the candidate's own history, such as its fork point or
+  one of its earlier commits;
+- a commit that shares no history with the candidate;
+- any commit at all when the candidate makes no change relative to the merge
+  base, since every commit would trivially hold an empty change;
+- a commit where any path the candidate changed is missing, still present
+  after the candidate deleted it, or lacks or conflicts with its change. The
+  message names each such path and why.
+
+Each refusal ends with the next step: record the commit the work actually
+landed in, or, if what landed differs from what was accepted, publish and
+validate a revision for it.
+
+The evidence is stored in the ChangeSet's `provenance.integration`, beside the
+provenance captured at publication, so `get_changeset` and `foremerge changeset
+show` return it on every later read. The `changeset.committed` event holds the
+same object and is the immutable copy.
+
+A squash that combined this candidate with other work, such as an extra file
+or extra edits to the candidate's files, is accepted, because every change the
+candidate made is present. This is deliberate and matches ancestry, which has
+always accepted a merge commit that also brings in other commits: the question
+is whether this ChangeSet landed, not whether nothing else did. A squash or rebase that dropped part of the candidate is
+refused. If the rest lands later, recording the later commit succeeds.
+
+Content cannot tell where a change came from. A commit that makes exactly the
+candidate's changes by another route is indistinguishable from its landing,
+and is accepted. As with ancestry, the recorded commit is caller-attested:
+Foremerge does not check that it reached any particular branch or remote.
 
 ## Failure behavior
 

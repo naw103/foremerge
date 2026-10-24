@@ -454,6 +454,12 @@ paths:
     post:
       operationId: recordCommit
       summary: Record an integration commit containing the accepted candidate
+      description: >-
+        The commit must have the accepted commit in its history or, after a
+        squash or rebase merge, hold every change the candidate made;
+        otherwise the call fails with TARGET_DIVERGED. The response data is
+        the committed ChangeSet, whose provenance.integration.method is
+        ancestor or content.
       parameters:
         - $ref: "#/components/parameters/ChangeSetId"
       requestBody:

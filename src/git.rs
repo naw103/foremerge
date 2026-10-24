@@ -453,6 +453,490 @@ pub fn is_ancestor(worktree: impl AsRef<Path>, ancestor: &str, descendant: &str)
     }
 }
 
+/// How a commit that is not a descendant of an accepted candidate was shown
+/// to hold every change the candidate made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentContainment {
+    /// The merge bases of the candidate and the landed commit. The candidate's
+    /// changes are measured against each one.
+    pub merge_bases: Vec<String>,
+    /// How many distinct paths the candidate changed, all of which were found
+    /// holding the candidate's change.
+    pub paths_checked: usize,
+    /// Paths where the landed commit holds the candidate's change and other
+    /// changes besides, such as edits that landed on the target branch first.
+    pub paths_with_other_changes: Vec<String>,
+}
+
+/// Why content containment could not be shown. Each variant is a refusal, not
+/// a Git failure: the commit may still be the right one, but nothing here
+/// proves it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContainmentRefusal {
+    /// The landed commit is already in the candidate's own history.
+    Predates,
+    /// The two commits have no common history.
+    NoMergeBase { shallow: bool },
+    /// The candidate changes nothing relative to this merge base, so every
+    /// commit would trivially "contain" it.
+    NoChange { merge_base: String },
+    /// These paths do not hold the candidate's change, each with the reason.
+    Paths {
+        merge_base: String,
+        changed: usize,
+        missing: Vec<(String, &'static str)>,
+    },
+}
+
+impl ContainmentRefusal {
+    /// What the caller can do next, in one sentence.
+    pub fn remedy(&self) -> &'static str {
+        match self {
+            Self::Predates => {
+                "Record the commit the work landed in, which comes after the accepted candidate."
+            }
+            Self::NoMergeBase { .. } => {
+                "Record the commit in this repository's history that the work landed in."
+            }
+            Self::NoChange { .. } => {
+                "An empty candidate can be recorded only through ancestry: record a commit that has the accepted commit in its history."
+            }
+            Self::Paths { .. } => {
+                "Record the commit the work actually landed in, or, if what landed differs from what was accepted, publish and validate a revision for it."
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for ContainmentRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const SHOWN: usize = 10;
+        match self {
+            Self::Predates => write!(
+                formatter,
+                "it predates the accepted candidate (it is already in the candidate's own history)"
+            ),
+            Self::NoMergeBase { shallow } => {
+                write!(
+                    formatter,
+                    "it shares no history with the accepted candidate"
+                )?;
+                if *shallow {
+                    write!(
+                        formatter,
+                        "; this repository is shallow, so fetch more history and retry"
+                    )?;
+                }
+                Ok(())
+            }
+            Self::NoChange { merge_base } => write!(
+                formatter,
+                "the accepted candidate makes no change relative to merge base {merge_base}, so content cannot show that it landed"
+            ),
+            Self::Paths {
+                merge_base,
+                changed,
+                missing,
+            } => {
+                write!(
+                    formatter,
+                    "{} of the {changed} path(s) the candidate changed since merge base {merge_base} do not hold its change: ",
+                    missing.len()
+                )?;
+                let shown = missing
+                    .iter()
+                    .take(SHOWN)
+                    .map(|(path, reason)| format!("{path} ({reason})"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(formatter, "{shown}")?;
+                if missing.len() > SHOWN {
+                    write!(formatter, ", and {} more", missing.len() - SHOWN)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// One side of a `git diff --raw` entry: a mode and an object id, or `None`
+/// when the path is absent on that side.
+type RawSide = Option<(String, String)>;
+
+struct RawChange {
+    /// The path exactly as Git stores it. Paths are bytes, not text, so two
+    /// distinct non-UTF-8 names must never collapse into one key.
+    path: Vec<u8>,
+    old: RawSide,
+    new: RawSide,
+}
+
+const ZERO_MODE: &str = "000000";
+const MAX_RAW_DIFF_BYTES: usize = 64 * 1024 * 1024;
+const MAX_COMPARED_BLOB_BYTES: usize = 64 * 1024 * 1024;
+
+/// Whether `landed` holds every change `candidate` made since their common
+/// history, judged by content rather than ancestry.
+///
+/// This is for a landing that rewrote the candidate's commits: a squash merge
+/// or a rebase merge. For each merge base of the two commits, every path the
+/// candidate changed relative to that base must, at `landed`:
+///
+/// - be identical to the candidate's version, or
+/// - for a regular file, already contain the candidate's change, meaning a
+///   line-level three-way merge of the candidate's version into the landed
+///   version (with the merge base's version as the common ancestor) is clean
+///   and changes nothing. Other edits to the same file, such as entries that
+///   landed on the target branch first, are allowed.
+///
+/// A deletion must be a deletion at `landed`, and a mode the candidate set
+/// must be the mode at `landed`. Symbolic links and submodules count only
+/// when they match exactly. A commit already in the candidate's history, and
+/// a candidate that changes nothing, are refused outright, since content
+/// would prove nothing about either.
+///
+/// The merge is Git's own `merge-file`, which reads no attributes, so a
+/// repository's custom merge drivers cannot make a missing change look
+/// present. Paths are compared without rename detection: a rename is a
+/// deletion plus an addition, and both must have landed.
+///
+/// `Ok(Err(_))` is a refusal with its reason; `Err(_)` means Git itself failed.
+pub fn content_containment(
+    worktree: impl AsRef<Path>,
+    candidate: &str,
+    landed: &str,
+) -> Result<std::result::Result<ContentContainment, ContainmentRefusal>> {
+    let worktree = worktree.as_ref();
+    if is_ancestor(worktree, landed, candidate)? {
+        return Ok(Err(ContainmentRefusal::Predates));
+    }
+    let merge_bases = merge_bases(worktree, candidate, landed)?;
+    if merge_bases.is_empty() {
+        return Ok(Err(ContainmentRefusal::NoMergeBase {
+            shallow: is_shallow(worktree)?,
+        }));
+    }
+    let landed_differences: std::collections::BTreeMap<Vec<u8>, RawChange> =
+        raw_diff(worktree, candidate, landed)?
+            .into_iter()
+            .map(|change| (change.path.clone(), change))
+            .collect();
+    let mut checked = BTreeSet::new();
+    let mut with_other_changes = BTreeSet::new();
+    let mut scratch = None;
+    for merge_base in &merge_bases {
+        let changes = raw_diff(worktree, merge_base, candidate)?;
+        if changes.is_empty() {
+            return Ok(Err(ContainmentRefusal::NoChange {
+                merge_base: merge_base.clone(),
+            }));
+        }
+        let mut missing = Vec::new();
+        for change in &changes {
+            checked.insert(change.path.clone());
+            // Absent from the candidate-to-landed diff: identical at both.
+            let Some(difference) = landed_differences.get(&change.path) else {
+                continue;
+            };
+            // `difference.old` is the candidate's side, `.new` the landed one.
+            let verdict = match (&change.new, &difference.new) {
+                (None, None) => Ok(()),
+                (None, Some(_)) => Err("still present; the candidate deleted it"),
+                (Some(_), None) => Err("missing"),
+                (Some((candidate_mode, candidate_blob)), Some((landed_mode, landed_blob))) => {
+                    let mode_set_by_candidate = change
+                        .old
+                        .as_ref()
+                        .is_none_or(|(base_mode, _)| base_mode != candidate_mode);
+                    if landed_mode != candidate_mode && mode_set_by_candidate {
+                        Err("different file mode")
+                    } else if landed_blob == candidate_blob {
+                        Ok(())
+                    } else if !is_regular_file(candidate_mode) || !is_regular_file(landed_mode) {
+                        Err("different, and not a regular file")
+                    } else {
+                        let base_blob = change
+                            .old
+                            .as_ref()
+                            .filter(|(mode, _)| is_regular_file(mode))
+                            .map(|(_, blob)| blob.as_str());
+                        if scratch.is_none() {
+                            scratch = Some(ScratchDir::create()?);
+                        }
+                        let directory = scratch.as_ref().expect("scratch directory");
+                        line_merge_contains(
+                            worktree,
+                            &directory.path,
+                            base_blob,
+                            candidate_blob,
+                            landed_blob,
+                        )?
+                    }
+                }
+            };
+            match verdict {
+                Ok(()) => {
+                    if difference.new.is_some() {
+                        with_other_changes.insert(change.path.clone());
+                    }
+                }
+                Err(reason) => missing.push((display_path(&change.path), reason)),
+            }
+        }
+        if !missing.is_empty() {
+            return Ok(Err(ContainmentRefusal::Paths {
+                merge_base: merge_base.clone(),
+                changed: changes.len(),
+                missing,
+            }));
+        }
+    }
+    Ok(Ok(ContentContainment {
+        merge_bases,
+        paths_checked: checked.len(),
+        paths_with_other_changes: with_other_changes
+            .iter()
+            .map(|path| display_path(path))
+            .collect(),
+    }))
+}
+
+/// A Git path for messages and evidence. Non-UTF-8 bytes are shown as
+/// U+FFFD; comparison always uses the exact bytes.
+fn display_path(path: &[u8]) -> String {
+    String::from_utf8_lossy(path).into_owned()
+}
+
+fn is_regular_file(mode: &str) -> bool {
+    matches!(mode, "100644" | "100755")
+}
+
+/// Whether the landed version of a regular file already holds the
+/// candidate's change: the three-way line merge of the candidate's version
+/// into it is clean and leaves it byte-for-byte unchanged.
+fn line_merge_contains(
+    worktree: &Path,
+    scratch: &Path,
+    base_blob: Option<&str>,
+    candidate_blob: &str,
+    landed_blob: &str,
+) -> Result<std::result::Result<(), &'static str>> {
+    let Some(landed) = blob_bytes(worktree, landed_blob)? else {
+        return Ok(Err("too large to compare line by line"));
+    };
+    let Some(candidate) = blob_bytes(worktree, candidate_blob)? else {
+        return Ok(Err("too large to compare line by line"));
+    };
+    let base = match base_blob {
+        Some(blob) => match blob_bytes(worktree, blob)? {
+            Some(bytes) => bytes,
+            None => return Ok(Err("too large to compare line by line")),
+        },
+        None => Vec::new(),
+    };
+    let landed_path = scratch.join("landed");
+    let base_path = scratch.join("base");
+    let candidate_path = scratch.join("candidate");
+    std::fs::write(&landed_path, &landed).context("write landed version for comparison")?;
+    std::fs::write(&base_path, &base).context("write merge base version for comparison")?;
+    std::fs::write(&candidate_path, &candidate)
+        .context("write candidate version for comparison")?;
+    // `merge-file` exits with the number of conflicts, or a negative status
+    // for an error such as a binary input. Only a clean merge can show
+    // containment, so every other status is a refusal.
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["merge-file", "-p", "-q"])
+        .arg(&landed_path)
+        .arg(&base_path)
+        .arg(&candidate_path)
+        .stdin(Stdio::null())
+        .output()
+        .context("run git merge-file")?;
+    Ok(match output.status.code() {
+        Some(0) if output.stdout == landed => Ok(()),
+        Some(0) => Err("lacks the candidate's change"),
+        Some(1..=127) => Err("conflicts with the candidate's change"),
+        _ => Err("different, and could not be compared line by line"),
+    })
+}
+
+/// A private directory for the three files a line merge compares, removed
+/// when dropped.
+struct ScratchDir {
+    path: PathBuf,
+}
+
+impl ScratchDir {
+    fn create() -> Result<Self> {
+        let path = std::env::temp_dir().join(format!(
+            "foremerge-containment-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        // The files compared here are repository source, so the directory is
+        // private to the owner on a shared machine.
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder
+            .create(&path)
+            .with_context(|| format!("create comparison directory {}", path.display()))?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// A blob's bytes, or `None` when it is over the comparison budget.
+fn blob_bytes(worktree: &Path, blob: &str) -> Result<Option<Vec<u8>>> {
+    match git_output_bounded(
+        worktree,
+        &["cat-file", "blob", blob],
+        MAX_COMPARED_BLOB_BYTES,
+    )? {
+        Bounded::Complete(bytes) => Ok(Some(bytes)),
+        Bounded::Exceeded => Ok(None),
+    }
+}
+
+/// Every merge base of two commits; empty when they share no history.
+fn merge_bases(worktree: &Path, first: &str, second: &str) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["merge-base", "--all", first, second])
+        .output()
+        .context("run git merge-base --all")?;
+    match output.status.code() {
+        Some(0) => Ok(String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .map(str::to_string)
+            .collect()),
+        Some(1) if output.stdout.is_empty() => Ok(Vec::new()),
+        _ => bail!(
+            "git merge-base --all failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+    }
+}
+
+/// The paths that differ between two commits, each with its mode and object id
+/// on both sides. Every option that configuration could otherwise change is
+/// pinned: `diff.renames` (`--no-renames`), `diff.relative` and the current
+/// directory (`--no-relative`, so paths are always from the repository root and
+/// never filtered to a subdirectory), `diff.ignoreSubmodules`
+/// (`--ignore-submodules=none`), `core.abbrev` (`--no-abbrev`), and external
+/// diff and text conversion drivers. `-z` keeps every byte of a path,
+/// newlines included.
+fn raw_diff(worktree: &Path, from: &str, to: &str) -> Result<Vec<RawChange>> {
+    let bytes = match git_output_bounded(
+        worktree,
+        &[
+            "diff",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--no-abbrev",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-relative",
+            "--ignore-submodules=none",
+            from,
+            to,
+            "--",
+        ],
+        MAX_RAW_DIFF_BYTES,
+    )? {
+        Bounded::Complete(bytes) => bytes,
+        Bounded::Exceeded => bail!(
+            "RESOURCE_LIMIT: the path list between {from} and {to} exceeds {MAX_RAW_DIFF_BYTES} bytes"
+        ),
+    };
+    let mut fields = bytes.split(|byte| *byte == 0);
+    let mut changes = Vec::new();
+    while let Some(header) = fields.next() {
+        if header.is_empty() {
+            continue;
+        }
+        let header = String::from_utf8_lossy(header);
+        let path = fields
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("git diff --raw entry without a path: {header}"))?;
+        let path = path.to_vec();
+        let parts: Vec<&str> = header.trim_start_matches(':').split(' ').collect();
+        let [old_mode, new_mode, old_id, new_id, _status] = parts.as_slice() else {
+            bail!("unexpected git diff --raw entry: {header}");
+        };
+        let side = |mode: &str, object: &str| {
+            (mode != ZERO_MODE).then(|| (mode.to_string(), object.to_string()))
+        };
+        changes.push(RawChange {
+            path,
+            old: side(old_mode, old_id),
+            new: side(new_mode, new_id),
+        });
+    }
+    Ok(changes)
+}
+
+enum Bounded {
+    Complete(Vec<u8>),
+    Exceeded,
+}
+
+/// A Git command's stdout, stopping at `max_bytes`. A failure carries Git's
+/// stderr.
+fn git_output_bounded(cwd: &Path, args: &[&str], max_bytes: usize) -> Result<Bounded> {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("run git {}", args.join(" ")))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("capture git stdout"))?;
+    let mut captured = Vec::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = stdout
+            .read(&mut buffer)
+            .with_context(|| format!("read git {} output", args.join(" ")))?;
+        if read == 0 {
+            break;
+        }
+        if captured.len() + read > max_bytes {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(Bounded::Exceeded);
+        }
+        captured.extend_from_slice(&buffer[..read]);
+    }
+    let output = child
+        .wait_with_output()
+        .with_context(|| format!("wait for git {}", args.join(" ")))?;
+    if !output.status.success() {
+        bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(Bounded::Complete(captured))
+}
+
 pub fn common_dir_is_shared(first: impl AsRef<Path>, second: impl AsRef<Path>) -> Result<bool> {
     Ok(discover(first)?.common_dir == discover(second)?.common_dir)
 }
@@ -808,6 +1292,349 @@ mod symbol_search_tests {
         assert!(
             tracked_content_contains(temp.path(), "Anything"),
             "a failed search must report found, so it cannot manufacture a warning"
+        );
+    }
+}
+
+#[cfg(test)]
+mod containment_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn git(cwd: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    /// A repository on `trunk` with one commit holding `files`, ready for a
+    /// candidate branch and a landing to be built on it.
+    fn containment_repo(files: &[(&str, &[u8])]) -> TempDir {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        git(root, &["init", "-q"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        git(root, &["config", "user.name", "Test"]);
+        git(root, &["config", "commit.gpgsign", "false"]);
+        git(root, &["checkout", "-q", "-b", "trunk"]);
+        for (path, content) in files {
+            fs::write(root.join(path), content).unwrap();
+        }
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-qm", "base"]);
+        temp
+    }
+
+    /// Write `files` (a `None` content deletes the path), commit everything on
+    /// the current branch, and return the new commit.
+    fn commit_files(root: &Path, files: &[(&str, Option<&[u8]>)]) -> String {
+        for (path, content) in files {
+            match content {
+                Some(content) => fs::write(root.join(path), content).unwrap(),
+                None => fs::remove_file(root.join(path)).unwrap(),
+            }
+        }
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-qm", "change", "--allow-empty"]);
+        git_output(root, &["rev-parse", "HEAD"]).unwrap()
+    }
+
+    fn refused_paths(
+        result: std::result::Result<ContentContainment, ContainmentRefusal>,
+    ) -> Vec<(String, &'static str)> {
+        match result {
+            Err(ContainmentRefusal::Paths { missing, .. }) => missing,
+            other => panic!("expected a refusal naming paths, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_repository_merge_driver_cannot_make_a_missing_change_look_present() {
+        // A driver that always keeps "our" side would make any merge-based
+        // check report the landed file as already holding the candidate's
+        // change. The line merge used here reads no attributes.
+        let temp = containment_repo(&[
+            ("pinned.txt", b"one\n"),
+            (".gitattributes", b"pinned.txt merge=keep-ours\n"),
+        ]);
+        let root = temp.path();
+        git(root, &["config", "merge.keep-ours.driver", "true"]);
+        git(root, &["checkout", "-q", "-b", "candidate"]);
+        let candidate = commit_files(root, &[("pinned.txt", Some(b"two\n"))]);
+        git(root, &["checkout", "-q", "trunk"]);
+        let landed = commit_files(root, &[("other.txt", Some(b"other\n"))]);
+        let missing = refused_paths(content_containment(root, &candidate, &landed).unwrap());
+        assert_eq!(
+            missing,
+            vec![("pinned.txt".to_string(), "lacks the candidate's change")]
+        );
+    }
+
+    #[test]
+    fn a_squash_combined_with_other_work_holds_the_candidate() {
+        let temp = containment_repo(&[("shared.txt", b"a\nb\nc\nd\ne\nf\ng\nh\n")]);
+        let root = temp.path();
+        git(root, &["checkout", "-q", "-b", "candidate"]);
+        let candidate = commit_files(root, &[("shared.txt", Some(b"A\nb\nc\nd\ne\nf\ng\nh\n"))]);
+        git(root, &["checkout", "-q", "trunk"]);
+        let landed = commit_files(
+            root,
+            &[
+                ("shared.txt", Some(b"A\nb\nc\nd\ne\nf\ng\nH\n")),
+                ("extra.txt", Some(b"another candidate\n")),
+            ],
+        );
+        let contained = content_containment(root, &candidate, &landed)
+            .unwrap()
+            .unwrap();
+        assert_eq!(contained.paths_checked, 1);
+        assert_eq!(
+            contained.paths_with_other_changes,
+            vec!["shared.txt".to_string()]
+        );
+    }
+
+    #[test]
+    fn deletions_renames_and_modes_must_land_exactly() {
+        let temp = containment_repo(&[("old.txt", b"moved\n"), ("tool.sh", b"echo\n")]);
+        let root = temp.path();
+        // Modes are set in the index only, so the worktree's must not count.
+        git(root, &["config", "core.fileMode", "false"]);
+        git(root, &["checkout", "-q", "-b", "candidate"]);
+        fs::rename(root.join("old.txt"), root.join("new.txt")).unwrap();
+        git(root, &["add", "-A"]);
+        git(root, &["update-index", "--chmod=+x", "tool.sh"]);
+        git(root, &["commit", "-qm", "rename and make executable"]);
+        let candidate = git_output(root, &["rev-parse", "HEAD"]).unwrap();
+
+        // The landing copied the file instead of moving it and kept the mode.
+        git(root, &["checkout", "-q", "trunk"]);
+        let partial = commit_files(root, &[("new.txt", Some(b"moved\n"))]);
+        let mut missing = refused_paths(content_containment(root, &candidate, &partial).unwrap());
+        missing.sort();
+        assert_eq!(
+            missing,
+            vec![
+                (
+                    "old.txt".to_string(),
+                    "still present; the candidate deleted it"
+                ),
+                ("tool.sh".to_string(), "different file mode"),
+            ]
+        );
+
+        // The full landing, rewritten as a squash, holds all three.
+        commit_files(root, &[("old.txt", None)]);
+        git(root, &["update-index", "--chmod=+x", "tool.sh"]);
+        git(root, &["commit", "-qm", "finish the landing"]);
+        let complete = git_output(root, &["rev-parse", "HEAD"]).unwrap();
+        let contained = content_containment(root, &candidate, &complete)
+            .unwrap()
+            .unwrap();
+        assert_eq!(contained.paths_checked, 3);
+        assert!(contained.paths_with_other_changes.is_empty());
+    }
+
+    #[test]
+    fn a_binary_file_counts_only_when_it_matches_exactly() {
+        let temp = containment_repo(&[("image.bin", b"\0base\0")]);
+        let root = temp.path();
+        git(root, &["checkout", "-q", "-b", "candidate"]);
+        let candidate = commit_files(root, &[("image.bin", Some(b"\0candidate\0"))]);
+        git(root, &["checkout", "-q", "trunk"]);
+        let different = commit_files(root, &[("image.bin", Some(b"\0candidate\0plus\0"))]);
+        let missing = refused_paths(content_containment(root, &candidate, &different).unwrap());
+        assert_eq!(
+            missing,
+            vec![(
+                "image.bin".to_string(),
+                "different, and could not be compared line by line"
+            )]
+        );
+        let exact = commit_files(root, &[("image.bin", Some(b"\0candidate\0"))]);
+        assert!(
+            content_containment(root, &candidate, &exact)
+                .unwrap()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_landing_in_the_candidates_own_history_or_with_no_shared_history_is_refused() {
+        let temp = containment_repo(&[("file.txt", b"one\n")]);
+        let root = temp.path();
+        let base = git_output(root, &["rev-parse", "HEAD"]).unwrap();
+        git(root, &["checkout", "-q", "-b", "candidate"]);
+        let candidate = commit_files(root, &[("file.txt", Some(b"two\n"))]);
+        assert_eq!(
+            content_containment(root, &candidate, &base).unwrap(),
+            Err(ContainmentRefusal::Predates)
+        );
+        git(root, &["checkout", "-q", "--orphan", "unrelated"]);
+        let unrelated = commit_files(root, &[("file.txt", Some(b"two\n"))]);
+        assert_eq!(
+            content_containment(root, &candidate, &unrelated).unwrap(),
+            Err(ContainmentRefusal::NoMergeBase { shallow: false })
+        );
+    }
+    fn git_stdin(cwd: &Path, args: &[&str], input: &[u8]) -> String {
+        use std::io::Write;
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    /// A tree holding exactly `entries` (mode, object id, path bytes), built
+    /// through the index so that no filesystem limit on names applies.
+    fn tree_of(root: &Path, entries: &[(&str, String, Vec<u8>)]) -> String {
+        git(root, &["read-tree", "--empty"]);
+        let mut input = Vec::new();
+        for (mode, object, path) in entries {
+            input.extend_from_slice(format!("{mode} {object}\t").as_bytes());
+            input.extend_from_slice(path);
+            input.push(0);
+        }
+        git_stdin(root, &["update-index", "-z", "--index-info"], &input);
+        let tree = git_output(root, &["write-tree"]).unwrap();
+        // `--index-info` can skip a path it refuses and still succeed, so a
+        // dropped entry would silently change what the test compares.
+        let listed = git_output(root, &["ls-tree", "-r", "-z", "--name-only", &tree]).unwrap();
+        assert_eq!(
+            listed.split('\0').filter(|name| !name.is_empty()).count(),
+            entries.len(),
+            "the tree must hold every entry: {listed:?}"
+        );
+        tree
+    }
+
+    #[test]
+    fn hostile_paths_and_diff_configuration_cannot_change_the_verdict() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        git(root, &["init", "-q"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        git(root, &["config", "user.name", "Test"]);
+        // Git for Windows refuses control characters in paths unless this is
+        // off. Such a path can still arrive in history made elsewhere, and the
+        // check must handle it there too.
+        git(root, &["config", "core.protectNTFS", "false"]);
+        let blob = |content: &[u8]| git_stdin(root, &["hash-object", "-w", "--stdin"], content);
+        let base_entries = vec![
+            ("100644", blob(b"echo\n"), b"tool.sh".to_vec()),
+            ("100644", blob(b"\0old\xff"), b"image.bin".to_vec()),
+            ("100644", blob(b"plain\n"), b"plain.txt".to_vec()),
+        ];
+        let base_tree = tree_of(root, &base_entries);
+        let base = git_output(root, &["commit-tree", &base_tree, "-m", "base"]).unwrap();
+
+        let mut candidate_entries = vec![
+            // An executable-bit change with the same content.
+            ("100755", base_entries[0].1.clone(), b"tool.sh".to_vec()),
+            ("100644", blob(b"\0new\xff"), b"image.bin".to_vec()),
+            base_entries[2].clone(),
+            ("100644", blob(b"odd path\n"), b"odd\nname".to_vec()),
+            ("120000", blob(b"plain.txt"), b"link".to_vec()),
+            ("160000", base.clone(), b"submodule".to_vec()),
+        ];
+        // Two invalid UTF-8 names that read the same once made lossy, so a
+        // text key would merge them.
+        #[cfg(unix)]
+        {
+            candidate_entries.push(("100644", blob(b"first\n"), b"invalid\xfe".to_vec()));
+            candidate_entries.push(("100644", blob(b"second\n"), b"invalid\xff".to_vec()));
+        }
+        let candidate_tree = tree_of(root, &candidate_entries);
+        let candidate = git_output(
+            root,
+            &[
+                "commit-tree",
+                &candidate_tree,
+                "-p",
+                &base,
+                "-m",
+                "candidate",
+            ],
+        )
+        .unwrap();
+        let rewritten = git_output(
+            root,
+            &[
+                "commit-tree",
+                &candidate_tree,
+                "-p",
+                &base,
+                "-m",
+                "rewritten",
+            ],
+        )
+        .unwrap();
+        assert_ne!(candidate, rewritten);
+
+        // Configuration that would hide renames, submodules or paths outside
+        // the current directory, run from a subdirectory.
+        git(root, &["config", "diff.renames", "true"]);
+        git(root, &["config", "diff.relative", "true"]);
+        git(root, &["config", "diff.ignoreSubmodules", "all"]);
+        git(root, &["config", "core.abbrev", "4"]);
+        fs::create_dir(root.join("nested")).unwrap();
+        let nested = root.join("nested");
+
+        let contained = content_containment(&nested, &candidate, &rewritten)
+            .unwrap()
+            .unwrap();
+        assert_eq!(contained.merge_bases, vec![base.clone()]);
+        assert_eq!(contained.paths_checked, candidate_entries.len() - 1);
+        assert!(contained.paths_with_other_changes.is_empty());
+
+        // Each changed path, dropped on its own, is named as missing.
+        for (index, (_, _, path)) in candidate_entries.iter().enumerate() {
+            if path.as_slice() == b"plain.txt" {
+                continue;
+            }
+            let mut entries = candidate_entries.clone();
+            entries.remove(index);
+            let tree = tree_of(root, &entries);
+            let variant =
+                git_output(root, &["commit-tree", &tree, "-p", &base, "-m", "variant"]).unwrap();
+            let missing =
+                refused_paths(content_containment(&nested, &candidate, &variant).unwrap());
+            assert_eq!(
+                missing,
+                vec![(String::from_utf8_lossy(path).into_owned(), "missing")],
+                "dropping {path:?}"
+            );
+        }
+
+        // The executable bit and the submodule commit must match too.
+        let mut entries = candidate_entries.clone();
+        entries[0].0 = "100644";
+        entries[5].1 = candidate.clone();
+        let tree = tree_of(root, &entries);
+        let variant =
+            git_output(root, &["commit-tree", &tree, "-p", &base, "-m", "variant"]).unwrap();
+        let mut missing =
+            refused_paths(content_containment(&nested, &candidate, &variant).unwrap());
+        missing.sort();
+        assert_eq!(
+            missing,
+            vec![
+                ("submodule".to_string(), "different, and not a regular file"),
+                ("tool.sh".to_string(), "different file mode"),
+            ]
         );
     }
 }

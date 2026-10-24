@@ -10,7 +10,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -2028,50 +2028,7 @@ impl Foremerge {
             }
             let mut resolved_dependencies = Vec::new();
             for dependency in &changeset.dependencies {
-                let dependency_record: Option<(String, Option<String>, Option<String>)> = conn
-                    .query_row(
-                        "SELECT i.status, c.id, c.accepted_commit FROM intents i
-                         LEFT JOIN changesets c ON c.id = (
-                           SELECT id FROM changesets WHERE intent_id = i.id
-                           AND status IN ('ACCEPTED', 'COMMITTED') ORDER BY created_at DESC LIMIT 1
-                         ) WHERE i.id = ?1",
-                        [dependency],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                    )
-                    .optional()?;
-                let Some((state, dependency_changeset_id, accepted_commit)) = dependency_record
-                else {
-                    bail!("UNSATISFIED_DEPENDENCY: intent {dependency} does not exist");
-                };
-                if !matches!(state.as_str(), "ACCEPTED" | "COMMITTED") {
-                    bail!(
-                        "UNSATISFIED_DEPENDENCY: intent {dependency} is not accepted or committed"
-                    );
-                }
-                let dependency_changeset_id = dependency_changeset_id.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "UNSATISFIED_DEPENDENCY: intent {dependency} has no accepted ChangeSet"
-                    )
-                })?;
-                let accepted_commit = accepted_commit.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "UNSATISFIED_DEPENDENCY: intent {dependency} has no pinned accepted commit"
-                    )
-                })?;
-                let dependency_ref_name =
-                    format!("refs/foremerge/accepted/{dependency_changeset_id}");
-                let dependency_ref =
-                    git::verify_ref(&worktree, &dependency_ref_name).map_err(|_| {
-                        anyhow::anyhow!(
-                            "UNSATISFIED_DEPENDENCY: intent {dependency} has no accepted Git ref"
-                        )
-                    })?;
-                if dependency_ref != accepted_commit {
-                    bail!(
-                        "UNSATISFIED_DEPENDENCY: accepted ref for {dependency} no longer matches its pinned commit"
-                    );
-                }
-                resolved_dependencies.push((dependency.clone(), accepted_commit));
+                resolved_dependencies.push(dependency_commits(&conn, dependency, &worktree)?);
             }
             dependency_refs = resolved_dependencies;
         }
@@ -2092,12 +2049,8 @@ impl Foremerge {
                 "STALE_CHANGESET: accepted git_ref must resolve to the currently validated worktree HEAD"
             );
         }
-        for (dependency, accepted_commit) in &dependency_refs {
-            if !git::is_ancestor(&worktree, accepted_commit, &commit)? {
-                bail!(
-                    "UNSATISFIED_DEPENDENCY: accepted ref for {dependency} is not in the candidate ancestry"
-                );
-            }
+        for dependency in &dependency_refs {
+            require_dependency_ancestry(&worktree, dependency, &commit)?;
         }
 
         let mut conn = self.store.lock()?;
@@ -2143,52 +2096,17 @@ impl Foremerge {
                 "INVALID_INPUT: overriding unresolved HIGH conflicts requires an explicit operator override with a recorded reason"
             );
         }
+        let mut satisfied_dependencies = Vec::new();
         for dependency in &fresh.dependencies {
-            let dependency_record: Option<(String, Option<String>, Option<String>)> = tx
-                .query_row(
-                    "SELECT i.status, c.id, c.accepted_commit FROM intents i
-                     LEFT JOIN changesets c ON c.id = (
-                       SELECT id FROM changesets WHERE intent_id = i.id
-                       AND status IN ('ACCEPTED', 'COMMITTED')
-                       ORDER BY created_at DESC, id DESC LIMIT 1
-                     ) WHERE i.id = ?1",
-                    [dependency],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .optional()?;
-            let Some((state, dependency_changeset_id, accepted_commit)) = dependency_record else {
-                bail!("UNSATISFIED_DEPENDENCY: intent {dependency} does not exist");
-            };
-            if !matches!(state.as_str(), "ACCEPTED" | "COMMITTED") {
-                bail!("UNSATISFIED_DEPENDENCY: intent {dependency} is not accepted or committed");
-            }
-            let dependency_changeset_id = dependency_changeset_id.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "UNSATISFIED_DEPENDENCY: intent {dependency} has no accepted ChangeSet"
-                )
-            })?;
-            let accepted_commit = accepted_commit.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "UNSATISFIED_DEPENDENCY: intent {dependency} has no pinned accepted commit"
-                )
-            })?;
-            let dependency_ref_name = format!("refs/foremerge/accepted/{dependency_changeset_id}");
-            let dependency_ref =
-                git::verify_ref(&worktree, &dependency_ref_name).map_err(|_| {
-                    anyhow::anyhow!(
-                        "UNSATISFIED_DEPENDENCY: intent {dependency} has no accepted Git ref"
-                    )
-                })?;
-            if dependency_ref != accepted_commit {
-                bail!(
-                    "UNSATISFIED_DEPENDENCY: accepted ref for {dependency} no longer matches its pinned commit"
-                );
-            }
-            if !git::is_ancestor(&worktree, &accepted_commit, &commit)? {
-                bail!(
-                    "UNSATISFIED_DEPENDENCY: accepted ref for {dependency} is not in the candidate ancestry"
-                );
-            }
+            let dependency = dependency_commits(&tx, dependency, &worktree)?;
+            let (satisfied_by, found_commit) =
+                require_dependency_ancestry(&worktree, &dependency, &commit)?;
+            satisfied_dependencies.push(json!({
+                "intent_id": dependency.intent_id,
+                "changeset_id": dependency.changeset_id,
+                "satisfied_by": satisfied_by,
+                "commit": found_commit,
+            }));
         }
         let now = Utc::now().to_rfc3339();
         if high > 0 && request.allow_high_conflicts {
@@ -2274,7 +2192,8 @@ impl Foremerge {
                 "accepted_commit": commit,
                 "accepted_ref": accepted_ref,
                 "verification": verification,
-                "acceptance_reason": accepted_reason
+                "acceptance_reason": accepted_reason,
+                "dependencies": satisfied_dependencies,
             }),
         )?;
         tx.commit()?;
@@ -2313,11 +2232,31 @@ impl Foremerge {
         if accepted_ref != accepted_commit {
             bail!("CHECK_FAILED: accepted ref no longer matches the pinned ChangeSet commit");
         }
-        if !git::is_ancestor(&worktree, accepted_commit, &commit)? {
-            bail!(
-                "TARGET_DIVERGED: recorded integration commit does not contain the accepted candidate"
-            );
-        }
+        // Ancestry is the cheap, exact answer and is always tried first. A
+        // squash or rebase merge writes new commits, so when it fails the
+        // landing may still hold the accepted work; accept it only when
+        // content proves every change the candidate made is there.
+        let integration = if git::is_ancestor(&worktree, accepted_commit, &commit)? {
+            IntegrationEvidence {
+                method: "ancestor".to_string(),
+                merge_bases: Vec::new(),
+                paths_checked: None,
+                paths_with_other_changes: Vec::new(),
+            }
+        } else {
+            match git::content_containment(&worktree, accepted_commit, &commit)? {
+                Ok(contained) => IntegrationEvidence {
+                    method: "content".to_string(),
+                    merge_bases: contained.merge_bases,
+                    paths_checked: Some(contained.paths_checked),
+                    paths_with_other_changes: contained.paths_with_other_changes,
+                },
+                Err(refusal) => bail!(
+                    "TARGET_DIVERGED: recorded integration commit {commit} does not contain the accepted candidate {accepted_commit}. It is not a descendant of it, and it does not hold the candidate's changes by content: {refusal}. {remedy}",
+                    remedy = refusal.remedy()
+                ),
+            }
+        };
         let mut conn = self.store.lock()?;
         let tx = Store::immediate_tx(&mut conn)?;
         let fresh = changeset_by_id(&tx, changeset_id)?;
@@ -2333,16 +2272,29 @@ impl Foremerge {
         if final_accepted_ref != accepted_commit {
             bail!("CHECK_FAILED: accepted ref no longer matches the pinned ChangeSet commit");
         }
+        // The evidence is kept on the ChangeSet itself, so every later read
+        // shows how containment was established. Provenance is plain JSON that
+        // nothing hashes or fingerprints; the event below is the immutable copy.
+        let mut provenance = fresh.provenance.clone();
+        provenance["integration"] = serde_json::to_value(&integration)?;
         let now = Utc::now().to_rfc3339();
         let changed = tx.execute(
             "UPDATE changesets SET status = 'COMMITTED', git_ref = ?2,
-             integration_commit = ?2, updated_at = ?3 WHERE id = ?1 AND status = 'ACCEPTED'",
-            params![changeset_id, commit, now],
+             integration_commit = ?2, provenance_json = ?4, updated_at = ?3
+             WHERE id = ?1 AND status = 'ACCEPTED'",
+            params![changeset_id, commit, now, to_json(&provenance)?],
         )?;
         if changed != 1 {
             bail!("STATE_RACE: ChangeSet changed while recording integration");
         }
         refresh_changeset_node(&tx, changeset_id)?;
+        Store::upsert_node(
+            &tx,
+            "Provenance",
+            &format!("{changeset_id}:provenance"),
+            "ChangeSet provenance",
+            &provenance,
+        )?;
         transition_intent(
             &tx,
             &changeset.intent_id,
@@ -2365,7 +2317,8 @@ impl Foremerge {
             &json!({
                 "git_ref": commit,
                 "accepted_commit": accepted_commit,
-                "integration_commit": commit
+                "integration_commit": commit,
+                "integration": integration,
             }),
         )?;
         tx.commit()?;
@@ -3117,6 +3070,119 @@ fn looks_like_intent_id(value: &str) -> bool {
     value.len() == 36
         && value.starts_with("int_")
         && value.as_bytes()[4..].iter().all(u8::is_ascii_hexdigit)
+}
+
+/// A declared dependency resolved for the acceptance gate.
+struct DependencyCommits {
+    intent_id: String,
+    /// The dependency's latest ACCEPTED or COMMITTED ChangeSet.
+    changeset_id: String,
+    /// Its immutable accepted pin, still matched by its accepted ref.
+    accepted_commit: String,
+    /// Its recorded landing, present only when both the intent and the
+    /// ChangeSet are COMMITTED.
+    integration_commit: Option<String>,
+}
+
+/// The intent status, then the latest ACCEPTED or COMMITTED ChangeSet's id,
+/// status, accepted commit and integration commit.
+type DependencyRow = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+/// Resolve a dependency's accepted pin and, once it is COMMITTED, its recorded
+/// integration commit. Used both before and inside the acceptance
+/// transaction, so the two checks cannot drift apart.
+fn dependency_commits(
+    conn: &Connection,
+    dependency: &str,
+    worktree: &Path,
+) -> Result<DependencyCommits> {
+    let record: Option<DependencyRow> = conn
+        .query_row(
+            "SELECT i.status, c.id, c.status, c.accepted_commit, c.integration_commit
+             FROM intents i
+             LEFT JOIN changesets c ON c.id = (
+               SELECT id FROM changesets WHERE intent_id = i.id
+               AND status IN ('ACCEPTED', 'COMMITTED')
+               ORDER BY created_at DESC, id DESC LIMIT 1
+             ) WHERE i.id = ?1",
+            [dependency],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((state, changeset_id, changeset_status, accepted_commit, integration_commit)) = record
+    else {
+        bail!("UNSATISFIED_DEPENDENCY: intent {dependency} does not exist");
+    };
+    if !matches!(state.as_str(), "ACCEPTED" | "COMMITTED") {
+        bail!("UNSATISFIED_DEPENDENCY: intent {dependency} is not accepted or committed");
+    }
+    let changeset_id = changeset_id.ok_or_else(|| {
+        anyhow::anyhow!("UNSATISFIED_DEPENDENCY: intent {dependency} has no accepted ChangeSet")
+    })?;
+    let accepted_commit = accepted_commit.ok_or_else(|| {
+        anyhow::anyhow!("UNSATISFIED_DEPENDENCY: intent {dependency} has no pinned accepted commit")
+    })?;
+    let accepted_ref = git::verify_ref(
+        worktree,
+        &format!("refs/foremerge/accepted/{changeset_id}"),
+    )
+    .map_err(|_| {
+        anyhow::anyhow!("UNSATISFIED_DEPENDENCY: intent {dependency} has no accepted Git ref")
+    })?;
+    if accepted_ref != accepted_commit {
+        bail!(
+            "UNSATISFIED_DEPENDENCY: accepted ref for {dependency} no longer matches its pinned commit"
+        );
+    }
+    let integration_commit = integration_commit
+        .filter(|_| state == "COMMITTED" && changeset_status.as_deref() == Some("COMMITTED"));
+    Ok(DependencyCommits {
+        intent_id: dependency.to_string(),
+        changeset_id,
+        accepted_commit,
+        integration_commit,
+    })
+}
+
+/// Where a dependency's work is found in a candidate's history: its accepted
+/// commit, or, once it is COMMITTED, the integration commit that
+/// `record_commit` verified holds it. The second covers a dependency that
+/// landed through a squash or rebase merge, whose accepted commit is on no
+/// branch that later work starts from. Returns which one was found and its id.
+fn require_dependency_ancestry(
+    worktree: &Path,
+    dependency: &DependencyCommits,
+    commit: &str,
+) -> Result<(&'static str, String)> {
+    let intent = &dependency.intent_id;
+    if git::is_ancestor(worktree, &dependency.accepted_commit, commit)? {
+        return Ok(("accepted_commit", dependency.accepted_commit.clone()));
+    }
+    match dependency.integration_commit.as_deref() {
+        Some(integration) if git::is_ancestor(worktree, integration, commit)? => {
+            Ok(("integration_commit", integration.to_string()))
+        }
+        Some(_) => bail!(
+            "UNSATISFIED_DEPENDENCY: neither the accepted commit nor the recorded integration commit of {intent} is in the candidate ancestry"
+        ),
+        None => bail!(
+            "UNSATISFIED_DEPENDENCY: accepted ref for {intent} is not in the candidate ancestry; if that work landed through a squash or rebase merge, record its landing commit with record_commit and build on that commit"
+        ),
+    }
 }
 
 fn open_conflicts_for_intent(conn: &Connection, intent_id: &str) -> Result<OpenConflicts> {
