@@ -373,13 +373,21 @@ enum WorkCommand {
         #[arg(long)]
         once: bool,
     },
-    /// Discard speculative work while preserving its audit trail.
+    /// Close work that will not continue, preserving its audit trail:
+    /// abandoned work, or with --landed, work that reached Git without going
+    /// through acceptance.
     Discard {
         intent_id: String,
         #[arg(long = "agent")]
         agent_id: String,
         #[arg(long)]
         reason: String,
+        /// The commit, branch or tag the work landed in. The intent still ends
+        /// DISCARDED, never ACCEPTED: this records where the work went, not
+        /// that it was verified. Refused unless the ref resolves and contains
+        /// the intent's published ChangeSet commit, if it has one.
+        #[arg(long, value_name = "REF")]
+        landed: Option<String>,
     },
 }
 
@@ -1302,7 +1310,11 @@ async fn execute_service(
             intent_id,
             agent_id,
             reason,
-        }) => serde_json::to_value(service.discard_work(&agent_id, &intent_id, &reason)?)?,
+            landed,
+        }) => serde_json::to_value(match landed {
+            Some(landed) => service.close_landed_work(&agent_id, &intent_id, &reason, &landed)?,
+            None => service.discard_work(&agent_id, &intent_id, &reason)?,
+        })?,
         Commands::Work(WorkCommand::Watch {
             mut after_seq,
             interval_ms,

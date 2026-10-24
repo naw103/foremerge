@@ -581,6 +581,8 @@ struct DiscardWorkToolRequest {
     agent_id: String,
     intent_id: String,
     reason: String,
+    #[serde(default)]
+    landed_ref: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -750,8 +752,18 @@ async fn call_tool(service: &Foremerge, params: Value) -> Result<Value, (i64, St
             let service = service.clone();
             mcp_blocking(move || {
                 parse::<DiscardWorkToolRequest>(arguments)
-                    .and_then(|request| {
-                        service.discard_work(&request.agent_id, &request.intent_id, &request.reason)
+                    .and_then(|request| match request.landed_ref.as_deref() {
+                        Some(landed_ref) => service.close_landed_work(
+                            &request.agent_id,
+                            &request.intent_id,
+                            &request.reason,
+                            landed_ref,
+                        ),
+                        None => service.discard_work(
+                            &request.agent_id,
+                            &request.intent_id,
+                            &request.reason,
+                        ),
                     })
                     .and_then(to_value)
             })
@@ -1022,11 +1034,12 @@ pub fn tool_catalog() -> Vec<Value> {
         with_destructive_hint(tool(
             "discard_work",
             "Discard work",
-            "Abandon one of your own intents that will not be finished, for example a duplicate or work another agent took over. It sets the intent to DISCARDED, releases all of its active claims, and dismisses its OPEN or COORDINATING conflicts so they stop blocking the other party. The history stays in the event log, but a discarded intent cannot be resumed; publish a new intent instead. Only the owner may discard, and not once the intent is ACCEPTED, COMMITTED or already DISCARDED. Returns the updated intent. To agree that two intents can coexist, use resolve_conflict instead.",
+            "Close one of your own intents that you will not take through accept_changeset. Call it before you stop working, whenever the intent is still open: an intent never closes itself, and an open one is compared against every later intent on the same scopes. Two cases. Work that will not be finished, for example a duplicate or work another agent took over: pass a reason. Work that reached Git without a passing named check, so it cannot be accepted: pass landed_ref as well, naming the commit or branch it landed in. Either way it sets the intent to DISCARDED, releases all of its active claims, and dismisses its OPEN or COORDINATING conflicts so they stop blocking the other party. With landed_ref the commit is checked and recorded, but the intent still ends DISCARDED, not ACCEPTED: nothing here says the work was verified. The history stays in the event log, but a discarded intent cannot be resumed; publish a new intent instead. Only the owner may discard, and not once the intent is ACCEPTED, COMMITTED or already DISCARDED. Returns the updated intent. To agree that two intents can coexist, use resolve_conflict instead.",
             json!({
                 "agent_id": { "type": "string", "minLength": 1, "description": "Your agent id (agt_...). Must own the intent." },
                 "intent_id": { "type": "string", "minLength": 1, "description": "The intent (int_...) to discard." },
-                "reason": { "type": "string", "minLength": 1, "description": "Why the work is being abandoned. Required and recorded in the event log." }
+                "reason": { "type": "string", "minLength": 1, "description": "Why the work is being closed: why it was abandoned, or how it landed. Required and recorded in the event log." },
+                "landed_ref": { "type": "string", "minLength": 1, "description": "Only for work that reached Git: the commit, branch or tag it landed in. Refused with INVALID_INPUT if it does not resolve to a commit, and with TARGET_DIVERGED if the intent published a ChangeSet whose changes it does not hold, by ancestry or by content as record_commit checks." }
             }),
             &["agent_id", "intent_id", "reason"],
             false,

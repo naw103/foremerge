@@ -512,6 +512,8 @@ async fn start_work(
 struct DiscardAction {
     agent_id: String,
     reason: String,
+    #[serde(default)]
+    landed_ref: Option<String>,
 }
 
 async fn discard_work(
@@ -523,7 +525,13 @@ async fn discard_work(
     authorize(&state, &headers)?;
     let service = state.service;
     Ok(success(
-        api_blocking(move || service.discard_work(&request.agent_id, &id, &request.reason)).await?,
+        api_blocking(move || match request.landed_ref.as_deref() {
+            Some(landed_ref) => {
+                service.close_landed_work(&request.agent_id, &id, &request.reason, landed_ref)
+            }
+            None => service.discard_work(&request.agent_id, &id, &request.reason),
+        })
+        .await?,
     ))
 }
 

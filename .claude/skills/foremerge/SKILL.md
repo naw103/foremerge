@@ -59,8 +59,9 @@ Setup refuses to replace differing skill or MCP entries unless the human explici
 2. Query expected scopes for active owners and related work.
 3. Publish an outcome-oriented intent with semantic scopes and dependencies.
 4. Inspect returned findings; use `check_conflicts` for a provisional preflight.
-5. Claim the scopes. Claims are leased advice, never locks.
-6. Start the claimed work before implementation.
+5. Record what you concluded about each `related_work` entry with `record_assessment`, before you write code: a verdict of `conflicts`, `compatible`, `duplicate`, or `depends_on`, and the action you will take (`proceeding`, `rescoping`, `waiting`, or `abandoning`). Work marked `owner_stopped_since` needs none.
+6. Claim the scopes. Claims are leased advice, never locks.
+7. Start the claimed work before implementation.
 
 This applies before creating or changing any file meant to land in the
 repository, not only code: new files included, build and test output excluded.
@@ -82,7 +83,15 @@ Foremerge only sees agents that coordinate. If a file you have not touched
 changes under you and `query_work` shows no owner for it, tell the user before
 you continue, and do not overwrite that change.
 
+Delegated work coordinates too. Before you hand work to a subagent, another
+session or another worktree, give it its own agent and intent: register and
+publish for it, or tell it to, and put the agent and intent ids in its
+instructions. One undeclared participant hides its work from everyone else's
+publish, so two agents can build the same change at once with neither warned.
+
 Prefer semantic scopes such as `symbol:PaymentService`, `api:/payments`, `schema:billing.payments`, or `contract:payments.provider`; file scopes are weaker evidence.
+
+Write a method as `symbol:Class::method`. A dot reads as a namespace separator, so the matching alias of `symbol:Class.method` is `symbol:method`: its claims and work queries never meet `symbol:Class::method`.
 
 A durable `cfl_*` conflict can be linked to `coordinate_with_agent` and resolved with `resolve_conflict`. An `eph_*` preflight is intentionally not stored: publish/claim first to obtain a durable finding, or send an unlinked message.
 
@@ -94,6 +103,9 @@ foremerge --json intent publish --agent AGENT_ID --task add-paypal \
   --summary 'Add PayPal support to PaymentService' \
   --scope symbol:PaymentService=extend \
   --scope contract:payments.provider=extend
+foremerge --json assess record --agent-id AGENT_ID --intent-id INTENT_ID \
+  --related-intent-id RELATED_INTENT_ID --verdict compatible \
+  --rationale 'Why both plans can be true' --action proceeding
 foremerge --json work claim --agent AGENT_ID --intent INTENT_ID \
   --scope symbol:PaymentService
 foremerge --json work start INTENT_ID --agent AGENT_ID
@@ -129,9 +141,18 @@ Do not add or replace named checks unless the user has authorized that repositor
 
 Acceptance creates `refs/foremerge/accepted/<changeset-id>`; it does not merge code. Do not call `record_commit` on the feature-branch HEAD merely because ancestry is reflexive.
 
-## Abandon or inspect work
+## Close, abandon, or inspect work
 
-Use `discard_work` for work that should not land. It preserves history, releases claims, and dismisses linked blockers; it does not delete a worktree or reset Git.
+Close every intent before you stop, unless its work is finished and waiting to merge. An intent never closes itself: one left open keeps reading as work in progress and is compared against every later intent on the same scopes. `record_commit` closes accepted work. Close anything else with `discard_work`:
+
+- Work that should not land: pass a reason.
+- Work that reached Git without passing a named check, so it cannot be accepted (the repository has no check registered, or a human committed it for you): pass `landed_ref` as well (CLI: `--landed REF`), naming the commit or branch it landed in. Foremerge refuses a ref that does not contain your published candidate, and records the one that does. The intent still ends `DISCARDED`: this says where the work went, not that it was verified.
+
+Either way it preserves history, releases claims, and dismisses linked blockers; it does not delete a worktree or reset Git.
+
+Work that is finished but not yet in Git, such as a branch waiting for review, stays open. Publish a ChangeSet for it and name the branch in its summary, so later agents still find it in `related_work`. If your session ends before it is validated, it is marked `owner_stopped_since` and records no conflicts below HIGH. Close it when it lands, with `record_commit` or with `discard_work` and `landed_ref`. Discarding it earlier hides it from every later agent while the code still sits on the branch.
+
+`publish_intent` marks related work whose agent has stopped with `owner_stopped_since`. That work needs no assessment, and findings below HIGH against it are not recorded as conflicts unless its agent returns. If you are continuing it, take it over with `foremerge work adopt` instead of duplicating it.
 
 Use `query_work` for current semantic state, `coordinate_with_agent` for durable proposals, and these CLI commands when needed:
 

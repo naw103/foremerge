@@ -386,6 +386,15 @@ pub struct RelatedWork {
     /// True when at least one overlap is a declared operation pair, so
     /// Foremerge is stating a conflict rather than offering a candidate.
     pub asserted: bool,
+    /// Set when the owning agent has stopped: it has been silent for longer
+    /// than [`AGENT_STALE_AFTER_SECONDS`] and holds no live claim on this
+    /// intent, which is the test `work adopt` applies. The value is that
+    /// agent's last Foremerge call. Findings below HIGH against such an intent
+    /// are not recorded as conflicts, and unless a HIGH one was recorded it
+    /// needs no assessment; it is listed so that an agent continuing the same
+    /// work adopts it instead of duplicating it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_stopped_since: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -684,6 +693,10 @@ pub struct ConflictReport {
     /// values saw the same conflict state.
     #[serde(default)]
     pub as_of_event: i64,
+    /// Intents whose owner has stopped and whose findings below HIGH were
+    /// therefore left out of `conflicts`. Present only on a what-if check.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stopped_work: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

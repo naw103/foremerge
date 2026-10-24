@@ -55,6 +55,18 @@ changes when they are called out here with a migration note.
   `publish_changeset` and `get_intent`, and `status` carry `as_of_event`, the
   ledger's latest event sequence number read in the same transaction as the
   list. Two reads with the same value saw the same conflict state.
+- `foremerge work discard --landed REF` (MCP and HTTP: `landed_ref`) closes an
+  intent whose work reached Git without going through acceptance, for example
+  where no named check is registered or a maintainer commits the agents' work
+  in a batch. Until now the only close for such work was a discard that reads
+  as abandonment, so agents left it open. The ref must resolve to a commit,
+  and when the intent has published a ChangeSet that commit must hold the
+  candidate, by ancestry or by content as `record_commit` checks it, so work
+  that landed through a squash or rebase merge closes too; otherwise the call
+  is refused with `TARGET_DIVERGED`. The event records how it was shown. The intent ends
+  `DISCARDED` and its ChangeSet keeps its status: this records where the work
+  went on the `work.discarded` event and never marks anything `ACCEPTED` or
+  `COMMITTED`.
 
 ### Changed
 
@@ -99,6 +111,31 @@ changes when they are called out here with a migration note.
   package unsupported on this system, or an unfinished install. It previously
   blamed `--omit=optional` every time. It still points at the install script,
   `cargo install` and the releases page.
+- A finding below HIGH against work whose agent has stopped is no longer
+  recorded as a conflict. A session that ended without closing its intent left
+  it open for good, and every later intent on the same files recorded a
+  conflict against it: one repository reached 3,896 open conflicts, 98% of them
+  with no live agent on either side, and a new intent on a busy file opened
+  with about 40. An intent counts as stopped under the test `work adopt`
+  applies: an adoptable state, no live claim, and an agent silent for two
+  hours. HIGH findings are recorded as before, so the acceptance gate is
+  unchanged. Stopped work is still listed in `related_work`, last and marked
+  with `owner_stopped_since`, and needs no assessment. A what-if
+  `check_conflicts` applies the same rule and names what it left out under
+  `stopped_work`. Conflicts already on record are not touched: close the
+  stopped intents to clear them.
+- An agent that returns after falling silent, and an agent that adopts stopped
+  work, now has the findings that were skipped in the meantime recorded on that
+  call. Pairs already on record are left alone, settled or not.
+- The skill and the `discard_work` description now tell an agent to close its
+  intent before it stops.
+- The skill now names the assessment step: record what you concluded about each
+  `related_work` entry with `record_assessment` before writing code, with the
+  verdicts, the actions, and the CLI form. The skill had never mentioned
+  assessments, so an agent coordinating through the CLI guessed at the command.
+- The skill now says to write a method scope as `Class::method`. A dot reads as
+  a namespace separator, so the matching alias of `Class.method` is `method`
+  alone, and its claims and work queries never meet `Class::method`.
 
 ### Fixed
 

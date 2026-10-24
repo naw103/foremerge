@@ -327,6 +327,23 @@ decision, appends `conflict.overridden`, and changes affected high findings to
 `OVERRIDDEN`. Explicitly discarded work changes linked open findings to
 `DISMISSED`, so abandoned speculation cannot block the surviving intent.
 
+### Work whose agent has stopped
+
+A session that ends without closing its intent leaves it open for good. Such
+an intent is treated as stopped when it is in `INTENT`, `CLAIMED`,
+`IN_PROGRESS` or `PROVISIONAL`, holds no live claim, and its agent has made no
+Foremerge call for two hours. That is the test `work adopt` applies.
+
+A finding below `HIGH` against stopped work is not recorded as a conflict.
+The stopped intent is still listed in `related_work`, marked with
+`owner_stopped_since`, and a what-if check names it under `stopped_work`.
+`HIGH` findings are recorded as before, because they gate acceptance and an
+agent that was only quiet must not lose that protection.
+
+Nothing is lost if the agent was only quiet. Its next call, or an adoption,
+records the findings between its open intents and the live work around them
+that were skipped while it was silent.
+
 ## Known limitations
 
 - A declared operation is only as good as the declaration. An agent that
