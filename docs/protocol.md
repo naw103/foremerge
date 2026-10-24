@@ -169,6 +169,20 @@ immediately detected conflicts, and `related_work`: other agents' active
 intents that touch this one, each overlapping scope carrying both declared
 operations and how they interact.
 
+The response also carries `warnings`, advisory notes about the intent
+itself, when there is something to say. Two are always checked:
+
+- No scopes declared. Such an intent can be matched to other work only by
+  summary similarity, which never raises a HIGH finding, so nothing collides
+  with it and its ChangeSet passes the conflict gate with nothing to compare.
+  It is still published, because it may be a planning placeholder.
+- A `symbol:` key such as `CheckoutController.checkout`, whose class the stored
+  form drops (see [Conflict detection](conflict-detection.md#scope-matching)).
+  The warning names the stored form and suggests `CheckoutController::checkout`.
+
+A repository can opt in to a third, for a symbol that appears nowhere in the
+agent's worktree. None of them refuses the publish.
+
 Foremerge states what overlaps. Whether that constitutes a conflict, a
 duplicate or a dependency is a judgement about intent, and the agent doing the
 work records it:
@@ -217,6 +231,9 @@ reason, and lease duration:
 
 The result includes created claims, overlap warnings, and
 `"advisory_only": true`. Overlap never means ownership was acquired exclusively.
+A claimed `symbol:` key whose class the stored form drops adds a
+`scope_warnings` entry, the same text `publish_intent` returns; `warnings`
+holds conflicts, so these live in their own field.
 
 ## Work queries
 
@@ -244,13 +261,32 @@ Dependency and provenance questions can also use the semantic graph snapshot.
 
 ## Conflict preflight
 
-`check_conflicts` accepts either a persisted `intent_id` or a provisional intent
-summary and scopes. A provisional check lets an agent ask “will this collide?”
-before publishing work.
+`check_conflicts` takes one of three inputs:
+
+| Input | What it returns | Ids |
+| --- | --- | --- |
+| `intent_id` alone | the stored OPEN or COORDINATING conflicts on that intent | stable `cfl_` ids |
+| `intent_id` with non-empty `scopes` | a what-if comparison of that intent's summary with the given scopes in place of its own | new `eph_` ids on every call |
+| `intent` text with `scopes` | a what-if comparison of work not yet published | new `eph_` ids on every call |
+
+A what-if check lets an agent ask “will this collide?” before publishing work,
+or before changing an intent's scopes. It stores nothing, so its `eph_` ids are
+refused by `coordinate_with_agent` and `resolve_conflict`.
 
 Reports include the number of intents examined, structured findings, a blocking
-boolean, and the active policy. Every finding includes evidence and a suggested
-coordination action. See [Conflict detection](conflict-detection.md).
+boolean, the active policy, and two markers:
+
+- `ephemeral`: `true` for a what-if comparison, whose ids are valid for that
+  response only, and `false` for the stored read, whose ids are durable.
+- `as_of_event`: the ledger's latest event sequence number, read in the same
+  transaction as the findings. It is the `seq` that `GET /v1/events` and
+  `foremerge work watch` use. Every write that changes a conflict, an intent
+  or a claim appends an event, so two reads with the same value saw the same
+  conflict state, and a larger value is a later state. It is comparable only
+  within one ledger: `foremerge ledger reset` starts a new event chain.
+
+Every finding includes evidence and a suggested coordination action. See
+[Conflict detection](conflict-detection.md).
 
 An id-shaped value (`int_` followed by 32 hexadecimal characters) passed as
 free-form `intent` text is rejected with `INVALID_INPUT` instead of being
@@ -261,7 +297,10 @@ Conflicts are detected when the *later* intent publishes, so the earlier
 publisher's own publish response legitimately reported no conflicts. Re-run
 `check_conflicts` before publishing a ChangeSet and before requesting
 verification; `start_work` and `publish_changeset` responses also include an
-`open_conflicts` snapshot (count and ids) for the acting intent.
+`open_conflicts` snapshot (count, ids and `as_of_event`) for the acting intent.
+On those write responses `as_of_event` already includes the write's own events.
+`get_intent` (CLI `intent show`) and `status` carry `as_of_event` too, read in
+the same transaction as their conflict lists.
 
 ## ChangeSet publication
 
@@ -325,7 +364,8 @@ back to the snapshot content hash for `diff_hash` rather than misrecording
 get a real commit-range diff hash from a shallow clone.
 
 The publish response also carries `open_conflicts` (count and ids of OPEN or
-COORDINATING conflicts touching the intent at that moment), so a publisher
+COORDINATING conflicts touching the intent at that moment, and the
+`as_of_event` they were read at), so a publisher
 learns about conflicts that later publishes created against it.
 
 On acceptance, the exact validated hash is stored as `accepted_commit` and

@@ -170,7 +170,10 @@ At the start of a coding session:
    adopt the earlier work with `foremerge work adopt` rather than starting
    again.
 2. Call `query_work` for the task or scopes you expect to touch.
-3. Call `publish_intent` before editing files.
+3. Call `publish_intent` before editing files. Read any `warnings`: an intent
+   with no scopes collides with nothing, and a key such as
+   `symbol:CheckoutController.checkout` is stored as `symbol:checkout`; write
+   `symbol:CheckoutController::checkout` to keep the class.
 4. Inspect the returned conflicts or call `check_conflicts` for a provisional
    preflight.
 5. Call `claim_work` with semantic scopes.
@@ -287,6 +290,21 @@ Unpublished preflight:
   "scopes": [{"kind": "symbol", "key": "PaymentService", "operation": "replace"}]
 }
 ```
+
+Persisted intent with replacement scopes, a what-if check before rescoping:
+
+```json
+{
+  "intent_id": "int_...",
+  "scopes": [{"kind": "symbol", "key": "PaymentService", "operation": "remove"}]
+}
+```
+
+Only the first form returns stored `cfl_` ids. The other two compare in memory
+and return fresh `eph_` ids on every call, which `coordinate_with_agent` and
+`resolve_conflict` refuse; the report says which with `ephemeral`. Every report
+also carries `as_of_event`, the ledger event sequence it was read at, so two
+reads can be compared.
 
 ### `publish_changeset`
 
