@@ -220,7 +220,15 @@ The result includes created claims, overlap warnings, and
 
 ## Work queries
 
-Work can be filtered by agent, status, exact canonical scope, and result limit.
+Work can be filtered by agent, status, scope, and result limit (default 50, at
+most 500). The scope filter matches on the canonical alias, not the full name:
+an intent matches when one of its declared scopes, or any claim it has ever
+held, reduces to the same alias as the queried scope. Kind and key compare
+case-insensitively, and a symbol key is reduced to `container::member` with
+any namespace or path prefix dropped, so `symbol:Report::render` finds intents
+declaring `App\Billing\Report::render` or `App\Admin\Report::render`. Other
+kinds compare the whole key. See
+[Scope matching](conflict-detection.md#scope-matching).
 Each result joins the intent to its agent, recorded claims, latest ChangeSet ID
 and object, reverse dependent intent IDs, and count of open or coordinating
 conflicts.

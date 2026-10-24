@@ -52,13 +52,14 @@ Claim overlap is a separate deterministic warning.
 ## What Foremerge asserts, and what it only surfaces
 
 A finding is **asserted** when both sides *declared* an operation on the *same
-canonical scope*. That is a fact derived from two declarations, so Foremerge
-states it and may reach HIGH.
+full scope*. That is a fact derived from two declarations, so Foremerge states
+it and may reach HIGH.
 
 Everything else is **surfaced**: reported for the agent to judge and capped
 below HIGH. Two cases qualify:
 
-- the scopes matched loosely rather than exactly; or
+- the scopes matched loosely rather than exactly, including a symbol matched
+  only by its name without its namespace; or
 - either operation was inferred from prose rather than declared.
 
 The reasoning is the same in both: the ambiguity that had to be resolved to
@@ -88,19 +89,38 @@ Anything inferred is marked `inferred: true` and can never assert.
 
 Foremerge scores every declared scope pair:
 
-1. Exact canonical scope, such as `symbol:PaymentService` against the same
-   canonical scope: overlap score `1.0`. **Only this tier can assert.**
-2. Same key across different kinds: overlap score `0.9`.
-3. Scope-key token Jaccard similarity of at least `0.66`: overlap score between
+1. The same full scope, such as `symbol:PaymentService` on both sides:
+   overlap score `1.0`. **Only this tier can assert.**
+2. The same symbol name under a different namespace or path, where only the
+   canonical alias matches: overlap score `0.9`.
+3. Same key across different kinds: overlap score `0.9`.
+4. Scope-key token Jaccard similarity of at least `0.66`: overlap score between
    `0.782` and `0.85`.
 
-Canonical scope comparison is case-insensitive. CamelCase is split before token
-comparison. Symbol keys are reduced to `container::member` with namespace and
-path prefixes discarded, so `App\Services\Report::render` and
-`Report::render` are one scope.
+Every symbol scope has two forms, and both compare case-insensitively with the
+kind included:
 
-The strongest interaction is reported once per scope pair, so an intent
-declaring several related scopes does not produce a wall of findings.
+- The **full scope** keeps the whole key and treats `\` and `/` as `.`, so
+  `App\Services\Report::render`, `app/services/Report::render` and
+  `app.services.Report::render` are one full scope.
+- The **canonical alias** keeps only `container::member`, or `member` when
+  there is no container, and drops every namespace and path prefix. So
+  `App\Services\Report::render`, `Report::render` and
+  `App\Admin\Report::render` all share the alias `report::render`.
+
+The alias is how differently qualified names find each other. A match found
+only through it is tier 2: surfaced as a candidate and capped below HIGH,
+whether the two sides name the same method with and without its namespace or
+two same-named classes in different namespaces. Foremerge cannot tell those
+apart from the names alone, so it asserts neither. Declare the fully qualified
+name on both sides to reach HIGH. Other scope kinds keep their whole key,
+lowercased, in both forms.
+
+Tier 3 compares keys case-insensitively. Tier 4 splits CamelCase before token
+comparison.
+
+The strongest interaction is reported once per pair of full scopes, so an
+intent declaring several related scopes does not produce a wall of findings.
 
 The detector does not inspect changed files, dependency reachability, or call
 graphs. Agents improve precision by declaring the narrowest useful scopes.
@@ -203,7 +223,7 @@ Back PaymentService with an additional PayPal gateway
 scope: symbol:PaymentService  operation: extend
 ```
 
-Both declared an operation on the same canonical scope, so FM-C001 asserts a
+Both declared an operation on the same full scope, so FM-C001 asserts a
 high-severity conflict before either agent needs to modify a file.
 
 Note that neither summary contains the word "replace" or "add". Under the old
@@ -231,7 +251,7 @@ Each finding contains:
   "id": "cfl_...",
   "kind": "destructive_vs_additive",
   "severity": "HIGH",
-  "score": 0.989,
+  "score": 0.97,
   "source_intent_id": "int_...",
   "target_intent_id": "int_...",
   "scope": {"kind": "symbol", "key": "PaymentService"},
@@ -242,7 +262,7 @@ Each finding contains:
     "asserted": true,
     "source_operation": "extend",
     "target_operation": "replace",
-    "overlap": "exact semantic scope",
+    "overlap": "the same semantic scope",
     "source_scope": "symbol:paymentservice",
     "target_scope": "symbol:paymentservice",
     "detected_before_code": true
@@ -263,7 +283,8 @@ determinable, as in a purely summary-based duplicate-work finding). When the
 two keys differ (for example a token-based overlap between
 `symbol:CreditLedgerService` and `symbol:CreditLedger`), the explanation names
 both, so each agent can match the conflict against a scope it actually
-declared.
+declared. A tier 2 match shows the same alias on both sides, and its `overlap`
+reads `the same symbol name under a different namespace or path`.
 
 ## Persistence and gating
 

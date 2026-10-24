@@ -49,6 +49,31 @@ function packageFor(platform, arch, musl) {
   return name;
 }
 
+// The platform package version this launcher pins in its optionalDependencies,
+// or undefined if the launcher's own manifest cannot be read.
+function pinnedVersion(name, launcher) {
+  try {
+    const manifest = launcher || require('../package.json');
+    return manifest.optionalDependencies[name];
+  } catch {
+    return undefined;
+  }
+}
+
+function missingPackage(name, version, platform, arch) {
+  const wanted = version ? `${name}@${version}` : name;
+  return (
+    `${wanted}, the package that carries the Foremerge binary for ${platform}-${arch}, is not installed.\n` +
+    'Likely causes:\n' +
+    '  - optional dependencies were omitted (--omit=optional, --no-optional or npm config);\n' +
+    '    reinstall without that setting\n' +
+    `  - ${wanted} is not published on npm\n` +
+    '  - npm judged the package unsupported on this system (its os, cpu or libc fields)\n' +
+    '  - the install did not finish; reinstall\n' +
+    OTHER_INSTALLS
+  );
+}
+
 function binaryPath(program, options = {}) {
   const platform = options.platform || process.platform;
   const arch = options.arch || process.arch;
@@ -59,12 +84,7 @@ function binaryPath(program, options = {}) {
   try {
     manifest = resolve(`${name}/package.json`);
   } catch {
-    throw new Error(
-      `The ${name} package that carries the Foremerge binary is not installed.\n` +
-        'npm skips it when optional dependencies are disabled (--omit=optional or\n' +
-        '--no-optional); reinstall without that flag.\n' +
-        OTHER_INSTALLS,
-    );
+    throw new Error(missingPackage(name, pinnedVersion(name, options.launcher), platform, arch));
   }
   const executable = platform === 'win32' ? `${program}.exe` : program;
   return path.join(path.dirname(manifest), 'bin', executable);
@@ -107,4 +127,4 @@ function run(program) {
   });
 }
 
-module.exports = { PLATFORM_PACKAGES, binaryPath, isMusl, packageFor, run };
+module.exports = { PLATFORM_PACKAGES, binaryPath, isMusl, packageFor, pinnedVersion, run };

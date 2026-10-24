@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const test = require('node:test');
 
-const { PLATFORM_PACKAGES, binaryPath, packageFor } = require('../lib/run.js');
+const { PLATFORM_PACKAGES, binaryPath, packageFor, pinnedVersion } = require('../lib/run.js');
 const manifest = require('../package.json');
 
 test('every platform package is pinned to the launcher version', () => {
@@ -53,12 +53,57 @@ test('Windows binaries carry the .exe suffix', () => {
   );
 });
 
-test('a missing platform package names the optional-dependency cause', () => {
+test('a missing platform package is named with its pinned version and every likely cause', () => {
   const resolve = () => {
     throw new Error('MODULE_NOT_FOUND');
   };
+  let message;
   assert.throws(
     () => binaryPath('foremerge', { platform: 'darwin', arch: 'arm64', musl: false, resolve }),
-    /foremerge-darwin-arm64[\s\S]*optional dependencies/,
+    (error) => {
+      message = error.message;
+      return true;
+    },
+  );
+  const pinned = `foremerge-darwin-arm64@${manifest.optionalDependencies['foremerge-darwin-arm64']}`;
+  assert.ok(message.startsWith(`${pinned}, the package that carries`), message);
+  assert.match(message, /Likely causes:/);
+  assert.match(message, /optional dependencies were omitted/);
+  assert.match(message, new RegExp(`${pinned.replace(/\./g, '\\.')} is not published on npm`));
+  assert.match(message, /unsupported on this system/);
+  assert.match(message, /releases/);
+  assert.match(message, /install\.sh/);
+  assert.match(message, /cargo install/);
+  // The flag is one possible cause, not the stated one.
+  assert.doesNotMatch(message, /npm skips it when optional dependencies are disabled/);
+});
+
+test('a missing platform package uses the version the launcher manifest pins', () => {
+  const resolve = () => {
+    throw new Error('MODULE_NOT_FOUND');
+  };
+  const launcher = { optionalDependencies: { 'foremerge-win32-x64': '9.8.7' } };
+  assert.throws(
+    () => binaryPath('foremerge', { platform: 'win32', arch: 'x64', musl: false, resolve, launcher }),
+    /foremerge-win32-x64@9\.8\.7, the package[\s\S]*foremerge-win32-x64@9\.8\.7 is not published on npm/,
+  );
+});
+
+test('the pinned version is read from the launcher manifest', () => {
+  for (const name of Object.values(PLATFORM_PACKAGES)) {
+    assert.equal(pinnedVersion(name), manifest.version);
+  }
+  assert.equal(pinnedVersion('foremerge-darwin-arm64', {}), undefined);
+});
+
+test('an unsupported platform is refused before any package lookup', () => {
+  const resolve = () => assert.fail('an unsupported platform must not look up a package');
+  assert.throws(
+    () => binaryPath('foremerge', { platform: 'win32', arch: 'arm64', musl: false, resolve }),
+    /does not publish an npm build for win32-arm64/,
+  );
+  assert.throws(
+    () => binaryPath('foremerge', { platform: 'linux', arch: 'x64', musl: true, resolve }),
+    /musl/,
   );
 });
