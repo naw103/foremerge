@@ -9623,6 +9623,91 @@ fn a_landing_of_only_the_candidates_last_commit_is_refused() {
     );
 }
 
+/// The case #38 itself names: a branch that took a conflict-resolving merge
+/// from the target before landing. A patch-identity match cannot see through
+/// the merge; the content check measures from the merge base, so the
+/// resolution is part of what must land. A squash that keeps it is recorded,
+/// and one that drops it is refused with the file that lacks it named.
+#[test]
+fn a_branch_with_a_conflict_resolving_merge_is_recorded_only_with_its_resolution() {
+    for keep_resolution in [true, false] {
+        let repo = create_repo();
+        let root = repo.root.clone();
+        git(&root, ["switch", "--quiet", "-c", "trunk"]);
+        let rate = |value: &str| format!("header\nrate = {value}\nfooter\n");
+        fs::write(root.join("rate.txt"), rate("1")).expect("write rate");
+        git(&root, ["add", "rate.txt"]);
+        git(&root, ["commit", "--quiet", "-m", "trunk base"]);
+
+        git(&root, ["switch", "--quiet", "-c", "feature"]);
+        fs::write(root.join("rate.txt"), rate("2")).expect("feature rate");
+        fs::write(root.join("feature.txt"), "feature work\n").expect("feature work");
+        git(&root, ["add", "rate.txt", "feature.txt"]);
+        git(&root, ["commit", "--quiet", "-m", "feature sets the rate"]);
+        git(&root, ["switch", "--quiet", "trunk"]);
+        fs::write(root.join("rate.txt"), rate("3")).expect("trunk rate");
+        git(&root, ["commit", "--quiet", "-am", "trunk sets the rate"]);
+
+        git(&root, ["switch", "--quiet", "feature"]);
+        let merge = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["merge", "--quiet", "trunk"])
+            .output()
+            .expect("run git merge");
+        assert!(!merge.status.success(), "the merge must conflict");
+        fs::write(root.join("rate.txt"), rate("23")).expect("resolve the conflict");
+        git(&root, ["add", "rate.txt"]);
+        git(&root, ["commit", "--quiet", "--no-edit"]);
+
+        let (agent, intent) = create_active_test_work(&root, "resolver", "resolution");
+        let changeset =
+            publish_test_revision(&root, &agent, &intent, "Feature with a resolved merge");
+        cli_success(
+            &root,
+            None,
+            ["changeset", "validate", changeset.as_str(), "--", "true"],
+        );
+        cli_success(&root, None, ["changeset", "accept", changeset.as_str()]);
+
+        git(&root, ["switch", "--quiet", "trunk"]);
+        if keep_resolution {
+            git(&root, ["merge", "--squash", "--quiet", "feature"]);
+            git(&root, ["commit", "--quiet", "-m", "squash the feature"]);
+            let landed = git(&root, ["rev-parse", "HEAD"]);
+            let output = record_landing(&root, &changeset, &landed);
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            let shown = cli_success(&root, None, ["changeset", "show", changeset.as_str()]);
+            assert_eq!(
+                shown["data"]["provenance"]["integration"]["method"], "content",
+                "{shown}"
+            );
+        } else {
+            fs::write(root.join("feature.txt"), "feature work\n").expect("feature only");
+            git(&root, ["add", "feature.txt"]);
+            git(
+                &root,
+                [
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "the feature without its resolution",
+                ],
+            );
+            let landed = git(&root, ["rev-parse", "HEAD"]);
+            let message = assert_landing_refused(&root, &changeset, &landed);
+            assert!(
+                message.contains("rate.txt") && !message.contains("feature.txt"),
+                "only the dropped resolution is missing: {message}"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_commit_from_before_the_candidate_is_refused() {
     let fixture = accepted_two_commit_candidate();
