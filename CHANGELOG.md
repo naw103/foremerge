@@ -9,6 +9,14 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+### Fixed
+
+- `record_commit` rejected a squash-merged ChangeSet because the squash commit
+  does not have the accepted candidate as a Git ancestor. It now accepts a
+  first-parent patch equivalent to the accepted change relative to its recorded
+  base, and committed dependencies can be satisfied by their recorded
+  integration commit. The immutable accepted commit remains unchanged.
+
 ### Added
 
 - `foremerge mcp` now speaks MCP protocol revision `2026-07-28` alongside

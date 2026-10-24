@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::LazyLock;
@@ -305,6 +305,61 @@ pub fn diff_patch_hash(worktree: impl AsRef<Path>, base: &str, commit: &str) -> 
         "if the candidate is a merge commit, its default first-parent diff spans the entire merged-in branch, so pass --base-ref (HTTP/MCP: base_ref) with the true fork point; otherwise reduce or split the ChangeSet",
     )?;
     Ok(format!("{:x}", digest.finalize()))
+}
+
+/// Stable Git patch ID for the changes between `base` and `commit`.
+///
+/// Unlike commit ancestry or object IDs, this remains the same when an
+/// equivalent patch is replayed or squash-merged onto another commit.
+pub fn diff_patch_id(
+    worktree: impl AsRef<Path>,
+    base: &str,
+    commit: &str,
+) -> Result<Option<String>> {
+    let worktree = worktree.as_ref();
+    let diff = git_output_bytes(
+        worktree,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--binary",
+            base,
+            commit,
+        ],
+    )?;
+    if diff.is_empty() {
+        return Ok(None);
+    }
+
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["patch-id", "--stable"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("run git patch-id --stable")?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("capture git patch-id stdin"))?
+        .write_all(&diff)
+        .context("write diff to git patch-id")?;
+    let output = child
+        .wait_with_output()
+        .context("wait for git patch-id --stable")?;
+    if !output.status.success() {
+        bail!(
+            "git patch-id --stable failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .map(str::to_string))
 }
 
 #[cfg(unix)]

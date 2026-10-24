@@ -486,7 +486,9 @@ holding it can act on either surface. See [`SECURITY.md`](../SECURITY.md) and
 Declared
 ChangeSet dependencies must already be accepted or committed; each dependency's
 stored `accepted_commit` must remain matched by its namespaced ref and be present
-in the candidate's Git ancestry. The selected ref must resolve to the validated
+in the candidate's Git ancestry. For a committed dependency, its recorded
+`integration_commit` also satisfies this history check, allowing downstream
+work to build on a squash merge. The selected ref must resolve to the validated
 worktree `HEAD`. Successful acceptance records both that immutable hash and the
 accepted namespaced Git ref; it does not merge a branch.
 
@@ -505,8 +507,11 @@ fm_curl \
 This stores the supplied hash as `integration_commit` without replacing
 `accepted_commit`, updates protocol provenance, and releases active claims.
 Foremerge verifies that the supplied ref resolves to a commit containing the
-accepted candidate as an ancestor. The caller remains responsible for supplying
-the intended target ref; the MVP does not perform the merge.
+accepted candidate as an ancestor, or that the commit's first-parent patch is
+equivalent to the accepted change relative to its recorded base. This permits
+squash integration while rejecting an unrelated commit. The caller remains
+responsible for supplying the intended target ref; the MVP does not perform the
+merge.
 
 ## Coordinate and read the inbox
 
