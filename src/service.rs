@@ -107,6 +107,42 @@ fn missing_symbol_warnings(worktree: &Option<String>, scopes: &[Scope]) -> Vec<S
         .collect()
 }
 
+/// The publish warning for an intent that declares no scopes.
+const NO_SCOPES_WARNING: &str = "this intent declares no scopes, so other work can match it only by summary similarity, which never raises a HIGH finding: nothing will collide with it and its ChangeSet will pass the conflict gate with nothing to compare; unless it is only a planning placeholder, publish the work with the scopes it will change";
+
+/// Advisory notes for `symbol:` keys whose class the stored form drops, such
+/// as `CheckoutController.checkout`, which canonicalization reduces to
+/// `checkout`. Always on, because the cost is visible in the key itself and
+/// needs no worktree to see. A warning, never a rejection or a rewrite.
+fn dropped_class_warnings<'a>(scopes: impl IntoIterator<Item = &'a Scope>) -> Vec<String> {
+    scopes
+        .into_iter()
+        .filter_map(|scope| {
+            let suggested = scope.class_preserving_key()?;
+            let stored = scope.canonical();
+            let member = stored.split_once(':').map_or(stored.as_str(), |(_, key)| key);
+            Some(format!(
+                "scope `symbol:{key}` is stored as `{stored}`, which matches every `{member}` and never exactly matches `symbol:{suggested}`; write `symbol:{suggested}` to keep the class",
+                key = scope.key,
+            ))
+        })
+        .collect()
+}
+
+/// The ledger's latest event sequence number, or 0 for an empty ledger.
+///
+/// Every write that changes a conflict, an intent or a claim appends an event
+/// in the same transaction, so a read that reports this alongside what it
+/// read says which ledger state it reflects. Call it on the connection or
+/// transaction the rest of the read used.
+fn latest_event_seq(conn: &Connection) -> Result<i64> {
+    Ok(
+        conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM events", [], |row| {
+            row.get(0)
+        })?,
+    )
+}
+
 /// What Foremerge actually knows about a ChangeSet, from the newest validation
 /// on record. A check that passed against a different fingerprint says nothing
 /// about this tree, so it counts as unverified rather than as evidence.
@@ -455,22 +491,29 @@ impl Foremerge {
                 .then_with(|| b.overlap.len().cmp(&a.overlap.len()))
                 .then_with(|| a.intent_id.cmp(&b.intent_id))
         });
+        // A scope-less intent is allowed, because it may be a planning
+        // placeholder, but it is invisible to every scope comparison, so say so.
+        let mut warnings = Vec::new();
+        if intent.scopes.is_empty() {
+            warnings.push(NO_SCOPES_WARNING.to_string());
+        }
+        warnings.extend(dropped_class_warnings(
+            intent.scopes.iter().map(|claim| &claim.scope),
+        ));
         // Opt-in advisory: a scope naming a symbol that exists nowhere protects
         // nothing, because the real symbol stays unclaimed while the agent
         // believes it holds a reservation. Computed before commit so the read
         // uses the same connection, but it never blocks the publish.
-        let warnings = if verify_symbol_scopes(&tx)? {
-            missing_symbol_warnings(
+        if verify_symbol_scopes(&tx)? {
+            warnings.extend(missing_symbol_warnings(
                 &agent.worktree,
                 &intent
                     .scopes
                     .iter()
                     .map(|claim| claim.scope.clone())
                     .collect::<Vec<_>>(),
-            )
-        } else {
-            Vec::new()
-        };
+            ));
+        }
         tx.commit()?;
         let assessment_required = !related_work.is_empty();
         let next = assessment_required.then(|| {
@@ -725,6 +768,7 @@ impl Foremerge {
             bail!("INVALID_INPUT: claim_work requires at least one semantic scope");
         }
         request.scopes = normalize_plain_scopes(request.scopes)?;
+        let scope_warnings = dropped_class_warnings(&request.scopes);
         let mut conn = self.store.lock()?;
         let tx = Store::immediate_tx(&mut conn)?;
         let agent = agent_by_id(&tx, &request.agent_id)?;
@@ -908,6 +952,7 @@ impl Foremerge {
             claims,
             warnings,
             advisory_only: true,
+            scope_warnings,
         })
     }
 
@@ -1054,11 +1099,16 @@ impl Foremerge {
             }
         }
         request.scopes = normalize_scopes(request.scopes)?;
+        // One read transaction, so the findings, the candidate count and
+        // `as_of_event` all describe the same ledger state even while other
+        // processes write to it.
+        let mut conn = self.store.lock()?;
+        let tx = conn.transaction()?;
+        let conn = &tx;
         if let Some(intent_id) = request.intent_id.as_deref() {
             if request.scopes.is_empty() {
-                let conn = self.store.lock()?;
-                intent_by_id(&conn, intent_id)?;
-                let checked_intents = active_candidates(&conn, Some(intent_id))?.len();
+                intent_by_id(conn, intent_id)?;
+                let checked_intents = active_candidates(conn, Some(intent_id))?.len();
                 let mut statement = conn.prepare(
                     "SELECT id FROM conflicts
                      WHERE status IN ('OPEN', 'COORDINATING')
@@ -1071,21 +1121,25 @@ impl Foremerge {
                 drop(statement);
                 let conflicts = ids
                     .iter()
-                    .map(|id| conflict_by_id(&conn, id))
+                    .map(|id| conflict_by_id(conn, id))
                     .collect::<Result<Vec<_>>>()?;
                 let blocking = conflicts.iter().any(|value| value.severity == "HIGH");
+                let as_of_event = latest_event_seq(conn)?;
                 return Ok(ConflictReport {
                     conflicts,
                     checked_intents,
                     blocking,
                     policy: "Warnings are explainable and advisory during intent/claim; unresolved HIGH conflicts gate acceptance."
                         .to_string(),
+                    ephemeral: false,
+                    as_of_event,
                 });
             }
         }
-        let conn = self.store.lock()?;
+        // From here on the comparison runs in memory: an ad-hoc summary, or a
+        // persisted intent with replacement scopes. Neither is recorded.
         let source = if let Some(intent_id) = request.intent_id.as_deref() {
-            let intent = intent_by_id(&conn, intent_id)?;
+            let intent = intent_by_id(conn, intent_id)?;
             IntentCandidate {
                 id: intent.id,
                 summary: intent.summary,
@@ -1104,7 +1158,8 @@ impl Foremerge {
                 scopes: request.scopes,
             }
         };
-        let candidates = active_candidates(&conn, Some(&source.id))?;
+        let candidates = active_candidates(conn, Some(&source.id))?;
+        let as_of_event = latest_event_seq(conn)?;
         let checked_intents = candidates.len();
         let conflicts = candidates
             .into_iter()
@@ -1124,6 +1179,8 @@ impl Foremerge {
             blocking,
             policy: "Warnings are explainable and advisory during intent/claim; unresolved HIGH conflicts gate acceptance."
                 .to_string(),
+            ephemeral: true,
+            as_of_event,
         })
     }
 
@@ -3011,6 +3068,7 @@ impl Foremerge {
                 },
             });
         }
+        let as_of_event = latest_event_seq(&tx)?;
         tx.commit()?;
 
         Ok(StatusReport {
@@ -3019,6 +3077,7 @@ impl Foremerge {
             claims,
             conflicts,
             changesets,
+            as_of_event,
         })
     }
 }
@@ -3195,6 +3254,13 @@ fn looks_like_intent_id(value: &str) -> bool {
 }
 
 fn open_conflicts_for_intent(conn: &Connection, intent_id: &str) -> Result<OpenConflicts> {
+    // The ids and `as_of_event` must come from one snapshot. Write paths call
+    // this inside their own transaction; a bare read gets one of its own.
+    let read = if conn.is_autocommit() {
+        Some(conn.unchecked_transaction()?)
+    } else {
+        None
+    };
     let mut statement = conn.prepare(
         "SELECT id FROM conflicts WHERE status IN ('OPEN', 'COORDINATING')
          AND (source_intent_id = ?1 OR target_intent_id = ?1)
@@ -3203,9 +3269,15 @@ fn open_conflicts_for_intent(conn: &Connection, intent_id: &str) -> Result<OpenC
     let ids = statement
         .query_map([intent_id], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    let as_of_event = latest_event_seq(conn)?;
+    if let Some(read) = read {
+        read.commit()?;
+    }
     Ok(OpenConflicts {
         count: ids.len(),
         ids,
+        as_of_event,
     })
 }
 
@@ -5072,5 +5144,275 @@ mod tests {
         std::fs::create_dir(&elsewhere).expect("create unrelated directory");
         ensure_validation_root(&elsewhere, &root)
             .expect_err("an unrelated directory must be refused");
+    }
+
+    fn quickwin_agent(service: &Foremerge, name: &str) -> Agent {
+        service
+            .register_agent(RegisterAgentRequest {
+                name: name.into(),
+                model: None,
+                capabilities: vec![],
+                worktree: None,
+            })
+            .unwrap()
+            .agent
+    }
+
+    fn quickwin_publish(
+        service: &Foremerge,
+        agent: &Agent,
+        summary: &str,
+        scopes: Vec<ScopeClaim>,
+    ) -> PublishIntentOutcome {
+        service
+            .publish_intent(PublishIntentRequest {
+                agent_id: agent.id.clone(),
+                task: format!("{summary} task"),
+                summary: summary.into(),
+                rationale: None,
+                scopes,
+                depends_on: vec![],
+                metadata: json!({}),
+            })
+            .unwrap()
+    }
+
+    /// I-080. A scope-less intent can be a legitimate planning placeholder,
+    /// so it is published, but it is invisible to every scope comparison and
+    /// the response has to say so. The negative control: one declared scope
+    /// silences it.
+    #[test]
+    fn an_intent_without_scopes_is_published_with_a_warning() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let agent = quickwin_agent(&service, "planner");
+
+        let scopeless = quickwin_publish(&service, &agent, "Plan the checkout rework", vec![]);
+        assert_eq!(scopeless.intent.status, "INTENT");
+        assert!(scopeless.intent.scopes.is_empty());
+        assert_eq!(scopeless.warnings, vec![NO_SCOPES_WARNING.to_string()]);
+        service
+            .get_intent(&scopeless.intent.id)
+            .expect("the scope-less intent is stored, not refused");
+
+        let scoped = quickwin_publish(
+            &service,
+            &agent,
+            "Extend the cart totals",
+            vec![ScopeClaim::new(
+                Scope::new("symbol", "CartTotals"),
+                Operation::Extend,
+            )],
+        );
+        assert!(scoped.warnings.is_empty(), "{:?}", scoped.warnings);
+    }
+
+    /// I-066. Which keys lose a class to canonicalization, and which only lose
+    /// a namespace path, which canonicalization drops on purpose.
+    #[test]
+    fn only_a_dotted_class_member_reports_a_class_preserving_key() {
+        let suggest = |key: &str| Scope::new("symbol", key).class_preserving_key();
+        assert_eq!(
+            suggest("CheckoutController.checkout").as_deref(),
+            Some("CheckoutController::checkout")
+        );
+        assert_eq!(
+            suggest("App.Http.CheckoutController.checkout").as_deref(),
+            Some("App.Http.CheckoutController::checkout")
+        );
+        assert_eq!(
+            suggest("app/http/CheckoutController.checkout").as_deref(),
+            Some("app/http/CheckoutController::checkout")
+        );
+        assert_eq!(
+            suggest("Billing::Report.render").as_deref(),
+            Some("Billing::Report::render")
+        );
+        assert_eq!(
+            suggest("Report._render").as_deref(),
+            Some("Report::_render")
+        );
+        // Every suggestion keeps the class through canonicalization.
+        assert_eq!(
+            Scope::new("symbol", "CheckoutController::checkout").canonical(),
+            "symbol:checkoutcontroller::checkout"
+        );
+        for kept in [
+            "App.Services.Report",
+            "com.example.Report",
+            "app.services.report",
+            "App\\Services\\Report::render",
+            "Report::render",
+            "CheckoutController.Checkout",
+            "Checkout.ts",
+            "README.md",
+            "CheckoutController",
+            "Report.",
+        ] {
+            assert_eq!(suggest(kept), None, "{kept}");
+        }
+        assert_eq!(
+            Scope::new("file", "CheckoutController.checkout").class_preserving_key(),
+            None
+        );
+    }
+
+    /// I-066 at the service boundary: publish and claim both warn, the key is
+    /// stored exactly as written, and a namespace path does not warn.
+    #[test]
+    fn a_dotted_member_key_warns_on_publish_and_claim_without_being_rewritten() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let agent = quickwin_agent(&service, "checkout-agent");
+        let expected = "scope `symbol:CheckoutController.checkout` is stored as `symbol:checkout`, which matches every `checkout` and never exactly matches `symbol:CheckoutController::checkout`; write `symbol:CheckoutController::checkout` to keep the class";
+
+        let published = quickwin_publish(
+            &service,
+            &agent,
+            "Modify checkout totals",
+            vec![
+                ScopeClaim::new(
+                    Scope::new("symbol", "CheckoutController.checkout"),
+                    Operation::Modify,
+                ),
+                ScopeClaim::new(
+                    Scope::new("symbol", "App.Services.Report"),
+                    Operation::Modify,
+                ),
+            ],
+        );
+        assert_eq!(published.warnings, vec![expected.to_string()]);
+        assert_eq!(
+            published.intent.scopes[0].scope.key,
+            "CheckoutController.checkout"
+        );
+
+        let claimed = service
+            .claim_work(ClaimWorkRequest {
+                agent_id: agent.id.clone(),
+                intent_id: published.intent.id.clone(),
+                scopes: vec![
+                    Scope::new("symbol", "CheckoutController.checkout"),
+                    Scope::new("symbol", "App.Services.Report"),
+                ],
+                reason: None,
+                lease_seconds: 3600,
+            })
+            .unwrap();
+        assert_eq!(claimed.claims.len(), 2);
+        assert_eq!(claimed.scope_warnings, vec![expected.to_string()]);
+        assert!(claimed.warnings.is_empty());
+    }
+
+    /// I-062 and I-020. The persisted read and the what-if comparison say
+    /// which they are, and every open-conflict list says which ledger state
+    /// it reflects, consistently across check_conflicts, intent show and
+    /// status, and moving only when the ledger does.
+    #[test]
+    fn conflict_reads_say_whether_ids_are_durable_and_which_ledger_state_they_reflect() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let stripe = quickwin_agent(&service, "stripe-agent");
+        let paypal = quickwin_agent(&service, "paypal-agent");
+        let replace = quickwin_publish(
+            &service,
+            &stripe,
+            "Replace PaymentService with Stripe",
+            vec![ScopeClaim::new(
+                Scope::new("symbol", "PaymentService"),
+                Operation::Replace,
+            )],
+        );
+        let extend = quickwin_publish(
+            &service,
+            &paypal,
+            "Extend PaymentService with PayPal",
+            vec![ScopeClaim::new(
+                Scope::new("symbol", "PaymentService"),
+                Operation::Extend,
+            )],
+        );
+        assert!(!extend.conflicts.is_empty());
+        let latest = || -> i64 {
+            let conn = service.store.lock().unwrap();
+            conn.query_row("SELECT MAX(seq) FROM events", [], |row| row.get(0))
+                .unwrap()
+        };
+
+        let persisted = service
+            .check_conflicts(ConflictCheckRequest {
+                agent_id: None,
+                intent_id: Some(replace.intent.id.clone()),
+                intent: None,
+                scopes: vec![],
+            })
+            .unwrap();
+        assert!(!persisted.ephemeral);
+        assert!(!persisted.conflicts.is_empty());
+        assert!(persisted.conflicts.iter().all(|c| c.id.starts_with("cfl_")));
+        assert_eq!(persisted.as_of_event, latest());
+        let again = service
+            .check_conflicts(ConflictCheckRequest {
+                agent_id: None,
+                intent_id: Some(replace.intent.id.clone()),
+                intent: None,
+                scopes: vec![],
+            })
+            .unwrap();
+        assert_eq!(again.as_of_event, persisted.as_of_event);
+
+        let hybrid = service
+            .check_conflicts(ConflictCheckRequest {
+                agent_id: None,
+                intent_id: Some(replace.intent.id.clone()),
+                intent: None,
+                scopes: vec![ScopeClaim::new(
+                    Scope::new("symbol", "PaymentService"),
+                    Operation::Remove,
+                )],
+            })
+            .unwrap();
+        assert!(hybrid.ephemeral);
+        assert!(!hybrid.conflicts.is_empty());
+        assert!(hybrid.conflicts.iter().all(|c| c.id.starts_with("eph_")));
+        assert_eq!(hybrid.as_of_event, persisted.as_of_event);
+        let adhoc = service
+            .check_conflicts(ConflictCheckRequest {
+                agent_id: None,
+                intent_id: None,
+                intent: Some("Remove PaymentService".into()),
+                scopes: vec![ScopeClaim::new(
+                    Scope::new("symbol", "PaymentService"),
+                    Operation::Remove,
+                )],
+            })
+            .unwrap();
+        assert!(adhoc.ephemeral);
+
+        let shown = service.show_intent(&replace.intent.id).unwrap();
+        assert_eq!(shown.open_conflicts.as_of_event, persisted.as_of_event);
+        assert_eq!(service.status().unwrap().as_of_event, persisted.as_of_event);
+
+        // A write that changes the conflict state moves the marker, and the
+        // write's own response already reflects it.
+        service
+            .claim_work(ClaimWorkRequest {
+                agent_id: stripe.id.clone(),
+                intent_id: replace.intent.id.clone(),
+                scopes: vec![Scope::new("symbol", "PaymentService")],
+                reason: None,
+                lease_seconds: 3600,
+            })
+            .unwrap();
+        let started = service.start_work(&stripe.id, &replace.intent.id).unwrap();
+        let snapshot = started.open_conflicts.expect("start_work snapshot");
+        assert_eq!(snapshot.as_of_event, latest());
+        assert!(snapshot.as_of_event > persisted.as_of_event);
+        let after = service
+            .check_conflicts(ConflictCheckRequest {
+                agent_id: None,
+                intent_id: Some(replace.intent.id.clone()),
+                intent: None,
+                scopes: vec![],
+            })
+            .unwrap();
+        assert_eq!(after.as_of_event, snapshot.as_of_event);
     }
 }

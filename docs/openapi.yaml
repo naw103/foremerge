@@ -93,6 +93,9 @@ paths:
     get:
       operationId: getStatus
       summary: Read one consistent coordinator status snapshot
+      description: >-
+        The snapshot carries as_of_event, the ledger's latest event seq read
+        in the same transaction as every section.
       responses:
         "200":
           $ref: "#/components/responses/Success"
@@ -139,7 +142,8 @@ paths:
       description: >-
         The response data is the updated intent and includes an
         open_conflicts snapshot (count and ids of OPEN or COORDINATING
-        conflicts touching it) captured at the transition.
+        conflicts touching it, and as_of_event, the ledger event seq they
+        were read at) captured at the transition.
       parameters:
         - $ref: "#/components/parameters/IntentId"
       requestBody:
@@ -219,6 +223,11 @@ paths:
     post:
       operationId: publishIntent
       summary: Publish intent and return pre-code conflicts plus related work to assess
+      description: >-
+        The response data may carry warnings, advisory strings about the
+        intent itself: no scopes declared, or a symbol key such as
+        CheckoutController.checkout whose class the stored form drops. They
+        never refuse the publish.
       requestBody:
         required: true
         content:
@@ -236,6 +245,9 @@ paths:
     get:
       operationId: getIntent
       summary: Read one intent, its agent, and current open conflicts
+      description: >-
+        open_conflicts carries count, ids and as_of_event, the ledger event
+        seq the ids were read at.
       parameters:
         - $ref: "#/components/parameters/IntentId"
       responses:
@@ -283,6 +295,10 @@ paths:
     post:
       operationId: claimWork
       summary: Create leased advisory semantic claims
+      description: >-
+        The response data carries claims, warnings (overlap conflicts) and
+        advisory_only, plus scope_warnings when a claimed symbol key loses
+        its class to canonicalization.
       requestBody:
         required: true
         content:
@@ -316,6 +332,14 @@ paths:
     post:
       operationId: checkConflicts
       summary: Compare a persisted or provisional intent with active work
+      description: >-
+        intent_id alone reads the stored OPEN or COORDINATING conflicts, with
+        stable cfl_ ids. intent_id with non-empty scopes, or intent text with
+        scopes, compares in memory and returns fresh eph_ ids on every call,
+        which coordinate and resolve refuse. The report carries conflicts,
+        checked_intents, blocking, policy, ephemeral (true for the in-memory
+        comparison) and as_of_event (the ledger's latest event seq, read in
+        the same transaction as the findings).
       requestBody:
         required: true
         content:
@@ -372,7 +396,7 @@ paths:
         shallow_boundary, or unborn_worktree), and diff_hash over the actual
         patch bytes. The response also carries an open_conflicts snapshot
         (count and ids of OPEN or COORDINATING conflicts touching the intent
-        at that moment).
+        at that moment, and the as_of_event they were read at).
       requestBody:
         required: true
         content:

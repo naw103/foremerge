@@ -195,6 +195,13 @@ The response envelope contains:
 Conflict detection is part of publication, so a client does not need a second
 request to learn about existing incompatible work.
 
+When there is something to say about the intent itself, `data` also carries
+`warnings`, a list of strings. An intent with no scopes is published with a
+warning that nothing can collide with it, and a `symbol:` key such as
+`CheckoutController.checkout`, which is stored as `symbol:checkout`, is
+published with a warning suggesting `CheckoutController::checkout`. Neither
+refuses the publish. See [Protocol](protocol.md#intent-publication).
+
 `related_work` states what overlaps. Deciding what the overlap means is the
 caller's, recorded with `POST /v1/assessments`:
 
@@ -229,8 +236,9 @@ fm_curl \
   }' | jq .
 ```
 
-Claims are always advisory. The response contains `claims`, `warnings`, and
-`"advisory_only": true`.
+Claims are always advisory. The response contains `claims`, `warnings` (the
+overlap conflicts), and `"advisory_only": true`, plus `scope_warnings` when a
+claimed `symbol:` key loses its class to canonicalization.
 
 A claimed scope carries no operation, because the intent already declared one.
 A `key` that ends in `=OPERATION`, such as `PaymentService=replace`, is rejected
@@ -265,6 +273,9 @@ fm_curl "$FOREMERGE_URL/v1/changesets/chg_REPLACE_ME" | jq .
 fm_curl "$FOREMERGE_URL/v1/status" | jq .
 ```
 
+`GET /v1/intents/{id}` and `GET /v1/status` each carry an `as_of_event`, the
+latest event `seq` read in the same transaction as their open conflicts.
+
 ## Check conflicts
 
 Check an existing intent:
@@ -294,7 +305,28 @@ Free-form `intent` text must be prose: an id-shaped value (`int_` followed by
 compared as text, because that comparison would silently return a false
 all-clear. Pass ids as `intent_id`.
 
-The response includes `conflicts`, `checked_intents`, `blocking`, and `policy`.
+An existing intent can also be checked against replacement scopes, for
+example before rescoping it:
+
+```bash
+fm_curl \
+  -H 'content-type: application/json' \
+  -X POST "$FOREMERGE_URL/v1/conflicts/check" \
+  -d '{
+    "intent_id": "int_REPLACE_ME",
+    "scopes": [{"kind": "symbol", "key": "PaymentService", "operation": "remove"}]
+  }' | jq .
+```
+
+That call, like the preflight, compares in memory and stores nothing: its
+findings carry fresh `eph_` ids on every call, which `coordinate` and `resolve`
+refuse. Only `intent_id` alone reads the stored `cfl_` conflicts.
+
+The response includes `conflicts`, `checked_intents`, `blocking`, `policy`,
+`ephemeral` and `as_of_event`. `ephemeral` is `true` when the ids are per-call
+`eph_` ids and `false` for the stored read. `as_of_event` is the ledger's latest
+event `seq` (the one [Events](#events) pages by), read in the same transaction
+as the findings: two responses with the same value saw the same conflict state.
 See [Conflict detection](conflict-detection.md) for rule evidence and limits.
 
 Persisted conflicts can be listed with:
@@ -347,7 +379,8 @@ fm_curl -H 'content-type: application/json' \
 ```
 
 The start response is the updated intent and includes an `open_conflicts`
-snapshot (count and ids of OPEN or COORDINATING conflicts touching it),
+snapshot (count and ids of OPEN or COORDINATING conflicts touching it, and the
+`as_of_event` they were read at, which includes the start itself),
 because a later publish by another agent can create a conflict after your own
 publish returned none.
 
