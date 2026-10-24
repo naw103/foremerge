@@ -1624,6 +1624,123 @@ async fn mcp_tool_call(service: &Foremerge, id: u64, name: &str, arguments: Valu
     }
 }
 
+/// The publish warnings and the conflict-report markers reach an MCP client:
+/// a scope-less intent and a dotted member key each warn without being
+/// refused, `check_conflicts` says whether its ids are durable, and every
+/// open-conflict list carries the event sequence it was read at.
+#[tokio::test]
+async fn mcp_reports_scope_warnings_and_conflict_report_markers() {
+    let service = Foremerge::new(Store::in_memory().unwrap());
+    let agent = mcp_tool_call(
+        &service,
+        1,
+        "register_agent",
+        json!({ "name": "mcp-markers" }),
+    )
+    .await;
+    let agent_id = agent["id"].as_str().unwrap();
+
+    let placeholder = mcp_tool_call(
+        &service,
+        2,
+        "publish_intent",
+        json!({ "agent_id": agent_id, "task": "plan", "summary": "Plan the checkout rework" }),
+    )
+    .await;
+    assert_eq!(placeholder["intent"]["status"], "INTENT");
+    let warnings = placeholder["warnings"].as_array().expect("warnings");
+    assert_eq!(warnings.len(), 1, "{placeholder}");
+    assert!(
+        warnings[0]
+            .as_str()
+            .unwrap()
+            .starts_with("this intent declares no scopes"),
+        "{placeholder}"
+    );
+
+    let dotted = mcp_tool_call(
+        &service,
+        3,
+        "publish_intent",
+        json!({
+            "agent_id": agent_id,
+            "task": "checkout",
+            "summary": "Replace the checkout action",
+            "scopes": [{ "kind": "symbol", "key": "CheckoutController.checkout", "operation": "replace" }]
+        }),
+    )
+    .await;
+    assert_eq!(
+        dotted["warnings"],
+        json!([
+            "scope `symbol:CheckoutController.checkout` is stored as `symbol:checkout`, which matches every `checkout` and never exactly matches `symbol:CheckoutController::checkout`; write `symbol:CheckoutController::checkout` to keep the class"
+        ])
+    );
+    let other = mcp_tool_call(
+        &service,
+        4,
+        "register_agent",
+        json!({ "name": "mcp-other" }),
+    )
+    .await;
+    let other_published = mcp_tool_call(
+        &service,
+        5,
+        "publish_intent",
+        json!({
+            "agent_id": other["id"],
+            "task": "checkout-extend",
+            "summary": "Extend the checkout action",
+            "scopes": [{ "kind": "symbol", "key": "CheckoutController.checkout", "operation": "extend" }]
+        }),
+    )
+    .await;
+    assert!(
+        !other_published["conflicts"].as_array().unwrap().is_empty(),
+        "{other_published}"
+    );
+    let intent_id = dotted["intent"]["id"].as_str().unwrap();
+
+    let persisted = mcp_tool_call(
+        &service,
+        6,
+        "check_conflicts",
+        json!({ "intent_id": intent_id }),
+    )
+    .await;
+    assert_eq!(persisted["ephemeral"], false, "{persisted}");
+    let as_of_event = persisted["as_of_event"].as_i64().expect("as_of_event");
+    assert!(as_of_event > 0, "{persisted}");
+    assert!(
+        persisted["conflicts"][0]["id"]
+            .as_str()
+            .unwrap()
+            .starts_with("cfl_")
+    );
+
+    let hybrid = mcp_tool_call(
+        &service,
+        7,
+        "check_conflicts",
+        json!({
+            "intent_id": intent_id,
+            "scopes": [{ "kind": "symbol", "key": "CheckoutController.checkout", "operation": "remove" }]
+        }),
+    )
+    .await;
+    assert_eq!(hybrid["ephemeral"], true, "{hybrid}");
+    assert_eq!(hybrid["as_of_event"], as_of_event, "{hybrid}");
+    assert!(
+        hybrid["conflicts"][0]["id"]
+            .as_str()
+            .unwrap()
+            .starts_with("eph_")
+    );
+
+    let shown = mcp_tool_call(&service, 8, "status", json!({})).await;
+    assert_eq!(shown["as_of_event"], as_of_event, "{shown}");
+}
+
 #[tokio::test]
 async fn mcp_exposes_the_complete_work_lifecycle_with_named_verification() {
     let repo = create_repo();
