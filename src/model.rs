@@ -104,6 +104,58 @@ impl Scope {
         };
         format!("{}:{}", self.kind.to_lowercase(), key)
     }
+
+    /// The `Class::method` spelling of a `symbol:` key whose class
+    /// [`Scope::canonical`] would otherwise discard, or `None` when nothing
+    /// that names a class is lost.
+    ///
+    /// Canonicalization reads every `.` as a namespace separator, which is
+    /// right for `app.services.Report` and wrong for
+    /// `CheckoutController.checkout`: the second is stored as `checkout`,
+    /// which matches every `checkout` and never exactly matches
+    /// `CheckoutController::checkout`. The two are told apart only by naming
+    /// convention, so this answers only for the unambiguous shape, a member
+    /// starting with a lowercase letter or `_` directly after a name starting
+    /// with an uppercase letter. A namespace path (`App.Services.Report`,
+    /// `com.example.Report`), an all-lowercase module path
+    /// (`app.services.report`) and a file name written as a symbol
+    /// (`Checkout.ts`) are left alone. Canonicalization itself is unchanged,
+    /// because changing it would change existing conflict identities.
+    pub fn class_preserving_key(&self) -> Option<String> {
+        if !self.kind.eq_ignore_ascii_case("symbol") {
+            return None;
+        }
+        let key = self.key.trim();
+        // Only the last `::` segment is a member; the container before it is
+        // reduced on purpose.
+        let segment_start = key.rfind("::").map_or(0, |index| index + 2);
+        let segment = &key[segment_start..];
+        let dot = segment.rfind(['\\', '/', '.'])?;
+        if segment.as_bytes()[dot] != b'.' {
+            return None;
+        }
+        let member = segment[dot + 1..].trim();
+        let owner_start = segment[..dot].rfind(['\\', '/', '.']).map_or(0, |i| i + 1);
+        let owner = segment[owner_start..dot].trim();
+        const FILE_EXTENSIONS: &[&str] = &[
+            "c", "cc", "cpp", "cs", "css", "go", "h", "hpp", "html", "java", "js", "json", "jsx",
+            "kt", "md", "php", "py", "rb", "rs", "scss", "sql", "swift", "toml", "ts", "tsx",
+            "txt", "vue", "xml", "yaml", "yml",
+        ];
+        let starts_lower = member
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_lowercase() || first == '_');
+        let owner_is_type = owner
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_uppercase());
+        if !starts_lower || !owner_is_type || FILE_EXTENSIONS.contains(&member) {
+            return None;
+        }
+        let dot = segment_start + dot;
+        Some(format!("{}::{}", &key[..dot], &key[dot + 1..]))
+    }
 }
 
 /// Reduce a symbol key to `container::member`, or `member` when it has no
@@ -492,7 +544,9 @@ pub struct PublishIntentOutcome {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<String>,
     /// Advisory notes about the intent itself, as opposed to conflicts with
-    /// other agents. Empty unless a repository opts in to extra checking.
+    /// other agents: no scopes declared, a `symbol:` key whose class the
+    /// stored form drops, and, when a repository opts in, a symbol that
+    /// appears nowhere in the worktree. Never a refusal.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
@@ -529,6 +583,11 @@ pub struct ClaimOutcome {
     pub claims: Vec<Claim>,
     pub warnings: Vec<Conflict>,
     pub advisory_only: bool,
+    /// Advisory notes about the claimed scopes themselves, as opposed to
+    /// overlaps with other claims, such as a `symbol:` key whose class the
+    /// stored form drops. `warnings` holds conflicts, so these live apart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scope_warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -612,6 +671,18 @@ pub struct ConflictReport {
     pub checked_intents: usize,
     pub blocking: bool,
     pub policy: String,
+    /// True when the findings came from an in-memory what-if comparison
+    /// rather than the stored conflicts: their `eph_` ids are new on every
+    /// call, are not recorded, and are refused by `coordinate_with_agent`
+    /// and `resolve_conflict`. False for the persisted read of an intent's
+    /// OPEN or COORDINATING conflicts, whose `cfl_` ids are stable.
+    #[serde(default)]
+    pub ephemeral: bool,
+    /// The ledger's latest event sequence number, read in the same
+    /// transaction as the findings, so two reports can be compared: equal
+    /// values saw the same conflict state.
+    #[serde(default)]
+    pub as_of_event: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -706,6 +777,11 @@ pub struct ChangeSet {
 pub struct OpenConflicts {
     pub count: usize,
     pub ids: Vec<String>,
+    /// The ledger's latest event sequence number, read in the same
+    /// transaction as `ids`. On a write response it includes that write's
+    /// own events.
+    #[serde(default)]
+    pub as_of_event: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -911,6 +987,10 @@ pub struct StatusReport {
     /// All ChangeSets grouped by status in lifecycle order; empty groups are
     /// omitted.
     pub changesets: Vec<StatusChangeSetGroup>,
+    /// The ledger's latest event sequence number, read in the same
+    /// transaction as every section above.
+    #[serde(default)]
+    pub as_of_event: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

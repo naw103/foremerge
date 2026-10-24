@@ -28,6 +28,30 @@ changes when they are called out here with a migration note.
   `versionNegotiation` mode `'auto'` now connects on `2026-07-28` instead of
   falling back, and a client pinned to `2026-07-28` now connects at all
   ([#23](https://github.com/naw103/foremerge/issues/23)).
+- `publish_intent` warns when an intent declares no scopes. Such an intent
+  can be matched to other work only by summary similarity, which never raises
+  a HIGH finding, so nothing collides with it and its ChangeSet passes the
+  conflict gate with nothing to compare. It is still published, because it may
+  be a planning placeholder.
+- `publish_intent` and `claim_work` warn when a `symbol:` key reads as
+  `Class.member`, such as `CheckoutController.checkout`. Canonicalization treats
+  the dot as a namespace separator and stores `symbol:checkout`, which matches
+  every `checkout` and never exactly matches `CheckoutController::checkout`. The
+  warning names the stored form and suggests the `Class::method` spelling. Keys
+  are neither refused nor rewritten, and namespace paths such as
+  `App.Services.Report` do not warn. `claim_work` returns it in a new
+  `scope_warnings` field, because its `warnings` field holds conflicts.
+- Conflict reports from `check_conflicts` carry `ephemeral`: `true` when the
+  findings come from an in-memory comparison and their `eph_` ids are new on
+  every call and refused by `coordinate_with_agent` and `resolve_conflict`,
+  `false` for the stored read of an intent's conflicts. Before, a check with
+  `intent_id` plus replacement `scopes` returned per-call ids with the only
+  signal buried in each finding's evidence.
+- Every list of open conflicts now says which ledger state it reflects:
+  `check_conflicts` reports, the `open_conflicts` snapshot on `start_work`,
+  `publish_changeset` and `get_intent`, and `status` carry `as_of_event`, the
+  ledger's latest event sequence number read in the same transaction as the
+  list. Two reads with the same value saw the same conflict state.
 
 ### Changed
 

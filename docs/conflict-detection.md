@@ -99,6 +99,17 @@ comparison. Symbol keys are reduced to `container::member` with namespace and
 path prefixes discarded, so `App\Services\Report::render` and
 `Report::render` are one scope.
 
+A dot counts as a namespace separator in that reduction, so
+`symbol:CheckoutController.checkout` is stored as `symbol:checkout`. That
+matches every `checkout` and never exactly matches
+`symbol:CheckoutController::checkout`, so a collision between the two
+spellings can be surfaced but never asserted, and their claims do not overlap
+at all. `publish_intent` and `claim_work` warn when a key has that shape (a
+member starting with a lowercase letter or `_` right after a name starting with
+an uppercase letter) and suggest the `Class::method` spelling. They neither
+refuse nor rewrite the key. A namespace path such as `App.Services.Report` does
+not warn.
+
 The strongest interaction is reported once per scope pair, so an intent
 declaring several related scopes does not produce a wall of findings.
 
@@ -270,10 +281,12 @@ declared.
 Findings discovered while an intent is published, and warnings created by
 overlapping claims, are stored with a canonical unordered intent pair plus
 kind and scope. A check for a persisted intent returns those canonical stored
-findings. An ad-hoc `check_conflicts` preflight returns `eph_`-prefixed findings
-whose evidence contains `ephemeral: true`; they are not valid durable links for
-coordination messages. Conflict reports set `blocking` when they contain a
-high-severity result.
+findings. An ad-hoc `check_conflicts` preflight, or a check of a persisted
+intent with replacement `scopes`, returns `eph_`-prefixed findings whose
+evidence contains `ephemeral: true`, and the report itself carries
+`ephemeral: true`; they are not valid durable links for coordination messages.
+Conflict reports set `blocking` when they contain a high-severity result, and
+carry `as_of_event`, the ledger event sequence the read reflects.
 
 The canonical `cfl_*` row owns lifecycle state and the evidence from its first
 detection. Every observation is also appended to immutable
