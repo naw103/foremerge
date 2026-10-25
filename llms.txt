@@ -16,6 +16,6 @@
 - [Running multiple Claude Code agents in parallel](https://foremerge.com/blog/running-multiple-claude-code-agents-in-parallel/)
 ## Install
 - macOS and Linux: `curl -fsSL https://foremerge.com/install.sh | sh`
-- npm on macOS and Linux: `npm install -g foremerge`
+- npm on macOS, Linux and Windows x64: `npm install -g foremerge`
 - With Rust: `cargo install --locked foremerge`
 - Windows: binaries on the [releases page](https://github.com/naw103/foremerge/releases)
