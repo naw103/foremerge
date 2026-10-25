@@ -1039,7 +1039,7 @@ pub fn tool_catalog() -> Vec<Value> {
                 "agent_id": { "type": "string", "minLength": 1, "description": "Your agent id (agt_...). Must own the intent." },
                 "intent_id": { "type": "string", "minLength": 1, "description": "The intent (int_...) to discard." },
                 "reason": { "type": "string", "minLength": 1, "description": "Why the work is being closed: why it was abandoned, or how it landed. Required and recorded in the event log." },
-                "landed_ref": { "type": "string", "minLength": 1, "description": "Only for work that reached Git: the commit, branch or tag it landed in. Refused with INVALID_INPUT if it does not resolve to a commit, with TARGET_DIVERGED if the intent published a ChangeSet whose changes it does not hold, by ancestry or by content as record_commit checks, and with STALE_CHANGESET if that ChangeSet was published with uncommitted changes." }
+                "landed_ref": { "type": "string", "minLength": 1, "description": "Only for work that reached Git: the commit, branch or tag it landed in. Refused with INVALID_INPUT if it does not resolve to a commit, with TARGET_DIVERGED if the intent published a ChangeSet whose changes it does not hold, by ancestry or by content as record_commit checks, and with STALE_CHANGESET if that ChangeSet was published with uncommitted changes or before the repository's first commit." }
             }),
             &["agent_id", "intent_id", "reason"],
             false,

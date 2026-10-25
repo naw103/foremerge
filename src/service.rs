@@ -2495,7 +2495,9 @@ impl Foremerge {
     /// ChangeSet keeps whatever status it had. What is checked is the claim
     /// itself. `landed_ref` must resolve to a commit in this repository, and
     /// when the intent has published a ChangeSet that commit must contain the
-    /// candidate, the same ancestry rule `record_commit` applies.
+    /// candidate, the same ancestry rule `record_commit` applies. A ChangeSet
+    /// that no commit represents, because it was published with uncommitted
+    /// changes or before the first commit, is refused.
     pub fn close_landed_work(
         &self,
         agent_id: &str,
@@ -2548,12 +2550,20 @@ impl Foremerge {
         // work that landed through a squash or rebase merge can be closed too.
         let integration = match candidate.as_ref() {
             None => None,
+            Some(candidate) if candidate.git_ref.is_none() => bail!(
+                "STALE_CHANGESET: ChangeSet {} was published before this repository had a commit, so it names no commit and none can show that it landed. Commit the work, publish a ChangeSet revision, then close it as landed.",
+                candidate.changeset_id
+            ),
             Some(candidate) if candidate.dirty => bail!(
                 "STALE_CHANGESET: ChangeSet {} was published with uncommitted changes, so no commit holds what it describes and none can show that it landed. Commit the work, publish a ChangeSet revision, then close it as landed.",
                 candidate.changeset_id
             ),
             Some(candidate) => {
-                let candidate_commit = git::verify_ref(&git_dir, &candidate.git_ref)?;
+                let candidate_ref = candidate
+                    .git_ref
+                    .as_deref()
+                    .expect("a ChangeSet that names no commit is refused above");
+                let candidate_commit = git::verify_ref(&git_dir, candidate_ref)?;
                 if git::is_ancestor(&git_dir, &candidate_commit, &landed_commit)? {
                     Some(IntegrationEvidence {
                         method: "ancestor".to_string(),
@@ -4124,8 +4134,9 @@ struct CurrentCandidate {
     changeset_id: String,
     /// The commit the ChangeSet named when it was published. A ChangeSet may
     /// be published by a symbolic ref such as `HEAD` or a branch, which can
-    /// move afterwards, so this is the commit resolved at publication.
-    git_ref: String,
+    /// move afterwards, so this is the commit resolved at publication. `None`
+    /// when it was published before the repository had a commit.
+    git_ref: Option<String>,
     worktree: Option<String>,
     /// Whether the published snapshot held uncommitted changes, in which case
     /// no commit represents what was published.
@@ -4141,16 +4152,16 @@ struct LandedWork {
     integration: Option<IntegrationEvidence>,
 }
 
-/// The one ChangeSet of an intent that has not been superseded, if it names a
-/// commit.
+/// The one ChangeSet of an intent that has not been superseded, whether or not
+/// it names a commit.
 fn current_candidate(conn: &Connection, intent_id: &str) -> Result<Option<CurrentCandidate>> {
     Ok(conn
         .query_row(
             "SELECT id, git_ref, worktree, provenance_json FROM changesets
-             WHERE intent_id = ?1 AND status <> 'SUPERSEDED' AND git_ref IS NOT NULL",
+             WHERE intent_id = ?1 AND status <> 'SUPERSEDED'",
             [intent_id],
             |row| {
-                let stored_ref: String = row.get(1)?;
+                let stored_ref: Option<String> = row.get(1)?;
                 let provenance: String = row.get(3)?;
                 let git = serde_json::from_str::<Value>(&provenance)
                     .ok()
@@ -4158,10 +4169,7 @@ fn current_candidate(conn: &Connection, intent_id: &str) -> Result<Option<Curren
                     .unwrap_or(Value::Null);
                 Ok(CurrentCandidate {
                     changeset_id: row.get(0)?,
-                    git_ref: git["candidate"]
-                        .as_str()
-                        .map(str::to_string)
-                        .unwrap_or(stored_ref),
+                    git_ref: git["candidate"].as_str().map(str::to_string).or(stored_ref),
                     worktree: row.get(2)?,
                     dirty: git["dirty"].as_bool().unwrap_or(false),
                 })
