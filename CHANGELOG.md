@@ -9,6 +9,18 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-24
+
+This is a minor version because Foremerge no longer migrates a ledger as a side
+effect of opening it: a command that meets an older ledger now refuses it with
+`MIGRATION_REQUIRED` until `foremerge ledger migrate` runs. The ledger schema is
+unchanged since 0.4.0, so upgrading from any 0.4.x or 0.5.x build needs no
+migration and both read the same coordination store; only a ledger last opened
+by 0.3.x needs the migration step under Changed. This release also speaks MCP
+protocol revision `2026-07-28`, records pull requests that landed as a squash
+or rebase merge, stops recording advisory conflicts against work whose agent
+has stopped, and lets an agent close work that landed without acceptance.
+
 ### Added
 
 - `foremerge mcp` now speaks MCP protocol revision `2026-07-28` alongside
@@ -1098,7 +1110,8 @@ schema 4 store rather than migrate it backwards.
 - Apache-2.0 licensing, contribution and security policies, CI, release checks,
   limitations, roadmap, and a reproducible benchmark specification.
 
-[Unreleased]: https://github.com/naw103/foremerge/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/naw103/foremerge/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/naw103/foremerge/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/naw103/foremerge/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/naw103/foremerge/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/naw103/foremerge/compare/v0.4.2...v0.4.3
