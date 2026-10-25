@@ -65,8 +65,9 @@ changes when they are called out here with a migration note.
   that landed through a squash or rebase merge closes too; otherwise the call
   is refused with `TARGET_DIVERGED`. The candidate is the commit resolved when
   the ChangeSet was published, not wherever a ref such as `HEAD` points later,
-  and a ChangeSet published with uncommitted changes is refused with
-  `STALE_CHANGESET` until the work is committed and published again. The event
+  and a ChangeSet published with uncommitted changes, or before the
+  repository's first commit, is refused with `STALE_CHANGESET` until the work
+  is committed and published again. The event
   records how the landing was shown. The intent ends
   `DISCARDED` and its ChangeSet keeps its status: this records where the work
   went on the `work.discarded` event and never marks anything `ACCEPTED` or

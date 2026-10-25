@@ -381,10 +381,11 @@ fm_curl -H 'content-type: application/json' \
 
 Add `"landed_ref":"main"` to the discard body for work that reached Git
 without going through acceptance. The ref must resolve to a commit that holds
-the intent's published ChangeSet commit, if it has one, by ancestry or by
-content as `record_commit` checks it, so a squash or rebase landing qualifies.
-The candidate is the commit resolved at publication, and a ChangeSet published
-with uncommitted changes is refused with `STALE_CHANGESET`.
+the intent's published ChangeSet commit, if it has published one, by ancestry
+or by content as `record_commit` checks it, so a squash or rebase landing
+qualifies. The candidate is the commit resolved at publication, and a ChangeSet
+published with uncommitted changes, or before the repository's first commit,
+is refused with `STALE_CHANGESET`.
 The intent still ends `DISCARDED`; the commit and how it was shown are recorded
 on the `work.discarded` event.
 

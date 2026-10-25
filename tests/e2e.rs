@@ -4113,6 +4113,52 @@ fn landed_work_published_with_uncommitted_changes_is_refused() {
     );
 }
 
+/// A ChangeSet published before a repository's first commit names no commit at
+/// all, so nothing can show that it landed. It is still the intent's published
+/// work: closing it as landed is refused like a dirty snapshot, not treated as
+/// though nothing had been published. Found in the review of the stopped-work
+/// change.
+#[test]
+fn landed_work_published_before_the_first_commit_is_refused() {
+    let temp = tempfile::tempdir().expect("create fixture directory");
+    let root = temp.path().join("repo");
+    fs::create_dir(&root).expect("create repository directory");
+    git(&root, ["init", "--quiet"]);
+    git(&root, ["config", "user.name", "Foremerge Test"]);
+    git(
+        &root,
+        ["config", "user.email", "foremerge-test@example.invalid"],
+    );
+    git(&root, ["config", "commit.gpgsign", "false"]);
+    let (agent_id, intent_id) = create_active_test_work(&root, "unborn-agent", "unborn");
+    fs::write(root.join("published.txt"), "published work\n").expect("write published work");
+    let changeset = publish_test_revision(&root, &agent_id, &intent_id, "Published unborn");
+    let shown = cli_success(&root, None, ["changeset", "show", changeset.as_str()]);
+    assert!(
+        shown["data"]["git_ref"].is_null(),
+        "a ChangeSet published before the first commit names no commit: {shown}"
+    );
+
+    fs::remove_file(root.join("published.txt")).expect("remove published work");
+    fs::write(root.join("unrelated.txt"), "unrelated\n").expect("write unrelated work");
+    git(&root, ["add", "unrelated.txt"]);
+    git(&root, ["commit", "--quiet", "-m", "unrelated first commit"]);
+
+    let refused = cli_failure(&root, None, close_as_landed(&intent_id, &agent_id, "HEAD"));
+    assert_eq!(refused["error"]["code"], "STALE_CHANGESET", "{refused}");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(changeset.as_str())),
+        "the refusal names the published ChangeSet: {refused}"
+    );
+    let status = cli_success(&root, None, ["intent", "show", intent_id.as_str()]);
+    assert_eq!(
+        status["data"]["intent"]["status"], "PROVISIONAL",
+        "{status}"
+    );
+}
+
 /// Findings skipped while an intent's owner had stopped are recorded once the
 /// intent is live again. Verification is one way back: it moves the intent to
 /// VALIDATED without its owner calling anything, and a validated intent is no
