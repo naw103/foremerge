@@ -23,15 +23,15 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="/blog/blog.css">
-<meta property="article:published_time" content="2026-10-14T09:00:00Z">
-<meta property="article:modified_time" content="2026-10-14T09:00:00Z">
+<meta property="article:published_time" content="2026-10-07T09:00:00Z">
+<meta property="article:modified_time" content="2026-10-07T09:00:00Z">
 <meta property="article:author" content="Nick Woodhead">
 <meta property="article:tag" content="ai">
 <meta property="article:tag" content="git">
 <meta property="article:tag" content="devtools">
 <meta property="article:tag" content="productivity">
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"BlogPosting","headline":"Running multiple Claude Code agents in parallel: what worktrees cannot see","description":"Give each agent its own worktree, split the work by what each task changes, and test the merged result. That handles files. It does not handle two plans that cannot both be true, and Git will merge those without a word.","datePublished":"2026-10-14","dateModified":"2026-10-14","author":{"@type":"Person","name":"Nick Woodhead","url":"https://github.com/naw103"},"publisher":{"@type":"Organization","name":"Foremerge","logo":{"@type":"ImageObject","url":"https://foremerge.com/brand/png/mark-color-512.png"}},"mainEntityOfPage":{"@type":"WebPage","@id":"https://foremerge.com/blog/running-multiple-claude-code-agents-in-parallel/"},"image":"https://foremerge.com/blog/og/running-multiple-claude-code-agents-in-parallel.png","inLanguage":"en"}
+{"@context":"https://schema.org","@type":"BlogPosting","headline":"Running multiple Claude Code agents in parallel: what worktrees cannot see","description":"Give each agent its own worktree, split the work by what each task changes, and test the merged result. That handles files. It does not handle two plans that cannot both be true, and Git will merge those without a word.","datePublished":"2026-10-07","dateModified":"2026-10-07","author":{"@type":"Person","name":"Nick Woodhead","url":"https://github.com/naw103"},"publisher":{"@type":"Organization","name":"Foremerge","logo":{"@type":"ImageObject","url":"https://foremerge.com/brand/png/mark-color-512.png"}},"mainEntityOfPage":{"@type":"WebPage","@id":"https://foremerge.com/blog/running-multiple-claude-code-agents-in-parallel/"},"image":"https://foremerge.com/blog/og/running-multiple-claude-code-agents-in-parallel.png","inLanguage":"en"}
 </script>
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Foremerge","item":"https://foremerge.com/"},{"@type":"ListItem","position":2,"name":"Blog","item":"https://foremerge.com/blog/"},{"@type":"ListItem","position":3,"name":"Running multiple Claude Code agents in parallel: what worktrees cannot see","item":"https://foremerge.com/blog/running-multiple-claude-code-agents-in-parallel/"}]}
@@ -64,7 +64,7 @@
     <p class="eyebrow"><a href="/blog/">Blog</a></p>
     <h1>Running multiple Claude Code agents in parallel: what worktrees cannot see</h1>
     <p class="standfirst">Give each agent its own worktree, split the work by what each task changes, and test the merged result. That handles files. It does not handle two plans that cannot both be true, and Git will merge those without a word.</p>
-    <div class="byline"><span class="meta">Nick Woodhead<span class="dot">&middot;</span>14 October 2026</span><span class="tags"><span class="tag">ai</span><span class="tag">git</span><span class="tag">devtools</span><span class="tag">productivity</span></span></div>
+    <div class="byline"><span class="meta">Nick Woodhead<span class="dot">&middot;</span>7 October 2026</span><span class="tags"><span class="tag">ai</span><span class="tag">git</span><span class="tag">devtools</span><span class="tag">productivity</span></span></div>
     <nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><ol><li><a href="#the-setup-one-agent-one-worktree-one-branch">The setup: one agent, one worktree, one branch</a></li><li><a href="#what-git-can-see-and-what-it-cannot">What Git can see, and what it cannot</a></li><li><a href="#the-canonical-failure-replace-versus-extend">The canonical failure: replace versus extend</a></li><li><a href="#same-file-is-not-the-same-as-collision">Same file is not the same as collision</a></li><li><a href="#how-to-split-work-between-parallel-agents">How to split work between parallel agents</a></li><li><a href="#the-part-git-cannot-see-compare-plans-before-code">The part Git cannot see: compare plans before code</a></li><li><a href="#what-it-does-not-catch">What it does not catch</a></li><li><a href="#frequently-asked-questions">Frequently asked questions</a></li><li><a href="#if-you-run-more-than-one-agent">If you run more than one agent</a></li></ol></nav>
     <div class="body">
 <p>If you only ever run one coding agent, you do not need most of this. You're also probably working inefficiently.</p>

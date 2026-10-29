@@ -7,17 +7,38 @@
     <language>en</language>
     <atom:link href="https://foremerge.com/blog/feed.xml" rel="self" type="application/rss+xml"/>
     <item>
+      <title>Coding agents stop mid-task. Our coordination store had 3,896 stale conflicts</title>
+      <link>https://foremerge.com/blog/coding-agents-stop-mid-task/</link>
+      <guid isPermaLink="true">https://foremerge.com/blog/coding-agents-stop-mid-task/</guid>
+      <pubDate>Thu, 29 Oct 2026 09:00:00 +0000</pubDate>
+      <description>Agent sessions end without closing their work, and a coordination store that treats abandoned plans as live fills up with noise. What Foremerge 0.6.0 changes, and why.</description>
+    </item>
+    <item>
+      <title>What is an intent conflict?</title>
+      <link>https://foremerge.com/blog/what-is-an-intent-conflict/</link>
+      <guid isPermaLink="true">https://foremerge.com/blog/what-is-an-intent-conflict/</guid>
+      <pubDate>Wed, 21 Oct 2026 09:00:00 +0000</pubDate>
+      <description>An intent conflict is two declared plans that cannot both be true. Git cannot see one, because it compares lines, not plans. A definition, an example and what it is not.</description>
+    </item>
+    <item>
+      <title>Worktrees do not remove the collision. They move it to merge time.</title>
+      <link>https://foremerge.com/blog/worktrees-move-the-collision-to-merge-time/</link>
+      <guid isPermaLink="true">https://foremerge.com/blog/worktrees-move-the-collision-to-merge-time/</guid>
+      <pubDate>Wed, 14 Oct 2026 09:00:00 +0000</pubDate>
+      <description>Git worktrees stop agents overwriting each other&#x27;s files. The collision between their plans is still there, and you find it at merge time. Here is a run you can repeat.</description>
+    </item>
+    <item>
       <title>Running multiple Claude Code agents in parallel: what worktrees cannot see</title>
       <link>https://foremerge.com/blog/running-multiple-claude-code-agents-in-parallel/</link>
       <guid isPermaLink="true">https://foremerge.com/blog/running-multiple-claude-code-agents-in-parallel/</guid>
-      <pubDate>Wed, 14 Oct 2026 09:00:00 +0000</pubDate>
+      <pubDate>Wed, 07 Oct 2026 09:00:00 +0000</pubDate>
       <description>Give each agent its own worktree, split the work by what each task changes, and test the merged result. That handles files. It does not handle two plans that cannot both be true, and Git will merge those without a word.</description>
     </item>
     <item>
       <title>AI agents introduced several new layers to the development stack. You are probably missing this one.</title>
       <link>https://foremerge.com/blog/the-coordination-layer/</link>
       <guid isPermaLink="true">https://foremerge.com/blog/the-coordination-layer/</guid>
-      <pubDate>Tue, 15 Sep 2026 09:00:00 +0000</pubDate>
+      <pubDate>Mon, 21 Sep 2026 09:00:00 +0000</pubDate>
       <description>The stack grew five layers in two years, and each was adopted fast because its absence hurt the same day. The sixth one&#x27;s absence hurts three days later. That is the only reason you are probably missing it.</description>
     </item>
     <item>
