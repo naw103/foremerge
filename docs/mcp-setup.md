@@ -463,6 +463,10 @@ line. That guidance is suppressed when stdin is a pipe, so client sessions are
 unaffected. To read coordination state as a person, use the CLI instead, for
 example `foremerge status` or `foremerge agent list`.
 
+A line that parses but is not a JSON-RPC 2.0 request, such as `{}` or a message
+with `"jsonrpc": "1.0"`, is answered with `-32600`, alone or inside a batch.
+Only a valid notification gets no reply.
+
 The server implements MCP protocol revisions `2026-07-28` and `2025-11-25`, and
 decides which one applies for each request rather than for the whole process.
 Notifications have no response in either.
@@ -497,8 +501,10 @@ Under `2026-07-28`:
   `error.data` naming `supported` and `requested`.
 
 Under `2025-11-25`, the server behaves as it always has: it answers
-`initialize` with `2025-11-25` whatever the client asks for, responds to
-`ping`, and its results carry no `resultType` or caching hints. `initialize`
+`initialize` with the client's revision when that is `2025-11-25`, `2025-06-18`,
+`2025-03-26` or `2024-11-05`, and with `2025-11-25` for anything else,
+`2026-07-28` included. It responds to `ping`, accepts JSON-RPC batches, and its
+results carry no `resultType` or caching hints. `initialize`
 stays the legacy handshake unless it carries a complete `2026-07-28` envelope,
 in which case it answers `-32601`.
 

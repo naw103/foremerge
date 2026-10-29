@@ -9,6 +9,19 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+### Fixed
+
+- `initialize` now answers with the revision the client asked for when the
+  server can serve it (`2025-11-25`, `2025-06-18`, `2025-03-26` or
+  `2024-11-05`), instead of always answering `2025-11-25`. A client on an older
+  revision no longer finds no version in common and disconnects. Any other
+  request, `2026-07-28` included, still gets `2025-11-25`. The server now also
+  accepts JSON-RPC batches, which `2025-03-26` requires a server to receive.
+- A message that is not a valid JSON-RPC 2.0 request, alone or in a batch, is
+  answered with `-32600`. One without an `id`, such as `{}`, was dropped
+  silently as though it were a notification, and one with `"jsonrpc": "1.0"`
+  was served. Only a valid notification goes unanswered now.
+
 ## [0.6.0] - 2026-10-24
 
 This is a minor version because Foremerge no longer migrates a ledger as a side

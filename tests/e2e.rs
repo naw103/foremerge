@@ -1375,6 +1375,159 @@ fn status_renders_one_screen_in_text_and_a_typed_json_envelope() {
     assert_eq!(data["changesets"][0]["ids"][0], changeset_id);
 }
 
+/// A session against a throwaway ledger, through the shared `mcp_exchange`.
+fn scratch_mcp_exchange(requests: &[Value]) -> Vec<Value> {
+    let temp = tempfile::tempdir().expect("create MCP fixture");
+    let database = temp.path().join("mcp.sqlite3");
+    mcp_exchange(temp.path(), Some(&database), requests)
+}
+
+fn initialize_with(protocol_version: Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": protocol_version,
+            "capabilities": {},
+            "clientInfo": { "name": "foremerge-e2e", "version": "1" }
+        }
+    })
+}
+
+#[test]
+fn real_mcp_initialize_echoes_each_older_revision_it_can_serve() {
+    for requested in ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"] {
+        let responses = scratch_mcp_exchange(&[
+            initialize_with(json!(requested)),
+            json!({ "jsonrpc": "2.0", "method": "notifications/initialized", "params": {} }),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "register_agent",
+                    "arguments": { "name": "older-revision-agent", "model": "test-model" }
+                }
+            }),
+        ]);
+        assert_eq!(responses.len(), 3, "{requested}: {responses:?}");
+        assert_eq!(
+            responses[0]["result"]["protocolVersion"], requested,
+            "a client on {requested} must get {requested} back"
+        );
+        assert_eq!(responses[0]["result"]["serverInfo"]["name"], "foremerge");
+        assert!(
+            responses[1]["result"]["tools"]
+                .as_array()
+                .is_some_and(|tools| !tools.is_empty()),
+            "{requested}: the session must go on to serve tools: {responses:?}"
+        );
+        // A client on an older revision reads `content`; `structuredContent`
+        // arrived in 2025-06-18 and an older client ignores it.
+        let called = &responses[2]["result"];
+        assert_eq!(called["isError"], false, "{requested}: {responses:?}");
+        assert_eq!(
+            called["content"][0]["type"], "text",
+            "{requested}: {called}"
+        );
+        let text = called["content"][0]["text"]
+            .as_str()
+            .expect("tools/call text content");
+        let registered: Value = serde_json::from_str(text).expect("the text content is JSON");
+        assert!(
+            registered["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("agt_")),
+            "{requested}: {called}"
+        );
+    }
+}
+
+#[test]
+fn real_mcp_initialize_answers_an_unknown_or_modern_revision_with_the_newest_legacy_one() {
+    for requested in [
+        json!("2026-07-28"),
+        json!("2099-01-01"),
+        json!("2024-10-07"),
+        json!("not-a-version"),
+        json!(20241105),
+        Value::Null,
+    ] {
+        let responses = scratch_mcp_exchange(&[initialize_with(requested.clone())]);
+        assert_eq!(responses.len(), 1, "{requested}: {responses:?}");
+        assert_eq!(
+            responses[0]["result"]["protocolVersion"], "2025-11-25",
+            "asked for {requested}: {responses:?}"
+        );
+    }
+}
+
+#[test]
+fn real_mcp_answers_a_json_rpc_batch_because_2025_03_26_requires_it() {
+    let responses = scratch_mcp_exchange(&[
+        initialize_with(json!("2025-03-26")),
+        json!([
+            { "jsonrpc": "2.0", "method": "notifications/initialized", "params": {} },
+            { "jsonrpc": "2.0", "id": "a", "method": "ping" },
+            { "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} }
+        ]),
+    ]);
+    assert_eq!(responses.len(), 2, "{responses:?}");
+    assert_eq!(responses[0]["result"]["protocolVersion"], "2025-03-26");
+    let batch = responses[1].as_array().expect("a batch gets an array back");
+    assert_eq!(batch.len(), 2, "the notification gets no entry: {batch:?}");
+    assert_eq!(batch[0]["id"], "a");
+    assert_eq!(batch[1]["id"], 2);
+    assert!(batch[1]["result"]["tools"].is_array());
+}
+
+/// JSON-RPC 2.0 answers every invalid request with `-32600`, alone or inside a
+/// batch, and leaves only valid notifications unanswered. Found in the review
+/// of the batch support: an object without an `id` was dropped as though it
+/// were a notification, and `"jsonrpc": "1.0"` was served.
+#[test]
+fn real_mcp_answers_invalid_requests_with_invalid_request_alone_and_in_a_batch() {
+    let ping = json!({ "jsonrpc": "2.0", "id": "p", "method": "ping" });
+    let responses = scratch_mcp_exchange(&[
+        initialize_with(json!("2025-03-26")),
+        json!([{}]),
+        json!([ping, { "foo": "boo" }]),
+        json!([{ "jsonrpc": "1.0", "id": 7, "method": "ping" }]),
+        json!({}),
+        json!({ "jsonrpc": "1.0", "id": 9, "method": "ping" }),
+        json!([{ "jsonrpc": "2.0", "method": "notifications/initialized" }]),
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+    ]);
+    assert_eq!(
+        responses.len(),
+        6,
+        "only the two valid notifications go unanswered: {responses:?}"
+    );
+    let invalid = |response: &Value, id: Value| {
+        assert_eq!(response["error"]["code"], -32600, "{response}");
+        assert_eq!(response["id"], id, "{response}");
+    };
+
+    let empty_object = responses[1].as_array().expect("a batch gets an array back");
+    assert_eq!(empty_object.len(), 1, "{empty_object:?}");
+    invalid(&empty_object[0], Value::Null);
+
+    let mixed = responses[2].as_array().expect("a batch gets an array back");
+    assert_eq!(mixed.len(), 2, "{mixed:?}");
+    assert_eq!(mixed[0]["id"], "p");
+    assert!(mixed[0]["result"].is_object(), "{mixed:?}");
+    invalid(&mixed[1], Value::Null);
+
+    let old_version = responses[3].as_array().expect("a batch gets an array back");
+    assert_eq!(old_version.len(), 1, "{old_version:?}");
+    invalid(&old_version[0], json!(7));
+
+    invalid(&responses[4], Value::Null);
+    invalid(&responses[5], json!(9));
+}
+
 #[test]
 fn real_mcp_stdio_initializes_lists_tools_and_calls_one() {
     let temp = tempfile::tempdir().expect("create MCP fixture");
