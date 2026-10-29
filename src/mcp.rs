@@ -379,8 +379,15 @@ pub async fn handle_message(service: &Foremerge, message: Value) -> Option<Value
 /// refusing one gains nothing. `initialize` may not travel in a batch, so it is
 /// refused there. Entries are answered in order, and a batch holding only
 /// notifications gets no reply at all, as JSON-RPC 2.0 requires.
+///
+/// Every message, alone or in a batch, is checked against JSON-RPC 2.0's
+/// request object before it is served, so an invalid one is answered with
+/// `-32600` rather than mistaken for a notification and dropped.
 async fn dispatch(backend: Backend<'_>, message: Value) -> Option<Value> {
     let Value::Array(batch) = message else {
+        if let Some(invalid) = invalid_request(&message) {
+            return Some(invalid);
+        }
         return respond(backend, message).await;
     };
     if batch.is_empty() {
@@ -392,12 +399,8 @@ async fn dispatch(backend: Backend<'_>, message: Value) -> Option<Value> {
     }
     let mut responses = Vec::new();
     for entry in batch {
-        let response = if !entry.is_object() {
-            Some(jsonrpc_error(
-                Value::Null,
-                -32600,
-                "invalid request: a batch entry must be an object",
-            ))
+        let response = if let Some(invalid) = invalid_request(&entry) {
+            Some(invalid)
         } else if entry.get("method").and_then(Value::as_str) == Some("initialize") {
             entry.get("id").cloned().map(|id| {
                 jsonrpc_error(
@@ -412,6 +415,46 @@ async fn dispatch(backend: Backend<'_>, message: Value) -> Option<Value> {
         responses.extend(response);
     }
     (!responses.is_empty()).then_some(Value::Array(responses))
+}
+
+/// The `-32600` answer for a message that is not a JSON-RPC 2.0 request or
+/// notification, or `None` when it is one.
+///
+/// A request needs `"jsonrpc": "2.0"` and a string `method`; `params`, when
+/// present, must be an object or an array; and `id`, when present, must be a
+/// string, a number or null. A message without an `id` is a notification only
+/// if it is otherwise valid, so this runs before anything treats a missing
+/// `id` as a reason to stay silent. The answer carries the message's `id` when
+/// that `id` is well formed, and null otherwise.
+fn invalid_request(message: &Value) -> Option<Value> {
+    let invalid = |id: Value, reason: &str| {
+        Some(jsonrpc_error(
+            id,
+            -32600,
+            &format!("invalid request: {reason}"),
+        ))
+    };
+    let Some(object) = message.as_object() else {
+        return invalid(Value::Null, "a message must be a JSON object");
+    };
+    let id = match object.get("id") {
+        None => Value::Null,
+        Some(id @ (Value::String(_) | Value::Number(_) | Value::Null)) => id.clone(),
+        Some(_) => return invalid(Value::Null, "id must be a string, a number or null"),
+    };
+    if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return invalid(id, "jsonrpc must be \"2.0\"");
+    }
+    if !object.get("method").is_some_and(Value::is_string) {
+        return invalid(id, "method must be a string");
+    }
+    if object
+        .get("params")
+        .is_some_and(|params| !params.is_object() && !params.is_array())
+    {
+        return invalid(id, "params must be an object or an array");
+    }
+    None
 }
 
 /// Which MCP revision one request is served under.
@@ -1778,6 +1821,72 @@ mod tests {
         assert!(only_notifications.is_none());
         let empty = handle_message(&service, json!([])).await.unwrap();
         assert_eq!(empty["error"]["code"], -32600);
+    }
+
+    #[tokio::test]
+    async fn an_invalid_request_is_answered_with_invalid_request_alone_or_in_a_batch() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        // (message, the id the answer must carry)
+        let cases = [
+            (json!({}), Value::Null),
+            (json!({ "foo": "boo" }), Value::Null),
+            (json!(42), Value::Null),
+            (json!("ping"), Value::Null),
+            (json!({ "id": 1, "method": "ping" }), json!(1)),
+            (
+                json!({ "jsonrpc": "1.0", "id": "x", "method": "ping" }),
+                json!("x"),
+            ),
+            (
+                json!({ "jsonrpc": 2.0, "id": 2, "method": "ping" }),
+                json!(2),
+            ),
+            (json!({ "jsonrpc": "2.0", "id": 3 }), json!(3)),
+            (json!({ "jsonrpc": "2.0", "id": 4, "method": 7 }), json!(4)),
+            (
+                json!({ "jsonrpc": "2.0", "id": 5, "method": "ping", "params": "bar" }),
+                json!(5),
+            ),
+            (
+                json!({ "jsonrpc": "2.0", "id": { "nested": 1 }, "method": "ping" }),
+                Value::Null,
+            ),
+            (
+                json!({ "jsonrpc": "2.0", "id": true, "method": "ping" }),
+                Value::Null,
+            ),
+            (
+                json!({ "jsonrpc": "1.0", "method": "notifications/initialized" }),
+                Value::Null,
+            ),
+        ];
+        for (message, id) in cases {
+            let alone = handle_message(&service, message.clone()).await;
+            let alone = alone.unwrap_or_else(|| panic!("{message} went unanswered"));
+            assert_eq!(alone["error"]["code"], -32600, "{message}: {alone}");
+            assert_eq!(alone["id"], id, "{message}: {alone}");
+
+            let batch = handle_message(&service, json!([message.clone()]))
+                .await
+                .unwrap_or_else(|| panic!("[{message}] went unanswered"));
+            assert_eq!(batch, json!([alone]), "[{message}]");
+        }
+
+        // Valid requests and notifications are unaffected, `null` and array
+        // `params` included.
+        let ping = handle_message(
+            &service,
+            json!({ "jsonrpc": "2.0", "id": null, "method": "ping", "params": [] }),
+        )
+        .await
+        .unwrap();
+        assert!(ping["result"].is_object(), "{ping}");
+        let notification = handle_message(
+            &service,
+            json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        )
+        .await;
+        assert!(notification.is_none());
     }
 
     const LEDGER: &str = "/repo/.git/foremerge/state.sqlite3";

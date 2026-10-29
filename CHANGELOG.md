@@ -17,6 +17,10 @@ changes when they are called out here with a migration note.
   revision no longer finds no version in common and disconnects. Any other
   request, `2026-07-28` included, still gets `2025-11-25`. The server now also
   accepts JSON-RPC batches, which `2025-03-26` requires a server to receive.
+- A message that is not a valid JSON-RPC 2.0 request, alone or in a batch, is
+  answered with `-32600`. One without an `id`, such as `{}`, was dropped
+  silently as though it were a notification, and one with `"jsonrpc": "1.0"`
+  was served. Only a valid notification goes unanswered now.
 
 ## [0.6.0] - 2026-10-24
 
