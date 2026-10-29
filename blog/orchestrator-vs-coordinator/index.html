@@ -73,7 +73,7 @@
 <p>That single structural fact drives everything else about how the two behave.</p>
 <h2 id="what-an-orchestrator-does">What an orchestrator does</h2>
 <p>It owns the run loop. Concretely: spawning sessions, placing each one somewhere isolated (a worktree, a container, a cloud sandbox), deciding what runs next and in what order, restarting what died, routing prompts and results, and giving you one screen showing which of your fourteen sessions are alive and which are waiting on you.</p>
-<p>This is real work and it becomes its own job the moment you pass two or three agents. The ecosystem here is growing fast and includes both standalone session managers, <code>claude-squad</code>, <code>dmux</code>, <code>amux</code>, <code>agent-deck</code> and their neighbors, and in-session fan-out inside a single agent, like Claude Code's subagents or a workflow script that runs a dozen tasks in parallel.</p>
+<p>This is real work and it becomes its own job the moment you pass two or three agents. The ecosystem here is growing fast and includes both standalone session managers, <code>claude-squad</code>, <code>dmux</code>, <code>amux</code>, <code>agent-deck</code> and their neighbors, and parallel subagents run inside a single session, like Claude Code's subagents or a workflow script that runs a dozen tasks in parallel.</p>
 <p>An orchestrator's authority is imperative. It can start things and stop things. Its input is tasks. Its state is sessions and processes. Its question is <strong>who is running what right now?</strong></p>
 <h2 id="what-a-coordinator-does">What a coordinator does</h2>
 <p>It never starts or stops anything. Its input is not tasks but declarations: before an agent edits, it states what it is about to change, in a form precise enough to check.</p>
@@ -97,6 +97,7 @@
     &quot;detected_before_code&quot;: true
   }
 }</code></pre>
+<p>Same result on 0.6.0.</p>
 <p>Note what is absent. No process id, no session, no queue position, no instruction to either agent. The coordinator does not know whether either agent is currently running, and does not need to. Its question is <strong>can the work in flight all be true at once?</strong></p>
 <p>Its authority is evidentiary rather than imperative. It cannot stop a keyboard. What it can do is withhold its blessing at the end and say exactly why:</p>
 <pre><code>BLOCKING_CONFLICT: 1 unresolved HIGH intent conflict(s);
@@ -128,7 +129,7 @@ run against this ChangeSet)</code></pre>
   <p>The open-source coordination protocol for parallel coding agents, built above Git. Agents declare intent and semantic scopes before writing code, so plans that cannot both be true collide in a queryable store instead of in your merge. One Rust binary, Apache-2.0, local-first.</p>
   <div class="install mono"><span class="p">$ </span>curl -fsSL https://foremerge.com/install.sh | sh</div>
 </div>
-    <div class="more"><p class="eyebrow">More from the blog</p><div class="posts"><a class="post-card" href="/blog/the-coordination-layer/"><span class="meta">15 September 2026</span><h2>AI agents introduced several new layers to the development stack. You are probably missing this one.</h2><p>The stack grew five layers in two years, and each was adopted fast because its absence hurt the same day. The sixth one&#x27;s absence hurts three days later. That is the only reason you are probably missing it.</p></a><a class="post-card" href="/blog/31-questions-coordinating-parallel-coding-agents/"><span class="meta">4 September 2026</span><h2>31 hard questions about coordinating parallel coding agents, answered</h2><p>A reader went through the Foremerge source and asked 31 questions about design, trust, and roadmap. The full maintainer Q&amp;A, lightly edited.</p></a></div></div>
+    <div class="more"><p class="eyebrow">More from the blog</p><div class="posts"><a class="post-card" href="/blog/the-coordination-layer/"><span class="meta">21 September 2026</span><h2>AI agents introduced several new layers to the development stack. You are probably missing this one.</h2><p>The stack grew five layers in two years, and each was adopted fast because its absence hurt the same day. The sixth one&#x27;s absence hurts three days later. That is the only reason you are probably missing it.</p></a><a class="post-card" href="/blog/31-questions-coordinating-parallel-coding-agents/"><span class="meta">4 September 2026</span><h2>31 hard questions about coordinating parallel coding agents, answered</h2><p>A reader went through the Foremerge source and asked 31 questions about design, trust, and roadmap. The full maintainer Q&amp;A, lightly edited.</p></a></div></div>
   </div>
 </article>
 </div>
