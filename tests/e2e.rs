@@ -1375,6 +1375,87 @@ fn status_renders_one_screen_in_text_and_a_typed_json_envelope() {
     assert_eq!(data["changesets"][0]["ids"][0], changeset_id);
 }
 
+/// A session against a throwaway ledger, through the shared `mcp_exchange`.
+fn scratch_mcp_exchange(requests: &[Value]) -> Vec<Value> {
+    let temp = tempfile::tempdir().expect("create MCP fixture");
+    let database = temp.path().join("mcp.sqlite3");
+    mcp_exchange(temp.path(), Some(&database), requests)
+}
+
+fn initialize_with(protocol_version: Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": protocol_version,
+            "capabilities": {},
+            "clientInfo": { "name": "foremerge-e2e", "version": "1" }
+        }
+    })
+}
+
+#[test]
+fn real_mcp_initialize_echoes_each_older_revision_it_can_serve() {
+    for requested in ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"] {
+        let responses = scratch_mcp_exchange(&[
+            initialize_with(json!(requested)),
+            json!({ "jsonrpc": "2.0", "method": "notifications/initialized", "params": {} }),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} }),
+        ]);
+        assert_eq!(responses.len(), 2, "{requested}: {responses:?}");
+        assert_eq!(
+            responses[0]["result"]["protocolVersion"], requested,
+            "a client on {requested} must get {requested} back"
+        );
+        assert_eq!(responses[0]["result"]["serverInfo"]["name"], "foremerge");
+        assert!(
+            responses[1]["result"]["tools"]
+                .as_array()
+                .is_some_and(|tools| !tools.is_empty()),
+            "{requested}: the session must go on to serve tools: {responses:?}"
+        );
+    }
+}
+
+#[test]
+fn real_mcp_initialize_answers_an_unknown_or_modern_revision_with_the_newest_legacy_one() {
+    for requested in [
+        json!("2026-07-28"),
+        json!("2099-01-01"),
+        json!("2024-10-07"),
+        json!("not-a-version"),
+        json!(20241105),
+        Value::Null,
+    ] {
+        let responses = scratch_mcp_exchange(&[initialize_with(requested.clone())]);
+        assert_eq!(responses.len(), 1, "{requested}: {responses:?}");
+        assert_eq!(
+            responses[0]["result"]["protocolVersion"], "2025-11-25",
+            "asked for {requested}: {responses:?}"
+        );
+    }
+}
+
+#[test]
+fn real_mcp_answers_a_json_rpc_batch_because_2025_03_26_requires_it() {
+    let responses = scratch_mcp_exchange(&[
+        initialize_with(json!("2025-03-26")),
+        json!([
+            { "jsonrpc": "2.0", "method": "notifications/initialized", "params": {} },
+            { "jsonrpc": "2.0", "id": "a", "method": "ping" },
+            { "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} }
+        ]),
+    ]);
+    assert_eq!(responses.len(), 2, "{responses:?}");
+    assert_eq!(responses[0]["result"]["protocolVersion"], "2025-03-26");
+    let batch = responses[1].as_array().expect("a batch gets an array back");
+    assert_eq!(batch.len(), 2, "the notification gets no entry: {batch:?}");
+    assert_eq!(batch[0]["id"], "a");
+    assert_eq!(batch[1]["id"], 2);
+    assert!(batch[1]["result"]["tools"].is_array());
+}
+
 #[test]
 fn real_mcp_stdio_initializes_lists_tools_and_calls_one() {
     let temp = tempfile::tempdir().expect("create MCP fixture");

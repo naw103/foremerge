@@ -6,14 +6,41 @@ use std::io::IsTerminal;
 use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-/// The legacy MCP revision: a session opened by `initialize`.
+/// The newest legacy MCP revision: a session opened by `initialize`.
 ///
-/// `initialize` answers with this whatever the client asks for. It used to
-/// echo `2026-07-28` back while speaking this revision's wire shape, and a
-/// client that speaks only the newer era took that answer at face value. The
-/// newer revision has no handshake at all, so this is the only version
-/// `initialize` can honestly name.
+/// `initialize` answers with this when the client asks for a revision the
+/// server cannot serve. It used to echo `2026-07-28` back while speaking this
+/// revision's wire shape, and a client that speaks only the newer era took that
+/// answer at face value. The newer revision has no handshake at all, so it is
+/// never one `initialize` can honestly name.
 const LEGACY_PROTOCOL: &str = "2025-11-25";
+
+/// Every legacy revision `initialize` may answer with, newest first.
+///
+/// One wire shape serves all four. The older revisions lack only things this
+/// server adds and an older client ignores: tool `title` and
+/// `structuredContent` (2025-06-18) and tool `annotations` (2025-03-26). The
+/// one thing 2025-03-26 requires that later revisions dropped, receiving
+/// JSON-RPC batches, is handled in [`dispatch`]. `2026-07-28` is not here: it
+/// is a different era, not an older legacy revision.
+const LEGACY_PROTOCOLS: [&str; 4] = [LEGACY_PROTOCOL, "2025-06-18", "2025-03-26", "2024-11-05"];
+
+/// The revision to answer `initialize` with.
+///
+/// MCP asks a server to answer with the client's own revision when it speaks
+/// it, and with another it speaks, normally its newest, otherwise. Always
+/// answering the newest turned away strict clients on an older revision.
+fn negotiate_protocol(params: &Value) -> &'static str {
+    params
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .and_then(|requested| {
+            LEGACY_PROTOCOLS
+                .into_iter()
+                .find(|supported| *supported == requested)
+        })
+        .unwrap_or(LEGACY_PROTOCOL)
+}
 
 /// The modern MCP revision: no session, and every request carries its
 /// protocol version and client capabilities in `params._meta`.
@@ -252,7 +279,7 @@ async fn serve_stdio(backend: Backend<'_>) -> anyhow::Result<()> {
             continue;
         }
         let response = match serde_json::from_str::<Value>(&line) {
-            Ok(message) => respond(backend, message).await,
+            Ok(message) => dispatch(backend, message).await,
             Err(error) => {
                 if interactive {
                     eprintln!("\n{}", interactive_parse_hint(line.trim()));
@@ -341,7 +368,50 @@ fn interactive_parse_hint(input: &str) -> String {
 }
 
 pub async fn handle_message(service: &Foremerge, message: Value) -> Option<Value> {
-    respond(Backend::Ready(service), message).await
+    dispatch(Backend::Ready(service), message).await
+}
+
+/// Answer one line from the client: a single message, or a JSON-RPC batch.
+///
+/// Only revision 2025-03-26 has batches, and it requires a server to receive
+/// them, so answering that revision means accepting them. They are accepted
+/// whatever revision was negotiated: a later client never sends one, and
+/// refusing one gains nothing. `initialize` may not travel in a batch, so it is
+/// refused there. Entries are answered in order, and a batch holding only
+/// notifications gets no reply at all, as JSON-RPC 2.0 requires.
+async fn dispatch(backend: Backend<'_>, message: Value) -> Option<Value> {
+    let Value::Array(batch) = message else {
+        return respond(backend, message).await;
+    };
+    if batch.is_empty() {
+        return Some(jsonrpc_error(
+            Value::Null,
+            -32600,
+            "invalid request: empty batch",
+        ));
+    }
+    let mut responses = Vec::new();
+    for entry in batch {
+        let response = if !entry.is_object() {
+            Some(jsonrpc_error(
+                Value::Null,
+                -32600,
+                "invalid request: a batch entry must be an object",
+            ))
+        } else if entry.get("method").and_then(Value::as_str) == Some("initialize") {
+            entry.get("id").cloned().map(|id| {
+                jsonrpc_error(
+                    id,
+                    -32600,
+                    "invalid request: initialize must not be part of a batch",
+                )
+            })
+        } else {
+            respond(backend, entry).await
+        };
+        responses.extend(response);
+    }
+    (!responses.is_empty()).then_some(Value::Array(responses))
 }
 
 /// Which MCP revision one request is served under.
@@ -457,11 +527,11 @@ async fn respond(backend: Backend<'_>, message: Value) -> Option<Value> {
     };
     let result = match (era, method) {
         (Era::Legacy, "initialize") => {
-            // Answered with the legacy revision, whatever was asked for.
-            // Echoing a client's newer version back is how the mismatch
-            // started.
+            // The client's revision when this server serves it as a legacy
+            // session, the newest legacy one otherwise. Echoing a revision it
+            // cannot serve, 2026-07-28 above all, is how the mismatch started.
             Ok(json!({
-                "protocolVersion": LEGACY_PROTOCOL,
+                "protocolVersion": negotiate_protocol(&params),
                 "capabilities": capabilities(),
                 "serverInfo": server_info(),
                 "instructions": instructions(backend)
@@ -1621,6 +1691,93 @@ mod tests {
                 .unwrap()
                 .starts_with("agt_")
         );
+    }
+
+    fn initialize_request(protocol_version: Value) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": protocol_version,
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "1" }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn initialize_answers_each_servable_revision_with_that_revision() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let unavailable = unsupported_schema();
+        for backend in [Backend::Ready(&service), Backend::Unavailable(&unavailable)] {
+            for requested in LEGACY_PROTOCOLS {
+                let initialized = respond(backend, initialize_request(json!(requested)))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    initialized["result"]["protocolVersion"], requested,
+                    "{initialized}"
+                );
+            }
+        }
+    }
+
+    /// `2026-07-28` is the case that matters: echoing it is how the server once
+    /// claimed a revision it could not hold up.
+    #[tokio::test]
+    async fn initialize_answers_anything_else_with_the_newest_legacy_revision() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        for requested in [
+            json!(MODERN_PROTOCOL),
+            json!("2024-10-07"),
+            json!("2099-01-01"),
+            json!(" 2025-06-18"),
+            json!(""),
+            json!(20241105),
+            Value::Null,
+        ] {
+            let initialized = respond(
+                Backend::Ready(&service),
+                initialize_request(requested.clone()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                initialized["result"]["protocolVersion"], LEGACY_PROTOCOL,
+                "asked for {requested}: {initialized}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_batch_is_answered_entry_by_entry_and_notifications_get_nothing() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let answered = handle_message(
+            &service,
+            json!([
+                { "jsonrpc": "2.0", "method": "notifications/initialized" },
+                { "jsonrpc": "2.0", "id": "a", "method": "ping" },
+                { "jsonrpc": "2.0", "id": 3, "method": "no/such/method" },
+                initialize_request(json!("2025-03-26"))
+            ]),
+        )
+        .await
+        .unwrap();
+        let responses = answered.as_array().expect("a batch answers with an array");
+        assert_eq!(responses.len(), 3, "{answered}");
+        assert_eq!(responses[0]["id"], "a");
+        assert_eq!(responses[1]["error"]["code"], -32601);
+        assert_eq!(responses[2]["error"]["code"], -32600);
+
+        let only_notifications = handle_message(
+            &service,
+            json!([{ "jsonrpc": "2.0", "method": "notifications/initialized" }]),
+        )
+        .await;
+        assert!(only_notifications.is_none());
+        let empty = handle_message(&service, json!([])).await.unwrap();
+        assert_eq!(empty["error"]["code"], -32600);
     }
 
     const LEDGER: &str = "/repo/.git/foremerge/state.sqlite3";

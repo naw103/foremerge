@@ -9,6 +9,15 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+### Fixed
+
+- `initialize` now answers with the revision the client asked for when the
+  server can serve it (`2025-11-25`, `2025-06-18`, `2025-03-26` or
+  `2024-11-05`), instead of always answering `2025-11-25`. A client on an older
+  revision no longer finds no version in common and disconnects. Any other
+  request, `2026-07-28` included, still gets `2025-11-25`. The server now also
+  accepts JSON-RPC batches, which `2025-03-26` requires a server to receive.
+
 ## [0.6.0] - 2026-10-24
 
 This is a minor version because Foremerge no longer migrates a ledger as a side
