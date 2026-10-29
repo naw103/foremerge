@@ -463,6 +463,10 @@ line. That guidance is suppressed when stdin is a pipe, so client sessions are
 unaffected. To read coordination state as a person, use the CLI instead, for
 example `foremerge status` or `foremerge agent list`.
 
+A line that parses but is not a JSON-RPC 2.0 request, such as `{}` or a message
+with `"jsonrpc": "1.0"`, is answered with `-32600`, alone or inside a batch.
+Only a valid notification gets no reply.
+
 The server implements MCP protocol revisions `2026-07-28` and `2025-11-25`, and
 decides which one applies for each request rather than for the whole process.
 Notifications have no response in either.
