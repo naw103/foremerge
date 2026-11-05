@@ -332,7 +332,8 @@ decision, appends `conflict.overridden`, and changes affected high findings to
 A session that ends without closing its intent leaves it open for good. Such
 an intent is treated as stopped when it is in `INTENT`, `CLAIMED`,
 `IN_PROGRESS` or `PROVISIONAL`, holds no live claim, and its agent has made no
-Foremerge call for two hours. That is the test `work adopt` applies.
+call that writes to the record for two hours. Reads and validation runs do not
+count. That is the test `work adopt` applies.
 
 A finding below `HIGH` against stopped work is not recorded as a conflict.
 The stopped intent is still listed in `related_work`, marked with
@@ -340,9 +341,17 @@ The stopped intent is still listed in `related_work`, marked with
 `HIGH` findings are recorded as before, because they gate acceptance and an
 agent that was only quiet must not lose that protection.
 
-Nothing is lost if the agent was only quiet. Its next call, or an adoption,
-records the findings between its open intents and the live work around them
-that were skipped while it was silent.
+The findings skipped while the agent was silent, between its open intents and
+the live work around them, are recorded by the first of these: the agent's next
+call that writes to the record, another agent adopting the work, or a check
+that validates it. A pair stays unrecorded while the other side is also
+stopped.
+
+If none of these happens, those findings are never recorded, and nothing
+records that they were skipped. The stopped intent stays listed in
+`related_work`, but nothing requires anyone to act on it. The rule relies on
+severity: everything below `HIGH` counts as safe to skip, so a finding rated too
+low is skipped with the rest.
 
 ## Known limitations
 
