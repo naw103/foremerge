@@ -1568,14 +1568,15 @@ fn pad(value: &str, width: usize) -> String {
 }
 
 /// Render the status report as one readable plain-text screen with aligned
-/// columns and no color codes.
+/// columns and no color codes. Where the report left entries out, the screen
+/// says how many and which command lists them.
 fn render_status(report: &StatusReport) -> String {
     let mut out = String::new();
 
     // Counting silent agents as active is how `status` came to claim eleven
     // agents were working when most had been dead for hours.
-    let live = report.agents.iter().filter(|agent| !agent.stale).count();
-    let stale = report.agents.len() - live;
+    let stale = report.stale_agents;
+    let live = (report.agents.len() + report.agents_omitted).saturating_sub(stale);
     out.push_str(&format!(
         "Agents ({live} active{})\n",
         if stale > 0 {
@@ -1603,6 +1604,12 @@ fn render_status(report: &StatusReport) -> String {
             ));
         }
     }
+    push_omitted(
+        &mut out,
+        "  ",
+        report.agents_omitted,
+        "foremerge agent list",
+    );
 
     let intent_total: usize = report.intents.iter().map(|group| group.count).sum();
     out.push_str(&format!("\nIntents ({intent_total})\n"));
@@ -1610,7 +1617,14 @@ fn render_status(report: &StatusReport) -> String {
         out.push_str("  none\n");
     }
     for group in &report.intents {
-        out.push_str(&format!("  {} ({})\n", group.status, group.count));
+        if group.stranded > 0 {
+            out.push_str(&format!(
+                "  {} ({}, {} stranded)\n",
+                group.status, group.count, group.stranded
+            ));
+        } else {
+            out.push_str(&format!("  {} ({})\n", group.status, group.count));
+        }
         let name_width = column_width(
             group
                 .intents
@@ -1619,15 +1633,25 @@ fn render_status(report: &StatusReport) -> String {
         );
         for intent in &group.intents {
             out.push_str(&format!(
-                "    {}  {}  {}\n",
+                "    {}  {}  {}{}\n",
                 intent.id,
                 pad(&intent.agent_name, name_width),
+                if intent.stranded { "[stranded] " } else { "" },
                 intent.summary,
             ));
         }
+        push_omitted(
+            &mut out,
+            "    ",
+            group.omitted,
+            &format!("foremerge work query --status {}", group.status),
+        );
     }
 
-    out.push_str(&format!("\nActive claims ({})\n", report.claims.len()));
+    out.push_str(&format!(
+        "\nActive claims ({})\n",
+        report.claims.len() + report.claims_omitted
+    ));
     if report.claims.is_empty() {
         out.push_str("  none\n");
     } else {
@@ -1648,12 +1672,21 @@ fn render_status(report: &StatusReport) -> String {
             ));
         }
     }
+    push_omitted(
+        &mut out,
+        "  ",
+        report.claims_omitted,
+        "foremerge work query",
+    );
 
     out.push_str(&format!(
         "\nConflicts ({} open or coordinating)\n",
-        report.conflicts.len()
+        report.conflicts.len() + report.conflicts_omitted + report.conflicts_on_stopped_work
     ));
-    if report.conflicts.is_empty() {
+    if report.conflicts.is_empty()
+        && report.conflicts_omitted == 0
+        && report.conflicts_on_stopped_work == 0
+    {
         out.push_str("  none\n");
     }
     for conflict in &report.conflicts {
@@ -1670,18 +1703,24 @@ fn render_status(report: &StatusReport) -> String {
             conflict.source_agent_name.as_deref(),
             conflict.source_intent_id.as_deref(),
         ) {
-            out.push_str(&format!(
-                "    {} ({}): {}\n",
-                agent_name,
-                intent_id,
-                join_or_dash(&conflict.source_scopes),
-            ));
+            out.push_str(&format!("    {agent_name} ({intent_id})\n"));
         }
         out.push_str(&format!(
-            "    {} ({}): {}\n",
-            conflict.target_agent_name,
-            conflict.target_intent_id,
-            join_or_dash(&conflict.target_scopes),
+            "    {} ({})\n",
+            conflict.target_agent_name, conflict.target_intent_id,
+        ));
+    }
+    push_omitted(
+        &mut out,
+        "  ",
+        report.conflicts_omitted,
+        "foremerge conflicts list --status OPEN",
+    );
+    if report.conflicts_on_stopped_work > 0 {
+        out.push_str(&format!(
+            "  {} below HIGH involve only work that has stopped or finished; \
+             closing or adopting that work clears them\n",
+            report.conflicts_on_stopped_work
         ));
     }
 
@@ -1694,8 +1733,13 @@ fn render_status(report: &StatusReport) -> String {
         if group.ids.is_empty() {
             out.push_str(&format!("  {} ({})\n", group.status, group.count));
         } else {
+            let more = if group.omitted > 0 {
+                format!(" and {} more", group.omitted)
+            } else {
+                String::new()
+            };
             out.push_str(&format!(
-                "  {} ({}): {}\n",
+                "  {} ({}): {}{more}\n",
                 group.status,
                 group.count,
                 group.ids.join(", ")
@@ -1706,16 +1750,15 @@ fn render_status(report: &StatusReport) -> String {
     out
 }
 
-fn column_width<'a>(values: impl Iterator<Item = &'a str>) -> usize {
-    values.map(str::len).max().unwrap_or(0)
+/// Say how many entries a capped section left out, and where to find them.
+fn push_omitted(out: &mut String, indent: &str, omitted: usize, command: &str) {
+    if omitted > 0 {
+        out.push_str(&format!("{indent}... and {omitted} more: {command}\n"));
+    }
 }
 
-fn join_or_dash(values: &[String]) -> String {
-    if values.is_empty() {
-        "-".to_string()
-    } else {
-        values.join(", ")
-    }
+fn column_width<'a>(values: impl Iterator<Item = &'a str>) -> usize {
+    values.map(str::len).max().unwrap_or(0)
 }
 
 fn emit(json_mode: bool, value: Value) -> Result<()> {

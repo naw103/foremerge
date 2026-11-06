@@ -1273,7 +1273,9 @@ pub fn tool_catalog() -> Vec<Value> {
         tool(
             "status",
             "Read coordinator status",
-            "Get the whole coordination picture in one call, taken from a single consistent read: active agents, all intents grouped by lifecycle status, unexpired claims, OPEN or COORDINATING conflicts with both parties named, and ChangeSets grouped by status. Read-only and takes no arguments. Use it to orient at the start of a session or before choosing work. Use query_work to filter by agent, status or scope, and get_intent or get_changeset for full detail on one item.",
+            &format!(
+                "Get the whole coordination picture in one call, taken from a single consistent read: active agents, intents grouped by lifecycle status, unexpired claims, the OPEN or COORDINATING conflicts someone can act on with both parties named, and ChangeSets grouped by status. Every count is complete, but each list stops at {STATUS_LIST_LIMIT} entries and says how many it left out; COMMITTED and DISCARDED intents are counted, not listed, and conflicts below HIGH between work that has stopped are counted, not listed. Read-only and takes no arguments. Use it to orient at the start of a session or before choosing work. Use query_work to filter by agent, status or scope, and get_intent or get_changeset for full detail on one item, including each party's scopes."
+            ),
             json!({}),
             &[],
             true,
