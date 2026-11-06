@@ -9,6 +9,26 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+### Changed
+
+- `status` (CLI, MCP and `GET /v1/status`) now stays small however much history
+  the ledger holds. A repository that had run agents for two months got 5.5 MB
+  back, and over MCP that answer travels twice, once as text and once as
+  `structuredContent`. Most of it was conflicts between agents that had long
+  since stopped, each repeating both intents' full scope lists. Now every count
+  is complete, but each list holds at most 25 entries, work whose agent is
+  still there first, and says how many it left out. COMMITTED and DISCARDED
+  intents are counted, not listed. Conflicts below HIGH where no party's agent
+  is still there are counted in `conflicts_on_stopped_work` instead of listed.
+  HIGH conflicts are always listed first. On that repository's ledger the
+  answer is now 24 KB.
+- A listed conflict in `status` no longer carries `source_scopes` and
+  `target_scopes`. It still names both agents and intents and the overlapping
+  `scope`; `get_intent` has each party's scopes. A client that reads those two
+  fields needs to read them from `get_intent` instead.
+- `stranded` in `status` now uses the same test as `foremerge work adopt`, so
+  an intent still in INTENT whose agent has gone silent reads as stranded too.
+
 ### Fixed
 
 - `initialize` now answers with the revision the client asked for when the

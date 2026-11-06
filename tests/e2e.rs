@@ -1368,8 +1368,15 @@ fn status_renders_one_screen_in_text_and_a_typed_json_envelope() {
     ];
     parties.sort_unstable();
     assert_eq!(parties, ["paypal-status-agent", "stripe-status-agent"]);
-    assert_eq!(conflict["source_scopes"][0], "symbol:PaymentService");
-    assert_eq!(conflict["target_scopes"][0], "symbol:PaymentService");
+    assert_eq!(conflict["scope"]["key"], "PaymentService");
+    assert!(
+        conflict.get("source_scopes").is_none() && conflict.get("target_scopes").is_none(),
+        "status names each party and the overlap; get_intent has their scopes: {conflict}"
+    );
+    assert_eq!(data["conflicts_on_stopped_work"], 0);
+    assert_eq!(data["conflicts_omitted"], 0);
+    assert_eq!(data["agents_omitted"], 0);
+    assert_eq!(data["stale_agents"], 0);
     assert_eq!(data["changesets"][0]["status"], "PROVISIONAL");
     assert_eq!(data["changesets"][0]["count"], 1);
     assert_eq!(data["changesets"][0]["ids"][0], changeset_id);
