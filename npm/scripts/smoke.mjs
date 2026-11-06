@@ -22,7 +22,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { nativeTarget, writeAssets } from './fixtures.mjs';
+import { nativeTarget, packedEntry, writeAssets } from './fixtures.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const launcherManifest = JSON.parse(fs.readFileSync(path.join(here, '..', 'foremerge', 'package.json'), 'utf8'));
@@ -65,7 +65,7 @@ const platformPackage = Object.keys(launcherManifest.optionalDependencies).find(
 const packed = [platformPackage, 'foremerge'].map((name) => {
   // An untagged build is private so it can never be published. npm still
   // packs and installs it, which is all this needs.
-  const [info] = JSON.parse(npm(['pack', '--json', '--pack-destination', tarballs, path.join(out, name)]));
+  const info = packedEntry(npm(['pack', '--json', '--pack-destination', tarballs, path.join(out, name)]));
   return path.join(tarballs, info.filename);
 });
 npm(['install', '--global', '--prefix', prefix, '--no-audit', '--no-fund', ...packed], { stdio: 'inherit' });
