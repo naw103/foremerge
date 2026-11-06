@@ -118,6 +118,20 @@ for the non-terminal ones. All sections come from a single read transaction,
 so they describe one consistent moment. The default output is aligned plain
 text; `--json` returns the same typed report in the standard envelope.
 
+`status` stays small however long the ledger's history grows. Every count is
+complete, but each list holds at most 25 entries and the report says how many
+it left out (`agents_omitted`, `claims_omitted`, `conflicts_omitted`, and
+`omitted` on each intent and ChangeSet group). The intent groups share one
+limit: work whose agent is still calling Foremerge, or that holds a live
+claim, comes first, then the rest newest first. COMMITTED and DISCARDED
+intents are counted and not listed. Conflicts are listed when they are HIGH or
+when an unfinished party's agent is still there; those below HIGH where no
+party is attended are only counted, in `conflicts_on_stopped_work`, and clear
+when that work is closed with `discard_work`. A listed conflict names each party's agent and intent and the
+overlapping scope; `get_intent` has each party's full scope list. Use
+`query_work`, `list_agents`, and `foremerge conflicts list` for the entries a
+list left out.
+
 ## Agent registration
 
 Registration input contains:
