@@ -277,6 +277,9 @@ fm_curl "$FOREMERGE_URL/v1/status" | jq .
 `GET /v1/intents/{id}` and `GET /v1/status` each carry an `as_of_event`, the
 latest event `seq` read in the same transaction as their open conflicts.
 
+`GET /v1/status` caps each list at 25 entries and counts what it leaves out.
+[The protocol](protocol.md) describes which entries each section keeps.
+
 ## Check conflicts
 
 Check an existing intent:

@@ -18,6 +18,10 @@ use tokio::process::Command;
 use uuid::Uuid;
 
 const TERMINAL_INTENT_STATES: &[&str] = &["ACCEPTED", "COMMITTED", "DISCARDED"];
+/// Intent states that are history rather than work: the status screen counts
+/// them and lists none. ACCEPTED is not among them, because accepted work still
+/// waits for someone to land it and record the commit.
+const FINISHED_INTENT_STATES: &[&str] = &["COMMITTED", "DISCARDED"];
 const MAX_OUTPUT_BYTES: usize = 16 * 1024;
 /// Lifecycle-ordered intent statuses used to group the status screen.
 const INTENT_STATUS_ORDER: &[&str] = &[
@@ -3026,57 +3030,63 @@ impl Foremerge {
 
     /// One consistent snapshot answering "what are my agents doing right now":
     /// active agents, intents grouped by lifecycle status, unexpired claims,
-    /// OPEN or COORDINATING conflicts with both parties named, and ChangeSets
-    /// grouped by status. Every section is read inside a single transaction so
-    /// the sections cannot disagree with each other.
+    /// actionable OPEN or COORDINATING conflicts with both parties named, and
+    /// ChangeSets grouped by status. Every section is read inside a single
+    /// transaction so the sections cannot disagree with each other, and every
+    /// list is capped at [`STATUS_LIST_LIMIT`] with the remainder counted.
     pub fn status(&self) -> Result<StatusReport> {
         let mut conn = self.store.lock()?;
         let tx = conn.transaction()?;
         let now = Utc::now().to_rfc3339();
 
-        let mut statement = tx.prepare("SELECT id FROM agents ORDER BY registered_at, id")?;
-        let agent_ids = statement
-            .query_map([], |row| row.get::<_, String>(0))?
+        // Agents: one row each, with the liveness every later section needs.
+        struct AgentRow {
+            agent: StatusAgent,
+            active: bool,
+        }
+        let mut statement = tx.prepare(
+            "SELECT id, name, model, worktree, status, last_seen_at
+             FROM agents ORDER BY registered_at, id",
+        )?;
+        let agent_rows = statement
+            .query_map([], |row| {
+                let last_seen_at: String = row.get(5)?;
+                Ok(AgentRow {
+                    agent: StatusAgent {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        model: row.get(2)?,
+                        worktree: row.get(3)?,
+                        stale: is_stale(&last_seen_at),
+                        last_seen_at,
+                    },
+                    active: row.get::<_, String>(4)? == "ACTIVE",
+                })
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(statement);
-        let mut agent_names = std::collections::HashMap::new();
-        let mut agents = Vec::new();
-        for agent_id in &agent_ids {
-            let agent = agent_by_id(&tx, agent_id)?;
-            agent_names.insert(agent.id.clone(), agent.name.clone());
-            if agent.status == "ACTIVE" {
-                // `last_seen_at` is maintained on the row but not carried on
-                // `Agent`, so it is read directly rather than widening a struct
-                // every other caller would then have to fill in.
-                let last_seen_at: String = tx.query_row(
-                    "SELECT last_seen_at FROM agents WHERE id = ?1",
-                    [&agent.id],
-                    |row| row.get(0),
-                )?;
-                let stale = is_stale(&last_seen_at);
-                agents.push(StatusAgent {
-                    id: agent.id,
-                    name: agent.name,
-                    model: agent.model,
-                    worktree: agent.worktree,
-                    last_seen_at,
-                    stale,
-                });
-            }
-        }
-        let stale_agents: std::collections::HashSet<String> = agents
+        let agent_names: HashMap<String, String> = agent_rows
             .iter()
-            .filter(|agent| agent.stale)
-            .map(|agent| agent.id.clone())
+            .map(|row| (row.agent.id.clone(), row.agent.name.clone()))
             .collect();
-        let mut statement = tx.prepare(
-            "SELECT DISTINCT intent_id FROM claims
-             WHERE status = 'ACTIVE' AND lease_expires_at > ?1",
-        )?;
-        let intents_with_live_claims: std::collections::HashSet<String> = statement
-            .query_map([Utc::now().to_rfc3339()], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
-        drop(statement);
+        // The owner test `owner_stopped_since` applies: an agent that is not
+        // ACTIVE, or is ACTIVE but silent, is not coming back for its work.
+        let gone_agents: HashSet<String> = agent_rows
+            .iter()
+            .filter(|row| !row.active || row.agent.stale)
+            .map(|row| row.agent.id.clone())
+            .collect();
+        let (mut listed_agents, mut silent_agents): (Vec<StatusAgent>, Vec<StatusAgent>) =
+            agent_rows
+                .into_iter()
+                .filter(|row| row.active)
+                .map(|row| row.agent)
+                .partition(|agent| !agent.stale);
+        silent_agents.sort_by(|a, b| b.last_seen_at.cmp(&a.last_seen_at));
+        let stale_agents = silent_agents.len();
+        listed_agents.extend(silent_agents);
+        let (agents, agents_omitted) = cap(listed_agents);
+
         let agent_name = |agent_id: &str| {
             agent_names
                 .get(agent_id)
@@ -3084,51 +3094,136 @@ impl Foremerge {
                 .unwrap_or_else(|| agent_id.to_string())
         };
 
-        let mut statement = tx.prepare("SELECT id FROM intents ORDER BY created_at, id")?;
-        let intent_ids = statement
-            .query_map([], |row| row.get::<_, String>(0))?
+        let mut statement = tx.prepare(
+            "SELECT DISTINCT intent_id FROM claims
+             WHERE status = 'ACTIVE' AND lease_expires_at > ?1",
+        )?;
+        let intents_with_live_claims: HashSet<String> = statement
+            .query_map([&now], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<HashSet<_>>>()?;
+        drop(statement);
+
+        // Intents: only what the report shows. Loading each whole intent, with
+        // its scopes and metadata, cost a query apiece and was then discarded.
+        struct IntentRow {
+            id: String,
+            agent_id: String,
+            summary: String,
+            status: String,
+        }
+        let mut statement = tx
+            .prepare("SELECT id, agent_id, summary, status FROM intents ORDER BY created_at, id")?;
+        let intent_rows = statement
+            .query_map([], |row| {
+                Ok(IntentRow {
+                    id: row.get(0)?,
+                    agent_id: row.get(1)?,
+                    summary: row.get(2)?,
+                    status: row.get(3)?,
+                })
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(statement);
-        let mut all_intents = Vec::new();
-        for intent_id in &intent_ids {
-            all_intents.push(intent_by_id(&tx, intent_id)?);
-        }
+        // Stranded is `owner_stopped_since` computed in memory: an adoptable
+        // state, no live claim, and an owner that is not coming back.
+        let is_stranded = |intent: &IntentRow| {
+            ADOPTABLE_INTENT_STATES.contains(&intent.status.as_str())
+                && gone_agents.contains(&intent.agent_id)
+                && !intents_with_live_claims.contains(&intent.id)
+        };
+        // Whether somebody is still there for this intent: its agent is still
+        // calling Foremerge, or it holds a live claim. Work nobody is present
+        // for is history the report counts, whatever state it stopped in.
+        let is_attended = |intent: &IntentRow| {
+            !gone_agents.contains(&intent.agent_id) || intents_with_live_claims.contains(&intent.id)
+        };
+        let live_intents: HashSet<&str> = intent_rows
+            .iter()
+            .filter(|intent| {
+                !FINISHED_INTENT_STATES.contains(&intent.status.as_str()) && is_attended(intent)
+            })
+            .map(|intent| intent.id.as_str())
+            .collect();
+
         let mut intent_statuses: Vec<String> = INTENT_STATUS_ORDER
             .iter()
             .map(|value| value.to_string())
             .collect();
-        for intent in &all_intents {
+        for intent in &intent_rows {
             if !intent_statuses.contains(&intent.status) {
                 intent_statuses.push(intent.status.clone());
             }
         }
+        // One limit for the whole section, not one per group: a ledger whose
+        // every session has ended would otherwise still list a full page of
+        // stopped work in each of five groups. Attended work is chosen first,
+        // in lifecycle order and oldest first, then unattended work newest
+        // first: the session that stopped an hour ago is likelier to matter
+        // than one from August.
+        let status_rank = |status: &str| {
+            intent_statuses
+                .iter()
+                .position(|value| value == status)
+                .unwrap_or(usize::MAX)
+        };
+        let mut candidates: Vec<(usize, &IntentRow)> = intent_rows
+            .iter()
+            .enumerate()
+            .filter(|(_, intent)| !FINISHED_INTENT_STATES.contains(&intent.status.as_str()))
+            .collect();
+        candidates.sort_by_key(|(position, intent)| {
+            if live_intents.contains(intent.id.as_str()) {
+                (0, status_rank(&intent.status), *position as isize)
+            } else {
+                (1, 0, -(*position as isize))
+            }
+        });
+        let listed_ids: HashSet<&str> = candidates
+            .iter()
+            .take(STATUS_LIST_LIMIT)
+            .map(|(_, intent)| intent.id.as_str())
+            .collect();
+
         let mut intents = Vec::new();
         for status in &intent_statuses {
-            let members: Vec<StatusIntent> = all_intents
+            // Filtering keeps the order the section chose in.
+            let members: Vec<(usize, &IntentRow)> = candidates
+                .iter()
+                .filter(|(_, intent)| intent.status == *status)
+                .copied()
+                .collect();
+            let count = intent_rows
                 .iter()
                 .filter(|intent| intent.status == *status)
-                .map(|intent| StatusIntent {
+                .count();
+            if count == 0 {
+                continue;
+            }
+            let stranded = intent_rows
+                .iter()
+                .filter(|intent| intent.status == *status && is_stranded(intent))
+                .count();
+            let listed: Vec<StatusIntent> = members
+                .iter()
+                .filter(|(_, intent)| listed_ids.contains(intent.id.as_str()))
+                .map(|(_, intent)| StatusIntent {
                     id: intent.id.clone(),
                     agent_id: intent.agent_id.clone(),
                     agent_name: agent_name(&intent.agent_id),
                     summary: intent.summary.clone(),
-                    // An intent that says IN_PROGRESS while nothing holds it
-                    // and nobody is home is not in progress. Reporting it as
-                    // though it were is how a finished run still looked busy.
-                    stranded: matches!(
-                        intent.status.as_str(),
-                        "CLAIMED" | "IN_PROGRESS" | "PROVISIONAL"
-                    ) && stale_agents.contains(&intent.agent_id)
-                        && !intents_with_live_claims.contains(&intent.id),
+                    stranded: is_stranded(intent),
                 })
                 .collect();
-            if !members.is_empty() {
-                intents.push(StatusIntentGroup {
-                    status: status.clone(),
-                    count: members.len(),
-                    intents: members,
-                });
-            }
+            // Finished groups list nobody and leave nobody out: they are
+            // counted, never listed.
+            let omitted = members.len() - listed.len();
+            intents.push(StatusIntentGroup {
+                status: status.clone(),
+                count,
+                stranded,
+                intents: listed,
+                omitted,
+            });
         }
 
         let mut statement = tx.prepare(
@@ -3136,7 +3231,7 @@ impl Foremerge {
              FROM claims WHERE status = 'ACTIVE' AND lease_expires_at > ?1
              ORDER BY created_at, id",
         )?;
-        let mut claims = statement
+        let claims = statement
             .query_map([&now], |row| {
                 Ok(StatusClaim {
                     id: row.get(0)?,
@@ -3149,51 +3244,64 @@ impl Foremerge {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(statement);
+        let (mut claims, claims_omitted) = cap(claims);
         for claim in &mut claims {
             claim.agent_name = agent_name(&claim.agent_id);
         }
 
         let mut statement = tx.prepare(
-            "SELECT id FROM conflicts WHERE status IN ('OPEN', 'COORDINATING')
+            "SELECT id, kind, severity, status, scope_json, source_intent_id, target_intent_id
+             FROM conflicts WHERE status IN ('OPEN', 'COORDINATING')
              ORDER BY detected_at DESC, id",
         )?;
-        let conflict_ids = statement
-            .query_map([], |row| row.get::<_, String>(0))?
+        let open_conflicts = statement
+            .query_map([], |row| {
+                Ok(StatusConflict {
+                    id: row.get(0)?,
+                    kind: row.get(1)?,
+                    severity: row.get(2)?,
+                    status: row.get(3)?,
+                    scope: from_json(row.get::<_, String>(4)?)?,
+                    source_intent_id: row.get(5)?,
+                    source_agent_name: None,
+                    target_intent_id: row.get(6)?,
+                    target_agent_name: String::new(),
+                })
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(statement);
-        let scope_strings = |intent: &Intent| {
-            intent
-                .scopes
-                .iter()
-                .map(|claim| format!("{}:{}", claim.scope.kind, claim.scope.key))
-                .collect::<Vec<_>>()
-        };
-        let mut conflicts = Vec::new();
-        for conflict_id in &conflict_ids {
-            let conflict = conflict_by_id(&tx, conflict_id)?;
-            let source = conflict
-                .source_intent_id
-                .as_deref()
-                .map(|intent_id| intent_by_id(&tx, intent_id))
-                .transpose()?;
-            let target = intent_by_id(&tx, &conflict.target_intent_id)?;
-            conflicts.push(StatusConflict {
-                id: conflict.id,
-                kind: conflict.kind,
-                severity: conflict.severity,
-                status: conflict.status,
-                scope: conflict.scope,
-                source_intent_id: conflict.source_intent_id,
-                source_agent_name: source.as_ref().map(|intent| agent_name(&intent.agent_id)),
-                source_scopes: source.as_ref().map(scope_strings).unwrap_or_default(),
-                target_intent_id: conflict.target_intent_id,
-                target_agent_name: agent_name(&target.agent_id),
-                target_scopes: scope_strings(&target),
+        // A conflict below HIGH between pieces of work nobody is there for
+        // asks nobody to do anything. HIGH ones gate acceptance and are always
+        // listed, the same line `records_against_stopped_work` draws.
+        let (mut actionable, stopped): (Vec<StatusConflict>, Vec<StatusConflict>) =
+            open_conflicts.into_iter().partition(|conflict| {
+                conflict.severity == "HIGH"
+                    || live_intents.contains(conflict.target_intent_id.as_str())
+                    || conflict
+                        .source_intent_id
+                        .as_deref()
+                        .is_some_and(|id| live_intents.contains(id))
             });
+        // Stable, so recency order holds within each severity.
+        actionable.sort_by_key(|conflict| conflict.severity != "HIGH");
+        let (mut conflicts, conflicts_omitted) = cap(actionable);
+        let intent_owner: HashMap<&str, &str> = intent_rows
+            .iter()
+            .map(|intent| (intent.id.as_str(), intent.agent_id.as_str()))
+            .collect();
+        let owner_name = |intent_id: &str| {
+            intent_owner
+                .get(intent_id)
+                .map(|agent_id| agent_name(agent_id))
+                .unwrap_or_else(|| intent_id.to_string())
+        };
+        for conflict in &mut conflicts {
+            conflict.source_agent_name = conflict.source_intent_id.as_deref().map(owner_name);
+            conflict.target_agent_name = owner_name(&conflict.target_intent_id);
         }
 
         let mut statement =
-            tx.prepare("SELECT id, status FROM changesets ORDER BY created_at, id")?;
+            tx.prepare("SELECT id, status FROM changesets ORDER BY created_at DESC, id DESC")?;
         let changeset_rows = statement
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -3220,14 +3328,16 @@ impl Foremerge {
                 continue;
             }
             let count = ids.len();
+            let (ids, omitted) = if NONTERMINAL_CHANGESET_STATES.contains(&status.as_str()) {
+                cap(ids)
+            } else {
+                (Vec::new(), 0)
+            };
             changesets.push(StatusChangeSetGroup {
                 status: status.clone(),
                 count,
-                ids: if NONTERMINAL_CHANGESET_STATES.contains(&status.as_str()) {
-                    ids
-                } else {
-                    Vec::new()
-                },
+                ids,
+                omitted,
             });
         }
         let as_of_event = latest_event_seq(&tx)?;
@@ -3235,13 +3345,25 @@ impl Foremerge {
 
         Ok(StatusReport {
             agents,
+            agents_omitted,
+            stale_agents,
             intents,
             claims,
+            claims_omitted,
             conflicts,
+            conflicts_on_stopped_work: stopped.len(),
+            conflicts_omitted,
             changesets,
             as_of_event,
         })
     }
+}
+
+/// Keep the first [`STATUS_LIST_LIMIT`] entries and count the rest.
+fn cap<T>(mut entries: Vec<T>) -> (Vec<T>, usize) {
+    let omitted = entries.len().saturating_sub(STATUS_LIST_LIMIT);
+    entries.truncate(STATUS_LIST_LIMIT);
+    (entries, omitted)
 }
 
 /// Run synchronous SQLite, filesystem, or Git work away from Tokio's async
@@ -4639,6 +4761,258 @@ mod tests {
             projected, rescuer.id,
             "the graph must name the new owner, not the agent that died"
         );
+    }
+
+    /// GPTree's `status` answered with 5.5 MB: every intent it had ever seen,
+    /// and thousands of advisory conflicts between agents long gone, each
+    /// repeating both parties' scope lists. This builds the same shape in
+    /// miniature, one live agent among many stopped ones, and checks what the
+    /// report keeps, what it counts, and that the counts add up to the ledger.
+    #[test]
+    fn status_lists_live_work_first_caps_every_list_and_counts_the_rest() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let publish = |agent: &Agent, summary: &str, scope: Scope, operation: Operation| {
+            service
+                .publish_intent(PublishIntentRequest {
+                    agent_id: agent.id.clone(),
+                    task: "status-size".into(),
+                    summary: summary.into(),
+                    rationale: None,
+                    scopes: vec![ScopeClaim::new(scope, operation)],
+                    depends_on: vec![],
+                    metadata: json!({}),
+                })
+                .unwrap()
+                .intent
+        };
+
+        // Thirty agents edit one shared file while all of them are live, so
+        // every pair records an advisory conflict.
+        let shared = Scope::new("file", "src/shared.rs");
+        let crowd: Vec<(Agent, Intent)> = (0..30)
+            .map(|index| {
+                let agent = register(&service, &format!("agent-{index:02}"));
+                let intent = publish(
+                    &agent,
+                    &format!("Edit the shared module, part {index}"),
+                    shared.clone(),
+                    Operation::Modify,
+                );
+                (agent, intent)
+            })
+            .collect();
+        // And one HIGH pair, a replacement against an extension.
+        let replacer = register(&service, "replacer");
+        let replacing = publish(
+            &replacer,
+            "Replace the Ledger type",
+            Scope::new("symbol", "Ledger"),
+            Operation::Replace,
+        );
+        let extender = register(&service, "extender");
+        let extending = publish(
+            &extender,
+            "Extend the Ledger type",
+            Scope::new("symbol", "Ledger"),
+            Operation::Extend,
+        );
+        // One piece of work is closed, which dismisses its conflicts.
+        let (closer, closed) = &crowd[29];
+        service
+            .discard_work(&closer.id, &closed.id, "not needed")
+            .unwrap();
+
+        // Agent-00 starts its work; everyone else stops calling Foremerge.
+        let (live_agent, live_intent) = &crowd[0];
+        service
+            .claim_work(ClaimWorkRequest {
+                agent_id: live_agent.id.clone(),
+                intent_id: live_intent.id.clone(),
+                scopes: vec![shared.clone()],
+                reason: None,
+                lease_seconds: 3600,
+            })
+            .unwrap();
+        service.start_work(&live_agent.id, &live_intent.id).unwrap();
+        let long_ago =
+            (Utc::now() - chrono::Duration::seconds(AGENT_STALE_AFTER_SECONDS * 2)).to_rfc3339();
+        {
+            let conn = service.store.lock().unwrap();
+            conn.execute(
+                "UPDATE agents SET last_seen_at = ?1 WHERE id != ?2",
+                params![long_ago, live_agent.id],
+            )
+            .unwrap();
+        }
+
+        let report = service.status().unwrap();
+        let count = |sql: &str, args: &[&str]| -> usize {
+            let conn = service.store.lock().unwrap();
+            conn.query_row(sql, rusqlite::params_from_iter(args), |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap() as usize
+        };
+        let open_conflicts = count(
+            "SELECT COUNT(*) FROM conflicts WHERE status IN ('OPEN', 'COORDINATING')",
+            &[],
+        );
+        let on_live_intent = count(
+            "SELECT COUNT(*) FROM conflicts WHERE status IN ('OPEN', 'COORDINATING')
+             AND (source_intent_id = ?1 OR target_intent_id = ?1)",
+            &[&live_intent.id],
+        );
+        let active_agents = count("SELECT COUNT(*) FROM agents WHERE status = 'ACTIVE'", &[]);
+        // Every pair among the 29 open crowd intents is in conflict, so the
+        // live intent meets each of the other 28 at least once, and the two
+        // stopped sides of the crowd outnumber it by far.
+        assert!(on_live_intent >= 28, "{on_live_intent}");
+        assert!(open_conflicts > on_live_intent + 1 + STATUS_LIST_LIMIT);
+
+        assert_eq!(report.claims.len(), 1);
+        assert_eq!(report.claims_omitted, 0);
+
+        // Agents: the live one first, the rest counted.
+        assert_eq!(report.agents.len(), STATUS_LIST_LIMIT);
+        assert_eq!(report.agents[0].id, live_agent.id);
+        assert!(!report.agents[0].stale);
+        assert_eq!(report.agents.len() + report.agents_omitted, active_agents);
+        assert_eq!(report.stale_agents, active_agents - 1);
+
+        // Intents: one limit for the section. The attended intent is listed
+        // although its group comes later, the stopped ones fill the rest
+        // newest first, and the closed one is counted but not listed.
+        let group = |status: &str| {
+            report
+                .intents
+                .iter()
+                .find(|group| group.status == status)
+                .unwrap_or_else(|| panic!("no {status} group: {report:?}"))
+        };
+        let working = group("IN_PROGRESS");
+        assert_eq!(working.count, 1);
+        assert_eq!(working.stranded, 0);
+        assert_eq!(working.intents.len(), 1);
+        assert_eq!(working.intents[0].id, live_intent.id);
+        assert!(!working.intents[0].stranded);
+        let open = group("INTENT");
+        assert_eq!(open.count, 30);
+        assert_eq!(open.stranded, 30, "every silent owner's intent is stranded");
+        assert_eq!(open.intents.len(), STATUS_LIST_LIMIT - 1);
+        assert_eq!(open.omitted, 30 - (STATUS_LIST_LIMIT - 1));
+        assert!(open.intents.iter().all(|intent| intent.stranded));
+        assert_eq!(
+            open.intents[0].id, extending.id,
+            "stopped work is listed newest first"
+        );
+        let listed: usize = report.intents.iter().map(|g| g.intents.len()).sum();
+        assert_eq!(listed, STATUS_LIST_LIMIT, "one limit across all groups");
+        let discarded = group("DISCARDED");
+        assert_eq!(discarded.count, 1);
+        assert!(discarded.intents.is_empty());
+        assert_eq!(discarded.omitted, 0);
+
+        // Conflicts: the HIGH pair first although nobody is working on it,
+        // then the advisories that involve the live intent, capped. The
+        // advisories between two stopped agents are only counted.
+        let first = &report.conflicts[0];
+        assert_eq!(first.severity, "HIGH");
+        let mut parties = [
+            first.source_intent_id.clone().unwrap(),
+            first.target_intent_id.clone(),
+        ];
+        parties.sort();
+        let mut high_pair = [replacing.id.clone(), extending.id.clone()];
+        high_pair.sort();
+        assert_eq!(parties, high_pair);
+        assert_eq!(report.conflicts.len(), STATUS_LIST_LIMIT);
+        for conflict in &report.conflicts[1..] {
+            assert_eq!(conflict.severity, "MEDIUM");
+            assert!(
+                conflict.target_intent_id == live_intent.id
+                    || conflict.source_intent_id.as_deref() == Some(live_intent.id.as_str()),
+                "a listed advisory must involve live work: {conflict:?}"
+            );
+        }
+        // Listed or omitted: the HIGH pair and everything on the live intent.
+        assert_eq!(
+            report.conflicts.len() + report.conflicts_omitted,
+            1 + on_live_intent
+        );
+        assert_eq!(
+            report.conflicts_on_stopped_work,
+            open_conflicts - 1 - on_live_intent
+        );
+        assert_eq!(
+            report.conflicts.len() + report.conflicts_omitted + report.conflicts_on_stopped_work,
+            open_conflicts,
+            "every open conflict is listed or counted exactly once"
+        );
+
+        // The full scope lists stay in get_intent.
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.contains("source_scopes"), "{json}");
+        assert!(!json.contains("target_scopes"), "{json}");
+    }
+
+    /// The control: when the owners come back, the same ledger lists their
+    /// conflicts again and counts none as stopped. Nothing was dismissed.
+    #[test]
+    fn status_lists_conflicts_again_once_their_agents_are_live() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let first = register(&service, "first");
+        let second = register(&service, "second");
+        for agent in [&first, &second] {
+            service
+                .publish_intent(PublishIntentRequest {
+                    agent_id: agent.id.clone(),
+                    task: "status-size".into(),
+                    summary: "Edit the shared module".into(),
+                    rationale: None,
+                    scopes: vec![ScopeClaim::new(
+                        Scope::new("file", "src/shared.rs"),
+                        Operation::Modify,
+                    )],
+                    depends_on: vec![],
+                    metadata: json!({}),
+                })
+                .unwrap();
+        }
+        let set_last_seen = |when: String| {
+            let conn = service.store.lock().unwrap();
+            conn.execute("UPDATE agents SET last_seen_at = ?1", params![when])
+                .unwrap();
+        };
+
+        set_last_seen(
+            (Utc::now() - chrono::Duration::seconds(AGENT_STALE_AFTER_SECONDS * 2)).to_rfc3339(),
+        );
+        let open_conflicts: usize = {
+            let conn = service.store.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM conflicts WHERE status = 'OPEN'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap() as usize
+        };
+        assert!(open_conflicts > 0);
+        let stopped = service.status().unwrap();
+        assert!(stopped.conflicts.is_empty(), "{stopped:?}");
+        assert_eq!(stopped.conflicts_on_stopped_work, open_conflicts);
+
+        set_last_seen(Utc::now().to_rfc3339());
+        let live = service.status().unwrap();
+        assert_eq!(live.conflicts.len(), open_conflicts, "{live:?}");
+        assert_eq!(live.conflicts_on_stopped_work, 0);
+        for conflict in &live.conflicts {
+            let mut parties = [
+                conflict.source_agent_name.clone().unwrap_or_default(),
+                conflict.target_agent_name.clone(),
+            ];
+            parties.sort();
+            assert_eq!(parties, ["first", "second"], "both parties are named");
+        }
     }
 
     fn register(service: &Foremerge, name: &str) -> Agent {

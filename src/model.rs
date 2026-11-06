@@ -1008,20 +1008,58 @@ pub struct DoctorError {
     pub message: String,
 }
 
+/// The most entries `status` lists in any one section or ChangeSet group. The
+/// intent groups share one limit between them.
+///
+/// `status` is the orientation call an agent makes at the start of a session,
+/// so its answer has to fit in that agent's context. Without a bound it grows
+/// with the ledger's whole history: a repository that had run agents for two
+/// months returned 5.5 MB, nearly all of it conflicts between agents that had
+/// long since stopped. Counts are never capped, and every section that leaves
+/// entries out says how many, so nothing disappears without a trace.
+pub const STATUS_LIST_LIMIT: usize = 25;
+
 /// One consistent snapshot answering "what are my agents doing right now".
 /// Produced by `foremerge status`; every section comes from the same read
-/// transaction so the sections cannot disagree with each other.
+/// transaction so the sections cannot disagree with each other. Each list is
+/// capped at [`STATUS_LIST_LIMIT`]; `query_work`, `list_agents` and the
+/// conflict list give the rest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusReport {
-    /// Registered agents whose status is ACTIVE, oldest first.
+    /// Registered agents whose status is ACTIVE: those still calling
+    /// Foremerge first, oldest first, then silent ones, most recently seen
+    /// first.
     pub agents: Vec<StatusAgent>,
+    /// ACTIVE agents left out of `agents` by the limit.
+    #[serde(default)]
+    pub agents_omitted: usize,
+    /// ACTIVE agents silent for longer than [`AGENT_STALE_AFTER_SECONDS`],
+    /// listed or not.
+    #[serde(default)]
+    pub stale_agents: usize,
     /// All intents grouped by lifecycle status in lifecycle order; empty
-    /// groups are omitted.
+    /// groups are omitted. COMMITTED and DISCARDED groups carry the count only.
     pub intents: Vec<StatusIntentGroup>,
     /// ACTIVE claims whose lease has not expired, oldest first.
     pub claims: Vec<StatusClaim>,
-    /// OPEN or COORDINATING conflicts, most recently detected first.
+    /// Live claims left out of `claims` by the limit.
+    #[serde(default)]
+    pub claims_omitted: usize,
+    /// OPEN or COORDINATING conflicts that someone can act on: HIGH ones,
+    /// which gate acceptance, and any with an unfinished party whose agent is
+    /// still calling Foremerge or that holds a live claim. HIGH first, then
+    /// most recently detected first.
     pub conflicts: Vec<StatusConflict>,
+    /// OPEN or COORDINATING conflicts below HIGH where no party is attended:
+    /// each one's agent has gone silent with no live claim, or its work is
+    /// finished. Nobody is there to act on them, so they are counted, not
+    /// listed. They clear when that work is closed with `discard_work`, and
+    /// come back into the list when its agent returns or someone adopts it.
+    #[serde(default)]
+    pub conflicts_on_stopped_work: usize,
+    /// Actionable conflicts left out of `conflicts` by the limit.
+    #[serde(default)]
+    pub conflicts_omitted: usize,
     /// All ChangeSets grouped by status in lifecycle order; empty groups are
     /// omitted.
     pub changesets: Vec<StatusChangeSetGroup>,
@@ -1058,8 +1096,20 @@ pub const AGENT_STALE_AFTER_SECONDS: i64 = 2 * 60 * 60;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusIntentGroup {
     pub status: String,
+    /// Every intent in this status, listed or not.
     pub count: usize,
+    /// How many of them are stranded.
+    #[serde(default)]
+    pub stranded: usize,
+    /// At most [`STATUS_LIST_LIMIT`] across all groups together, chosen with
+    /// attended work first (its agent still calling Foremerge, or a live
+    /// claim), in lifecycle order and oldest first, then the rest newest first.
+    /// Empty for COMMITTED and DISCARDED, which are history rather than work.
     pub intents: Vec<StatusIntent>,
+    /// Intents left out of `intents` by the limit. Zero for COMMITTED and
+    /// DISCARDED, whose members are never listed.
+    #[serde(default)]
+    pub omitted: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1068,9 +1118,10 @@ pub struct StatusIntent {
     pub agent_id: String,
     pub agent_name: String,
     pub summary: String,
-    /// Set when this intent is in a working state but nothing is holding it:
-    /// every claim has lapsed and its agent has gone silent. The work is not
-    /// progressing and can be taken over with `foremerge work adopt`.
+    /// Set when this intent is open but nothing is holding it: it is in a
+    /// state `foremerge work adopt` accepts, every claim has lapsed and its
+    /// agent has gone silent. The work is not progressing and can be taken
+    /// over. It is the same test adoption applies.
     #[serde(default)]
     pub stranded: bool,
 }
@@ -1087,6 +1138,11 @@ pub struct StatusClaim {
 
 /// A durable conflict that still needs coordination, with both parties named
 /// so a human can act without further lookups.
+///
+/// Each party's full scope list is not repeated here: an intent in many
+/// conflicts would carry it into every one of them, which is how most of a
+/// 5.5 MB status answer was made. `scope` is the overlap; `get_intent` has the
+/// rest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusConflict {
     pub id: String,
@@ -1098,10 +1154,8 @@ pub struct StatusConflict {
     /// Absent when the conflict has no recorded source intent.
     pub source_intent_id: Option<String>,
     pub source_agent_name: Option<String>,
-    pub source_scopes: Vec<String>,
     pub target_intent_id: String,
     pub target_agent_name: String,
-    pub target_scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1109,8 +1163,11 @@ pub struct StatusChangeSetGroup {
     pub status: String,
     pub count: usize,
     /// Populated for non-terminal statuses (PROVISIONAL, VALIDATED, and
-    /// ACCEPTED); terminal groups carry the count only.
+    /// ACCEPTED), newest first; terminal groups carry the count only.
     pub ids: Vec<String>,
+    /// Ids left out of `ids` by the limit. Zero for terminal groups.
+    #[serde(default)]
+    pub omitted: usize,
 }
 
 pub fn empty_object() -> Value {
