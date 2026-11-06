@@ -13,7 +13,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { TARGETS, writeAssets } from './fixtures.mjs';
+import { TARGETS, packedEntry, writeAssets } from './fixtures.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const build = path.join(here, 'build.mjs');
@@ -70,7 +70,7 @@ test('a fixture release builds six private packages with the release binaries', 
     }
 
     // What npm would publish: the binaries and the package's own files only.
-    const [packed] = JSON.parse(execFileSync('npm', ['pack', '--dry-run', '--json', dir], { encoding: 'utf8' }));
+    const packed = packedEntry(execFileSync('npm', ['pack', '--dry-run', '--json', dir], { encoding: 'utf8' }));
     assert.deepEqual(
       packed.files.map((file) => file.path).sort(),
       ['LICENSE', 'README.md', `bin/fmg${suffix}`, `bin/foremerge${suffix}`, 'package.json'],
@@ -80,7 +80,7 @@ test('a fixture release builds six private packages with the release binaries', 
   const built = JSON.parse(fs.readFileSync(path.join(out, 'foremerge', 'package.json'), 'utf8'));
   assert.equal(built.private, true);
   assert.deepEqual(built.optionalDependencies, launcher.optionalDependencies);
-  const [packed] = JSON.parse(execFileSync('npm', ['pack', '--dry-run', '--json', path.join(out, 'foremerge')], { encoding: 'utf8' }));
+  const packed = packedEntry(execFileSync('npm', ['pack', '--dry-run', '--json', path.join(out, 'foremerge')], { encoding: 'utf8' }));
   assert.deepEqual(
     packed.files.map((file) => file.path).sort(),
     ['LICENSE', 'README.md', 'bin/fmg.js', 'bin/foremerge.js', 'lib/run.js', 'package.json'],
@@ -253,7 +253,7 @@ test('release mode packs the launcher from the tag, not from ignored files besid
   const out = path.join(repo, 'out');
   const result = spawnSync(process.execPath, [tagged, '--assets', assets, '--out', out], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
-  const [packed] = JSON.parse(execFileSync('npm', ['pack', '--dry-run', '--json', path.join(out, 'foremerge')], { encoding: 'utf8' }));
+  const packed = packedEntry(execFileSync('npm', ['pack', '--dry-run', '--json', path.join(out, 'foremerge')], { encoding: 'utf8' }));
   assert.deepEqual(
     packed.files.map((file) => file.path).sort(),
     ['LICENSE', 'README.md', 'bin/fmg.js', 'bin/foremerge.js', 'lib/run.js', 'package.json'],

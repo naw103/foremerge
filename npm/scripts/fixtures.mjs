@@ -20,6 +20,18 @@ export const TARGETS = [
   { triple: 'x86_64-pc-windows-msvc', platform: 'win32', arch: 'x64' },
 ];
 
+// The entry `npm pack --json` reports for the one package it packed. npm 11
+// and earlier print an array of entries; npm 12 prints an object keyed by
+// package name.
+export function packedEntry(output) {
+  const parsed = JSON.parse(output);
+  const entries = Array.isArray(parsed) ? parsed : Object.values(parsed);
+  if (entries.length !== 1) {
+    throw new Error(`npm pack reported ${entries.length} packages, expected one: ${output}`);
+  }
+  return entries[0];
+}
+
 export function nativeTarget() {
   return TARGETS.find((t) => t.platform === process.platform && t.arch === process.arch);
 }
