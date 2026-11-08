@@ -20,7 +20,8 @@ changes when they are called out here with a migration note.
   still there first, and says how many it left out. COMMITTED and DISCARDED
   intents are counted, not listed. Conflicts below HIGH where no party's agent
   is still there are counted in `conflicts_on_stopped_work` instead of listed.
-  HIGH conflicts are always listed first. On that repository's ledger the
+  HIGH conflicts are never counted as stopped work and are listed first, but
+  the 25-entry limit still applies to them. On that repository's ledger the
   answer is now 24 KB.
 - A listed conflict in `status` no longer carries `source_scopes` and
   `target_scopes`. It still names both agents and intents and the overlapping

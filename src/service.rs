@@ -3271,8 +3271,11 @@ impl Foremerge {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(statement);
         // A conflict below HIGH between pieces of work nobody is there for
-        // asks nobody to do anything. HIGH ones gate acceptance and are always
-        // listed, the same line `records_against_stopped_work` draws.
+        // asks nobody to do anything. HIGH ones gate acceptance, so they are
+        // never counted as stopped work, the same line
+        // `records_against_stopped_work` draws. They sort first, but the list
+        // is still capped: past the limit, HIGH ones are counted in
+        // `conflicts_omitted` like the rest.
         let (mut actionable, stopped): (Vec<StatusConflict>, Vec<StatusConflict>) =
             open_conflicts.into_iter().partition(|conflict| {
                 conflict.severity == "HIGH"

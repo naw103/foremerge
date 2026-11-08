@@ -1057,7 +1057,8 @@ pub struct StatusReport {
     /// come back into the list when its agent returns or someone adopts it.
     #[serde(default)]
     pub conflicts_on_stopped_work: usize,
-    /// Actionable conflicts left out of `conflicts` by the limit.
+    /// Actionable conflicts left out of `conflicts` by the limit, HIGH ones
+    /// included when there are more of them than the limit.
     #[serde(default)]
     pub conflicts_omitted: usize,
     /// All ChangeSets grouped by status in lifecycle order; empty groups are
