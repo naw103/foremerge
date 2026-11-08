@@ -19,6 +19,8 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const build = path.join(here, 'build.mjs');
 const launcher = JSON.parse(fs.readFileSync(path.join(here, '..', 'foremerge', 'package.json'), 'utf8'));
 const version = launcher.version;
+// The version, as a regular expression that matches it literally.
+const versionPattern = version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const PACKAGES = {
   'aarch64-apple-darwin': { name: 'foremerge-darwin-arm64', os: 'darwin', cpu: 'arm64' },
@@ -142,7 +144,7 @@ test('a version the launcher does not pin is refused', () => {
   writeAssets(assets, '999.0.0');
   const result = runBuild(['--allow-untagged', '--version', '999.0.0', '--assets', assets, '--out', path.join(root, 'out')]);
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, new RegExp(`npm/foremerge/package.json is ${version.replace(/\./g, '\\.')}, building 999\\.0\\.0`));
+  assert.match(result.stderr, new RegExp(`npm/foremerge/package.json is ${versionPattern}, building 999\\.0\\.0`));
 });
 
 test('--out refuses a directory this script did not write, and leaves it alone', () => {
@@ -239,7 +241,7 @@ test('release mode refuses uncommitted changes and commits after the tag', () =>
   git('commit', '--quiet', '-am', 'after the tag');
   result = buildTagged();
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, new RegExp(`HEAD is [0-9a-f]{12}, but v${version.replace(/\./g, '\\.')} is`));
+  assert.match(result.stderr, new RegExp(`HEAD is [0-9a-f]{12}, but v${versionPattern} is`));
 });
 
 test('release mode packs the launcher from the tag, not from ignored files beside it', () => {
