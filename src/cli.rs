@@ -1710,11 +1710,13 @@ fn render_status(report: &StatusReport) -> String {
             conflict.target_agent_name, conflict.target_intent_id,
         ));
     }
+    // The list holds OPEN and COORDINATING conflicts, and `conflicts list`
+    // takes one status, so the hint names both.
     push_omitted(
         &mut out,
         "  ",
         report.conflicts_omitted,
-        "foremerge conflicts list --status OPEN",
+        "foremerge conflicts list --status OPEN, and --status COORDINATING",
     );
     if report.conflicts_on_stopped_work > 0 {
         out.push_str(&format!(
@@ -2009,5 +2011,86 @@ mod tests {
                 "`work {command} --scope` help should say an operation is refused, got: {help}"
             );
         }
+    }
+
+    /// `status` lists OPEN and COORDINATING conflicts under one limit, so the
+    /// command it prints for the overflow has to reach both. Twenty-six HIGH
+    /// conflicts, all being coordinated: 25 are listed, and the one left out
+    /// is found only by `--status COORDINATING`, which an OPEN-only hint would
+    /// never have pointed to.
+    #[test]
+    fn the_status_overflow_hint_reaches_coordinating_conflicts() {
+        let service = Foremerge::new(Store::in_memory().unwrap());
+        let register = |name: &str| {
+            service
+                .register_agent(RegisterAgentRequest {
+                    name: name.into(),
+                    model: None,
+                    capabilities: vec![],
+                    worktree: None,
+                })
+                .unwrap()
+                .agent
+        };
+        let publish = |agent: &Agent, key: &str, operation: Operation| {
+            service
+                .publish_intent(PublishIntentRequest {
+                    agent_id: agent.id.clone(),
+                    task: "status-overflow".into(),
+                    summary: format!("{operation:?} {key}"),
+                    rationale: None,
+                    scopes: vec![ScopeClaim::new(Scope::new("symbol", key), operation)],
+                    depends_on: vec![],
+                    metadata: json!({}),
+                })
+                .unwrap();
+        };
+        let replacer = register("replacer");
+        let extender = register("extender");
+        let pairs = STATUS_LIST_LIMIT + 1;
+        for index in 0..pairs {
+            let key = format!("Ledger{index:02}");
+            publish(&replacer, &key, Operation::Replace);
+            publish(&extender, &key, Operation::Extend);
+        }
+        let open = service.list_conflicts(Some("OPEN")).unwrap();
+        assert_eq!(open.len(), pairs);
+        assert!(open.iter().all(|conflict| conflict.severity == "HIGH"));
+        for conflict in &open {
+            service
+                .coordinate_with_agent(CoordinateRequest {
+                    from_agent_id: extender.id.clone(),
+                    to_agent_id: replacer.id.clone(),
+                    message: "Which of us goes first?".into(),
+                    conflict_id: Some(conflict.id.clone()),
+                    changeset_id: None,
+                })
+                .unwrap();
+        }
+
+        let report = service.status().unwrap();
+        assert_eq!(report.conflicts.len(), STATUS_LIST_LIMIT);
+        assert_eq!(report.conflicts_omitted, 1, "HIGH ones are capped too");
+        assert!(
+            report
+                .conflicts
+                .iter()
+                .all(|conflict| conflict.status == "COORDINATING")
+        );
+
+        let screen = render_status(&report);
+        let hint = screen
+            .lines()
+            .find(|line| line.contains("... and 1 more:"))
+            .unwrap_or_else(|| panic!("no overflow line in:\n{screen}"));
+        assert!(hint.contains("--status OPEN"), "{hint}");
+        assert!(hint.contains("--status COORDINATING"), "{hint}");
+        // What the hint names finds every conflict the list holds or left out.
+        let listed: usize = ["OPEN", "COORDINATING"]
+            .into_iter()
+            .map(|status| service.list_conflicts(Some(status)).unwrap().len())
+            .sum();
+        assert_eq!(listed, report.conflicts.len() + report.conflicts_omitted);
+        assert!(service.list_conflicts(Some("OPEN")).unwrap().is_empty());
     }
 }

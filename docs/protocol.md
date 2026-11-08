@@ -125,12 +125,13 @@ it left out (`agents_omitted`, `claims_omitted`, `conflicts_omitted`, and
 limit: work whose agent is still calling Foremerge, or that holds a live
 claim, comes first, then the rest newest first. COMMITTED and DISCARDED
 intents are counted and not listed. Conflicts are listed when they are HIGH or
-when an unfinished party's agent is still there; those below HIGH where no
-party is attended are only counted, in `conflicts_on_stopped_work`, and clear
-when that work is closed with `discard_work`. A listed conflict names each party's agent and intent and the
+when an unfinished party's agent is still there, HIGH ones first, within the
+same limit; those below HIGH where no party is attended are only counted, in
+`conflicts_on_stopped_work`, and clear when that work is closed with
+`discard_work`. A listed conflict names each party's agent and intent and the
 overlapping scope; `get_intent` has each party's full scope list. Use
-`query_work`, `list_agents`, and `foremerge conflicts list` for the entries a
-list left out.
+`query_work`, `list_agents`, and `foremerge conflicts list --status OPEN` and
+`--status COORDINATING` for the entries a list left out.
 
 ## Agent registration
 
