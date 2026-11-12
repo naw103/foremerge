@@ -43,6 +43,13 @@ changes when they are called out here with a migration note.
   silently as though it were a notification, and one with `"jsonrpc": "1.0"`
   was served. Only a valid notification goes unanswered now.
 
+### Security
+
+- Updated rustls-webpki to 0.103.16 (RUSTSEC-2026-0382), webpki-roots to
+  1.0.11 (RUSTSEC-2026-0381) and tokio to 1.54.1 (RUSTSEC-2026-0386). The
+  lockfile's quinn-proto, which no build compiles, is at 0.11.19 so
+  `cargo audit` no longer reports its advisories.
+
 ## [0.6.0] - 2026-10-24
 
 This is a minor version because Foremerge no longer migrates a ledger as a side
