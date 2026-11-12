@@ -9,6 +9,17 @@ changes when they are called out here with a migration note.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-12
+
+This is a minor version because a conflict listed in `status` no longer carries
+`source_scopes` and `target_scopes`. A client that read them should read each
+party's scopes from `get_intent` instead; nothing else in the CLI, the JSON API
+or the MCP tool surface changes shape. The ledger schema is unchanged since
+0.4.0, so upgrading from 0.4.x, 0.5.x or 0.6.0 needs no migration. This release
+also keeps `status` small on a ledger with months of history, answers
+`initialize` in the earlier MCP revision a client asked for, accepts JSON-RPC
+batches, and updates dependencies to clear the open audit advisories.
+
 ### Changed
 
 - `status` (CLI, MCP and `GET /v1/status`) now stays small however much history
@@ -1151,7 +1162,8 @@ schema 4 store rather than migrate it backwards.
 - Apache-2.0 licensing, contribution and security policies, CI, release checks,
   limitations, roadmap, and a reproducible benchmark specification.
 
-[Unreleased]: https://github.com/naw103/foremerge/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/naw103/foremerge/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/naw103/foremerge/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/naw103/foremerge/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/naw103/foremerge/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/naw103/foremerge/compare/v0.4.3...v0.5.0
