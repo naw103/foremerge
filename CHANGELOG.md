@@ -63,11 +63,13 @@ update can fix. One advisory remains, in the bundled SQLite; see Security.
   `cargo audit` no longer reports its advisories.
 - Not fixed in this release: RUSTSEC-2026-0459, in the SQLite that
   libsqlite3-sys 0.35 bundles. A process can read stale memory when it opens a
-  database together with a crafted `-wal` file of a different page size, so a
-  ledger is exposed only to someone who can already write to the repository's
-  `.git` directory. The fix is in libsqlite3-sys 0.39, which needs Rust 1.88
-  and comes only with rusqlite 0.41, which needs Rust 1.89, above the 1.85
-  minimum. It will follow with a raised minimum Rust version.
+  database together with a crafted `-wal` file of a different page size, so
+  exposure needs a database and its `-wal` file supplied or modified by a less
+  trusted party: a ledger named with `--database`, a backup restored with
+  `ledger reset --from`, or a repository's own ledger if someone else can
+  write to its `.git` directory. The fix is in libsqlite3-sys 0.39, which
+  needs Rust 1.88 and comes only with rusqlite 0.41, which needs Rust 1.89,
+  above the 1.85 minimum. It will follow with a raised minimum Rust version.
 
 ## [0.6.0] - 2026-10-24
 
