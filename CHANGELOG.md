@@ -18,7 +18,8 @@ or the MCP tool surface changes shape. The ledger schema is unchanged since
 0.4.0, so upgrading from 0.4.x, 0.5.x or 0.6.0 needs no migration. This release
 also keeps `status` small on a ledger with months of history, answers
 `initialize` in the earlier MCP revision a client asked for, accepts JSON-RPC
-batches, and updates dependencies to clear the open audit advisories.
+batches, and updates dependencies to clear every audit advisory a lockfile
+update can fix. One advisory remains, in the bundled SQLite; see Security.
 
 ### Changed
 
@@ -60,6 +61,13 @@ batches, and updates dependencies to clear the open audit advisories.
   1.0.11 (RUSTSEC-2026-0381) and tokio to 1.54.1 (RUSTSEC-2026-0386). The
   lockfile's quinn-proto, which no build compiles, is at 0.11.19 so
   `cargo audit` no longer reports its advisories.
+- Not fixed in this release: RUSTSEC-2026-0459, in the SQLite that
+  libsqlite3-sys 0.35 bundles. A process can read stale memory when it opens a
+  database together with a crafted `-wal` file of a different page size, so a
+  ledger is exposed only to someone who can already write to the repository's
+  `.git` directory. The fix is in libsqlite3-sys 0.39, which needs Rust 1.88
+  and comes only with rusqlite 0.41, which needs Rust 1.89, above the 1.85
+  minimum. It will follow with a raised minimum Rust version.
 
 ## [0.6.0] - 2026-10-24
 
