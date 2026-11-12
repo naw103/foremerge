@@ -41,6 +41,13 @@ The current local release establishes the core thesis on one developer machine:
   every tool call rather than exiting into a closed connection, and
   `foremerge ledger reset` sets a ledger aside or restores a backup into the
   running build's schema;
+- ledger migration only when the operator runs `foremerge ledger migrate`,
+  which backs the ledger up first; every other command refuses an older ledger
+  and leaves it untouched;
+- MCP protocol revision 2026-07-28 alongside 2025-11-25, decided per request
+  ([#23](https://github.com/naw103/foremerge/issues/23)), with an older client
+  answered in the earlier revision it asked for;
+- a `status` report that stays small however much history the ledger holds;
 - a reproducible two-agent demo and benchmark specification;
 - split process liveness, bounded readiness, and authenticated paged audit;
 - immutable validation attempts and conflict-detection occurrences;
@@ -52,16 +59,6 @@ Exit criteria are behavioral: real MCP and HTTP clients must exercise the
 interfaces, two independent processes must share state from different worktrees,
 the PaymentService conflict must be detected before a code diff, and failed
 validation must leave the target Git ref unchanged.
-
-### Merged for 0.6.0 (unreleased)
-
-These are on `main` and not yet in a release:
-
-- MCP protocol revision 2026-07-28 alongside 2025-11-25, decided per request
-  ([#23](https://github.com/naw103/foremerge/issues/23));
-- ledger migration only when the operator runs `foremerge ledger migrate`,
-  which backs the ledger up first; every other command refuses an older ledger
-  and leaves it untouched.
 
 ## Next: protocol fidelity and integrations
 
